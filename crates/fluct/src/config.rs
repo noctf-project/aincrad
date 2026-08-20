@@ -29,9 +29,9 @@ impl PortRange {
 }
 
 fn parse_port_range(s: &str) -> Result<PortRange, String> {
-    let (start_str, end_str) = s
-        .split_once('-')
-        .ok_or_else(|| format!("invalid port range '{s}', expected format 'MIN-MAX' (e.g. 20000-29999)"))?;
+    let (start_str, end_str) = s.split_once('-').ok_or_else(|| {
+        format!("invalid port range '{s}', expected format 'MIN-MAX' (e.g. 20000-29999)")
+    })?;
 
     let start: u16 = start_str
         .trim()
@@ -43,7 +43,9 @@ fn parse_port_range(s: &str) -> Result<PortRange, String> {
         .map_err(|_| format!("invalid max port '{end_str}' in range '{s}'"))?;
 
     if start > end {
-        return Err(format!("min port {start} cannot be greater than max port {end}"));
+        return Err(format!(
+            "min port {start} cannot be greater than max port {end}"
+        ));
     }
 
     Ok(PortRange(start..=end))
@@ -142,8 +144,7 @@ fn parse_hostname_suffix(s: &str) -> Result<String, String> {
     if s.is_empty() {
         return Ok("".to_string());
     }
-    let domain = parse_domain_name(s)
-        .map_err(|e| format!("invalid domain name '{s}': {e}"))?;
+    let domain = parse_domain_name(s).map_err(|e| format!("invalid domain name '{s}': {e}"))?;
     Ok(domain.as_str().trim_matches('.').to_string())
 }
 

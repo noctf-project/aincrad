@@ -37,7 +37,9 @@ impl Challenge {
         R: AsyncRead + Unpin,
         W: AsyncWriteExt + Unpin,
     {
-        Self::do_solve(difficulty, bypass, rx, tx).await.unwrap_or_default()
+        Self::do_solve(difficulty, bypass, rx, tx)
+            .await
+            .unwrap_or_default()
     }
 
     async fn do_solve<R, W>(
@@ -66,9 +68,10 @@ impl Challenge {
 
         let solution = hmac_sha256(bypass, chall.to_string().as_bytes());
         if let Ok(raw) = BASE64_URL_SAFE.decode(&line)
-            && fixed_time_eq(&raw, &solution) {
-                return Ok(Some(ChallengeSolveState::Bypassed));
-            }
+            && fixed_time_eq(&raw, &solution)
+        {
+            return Ok(Some(ChallengeSolveState::Bypassed));
+        }
 
         let result = chall.check(&input);
         let result = result?;

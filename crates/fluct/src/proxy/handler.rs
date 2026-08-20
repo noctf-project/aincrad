@@ -78,17 +78,18 @@ impl Handler {
         let mut request_pow: Option<ChallengeSolveState> = None;
         let pow = spec.pow.as_ref();
         if let Some(available_at) = spec.available_at
-            && available_at > self.session.timestamp {
-                c_tx.write_all(b"== info: This challenge is not currently available ==\n")
-                    .await?;
-                if let Some(pow) = pow
-                    && pow.enable_admin_bypass
-                {
-                    request_pow = Some(ChallengeSolveState::Bypassed);
-                } else {
-                    return Ok(());
-                }
+            && available_at > self.session.timestamp
+        {
+            c_tx.write_all(b"== info: This challenge is not currently available ==\n")
+                .await?;
+            if let Some(pow) = pow
+                && pow.enable_admin_bypass
+            {
+                request_pow = Some(ChallengeSolveState::Bypassed);
+            } else {
+                return Ok(());
             }
+        }
 
         if request_pow.is_none()
             && let Some(pow) = pow
