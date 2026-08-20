@@ -44,7 +44,7 @@ async fn thread_listeners(
             for port in all {
               if port == service.config.tls_port {
                 warn!("cannot bind on port used for tls challenges :{}", port);
-                return Ok(());
+                continue;
               }
               if intended.contains(&port) && listeners.get(&port).is_none() {
                 listeners.insert(port, tokio::spawn(thread_listen(acceptor.clone(), unbind_tx.clone(), config.host.clone(), port)));

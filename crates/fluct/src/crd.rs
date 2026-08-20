@@ -12,11 +12,29 @@ where
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct EndpointTarget {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CTFRouteEndpoints {
+    #[serde(default)]
+    pub tls: Option<EndpointTarget>,
+    #[serde(default)]
+    pub tcp: Option<EndpointTarget>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CTFRouteStatus {
     #[serde(default)]
     pub observed_generation: Option<i64>,
     #[serde(default)]
-    pub endpoint: Option<String>,
+    pub endpoints: Option<CTFRouteEndpoints>,
 }
 
 pub type CTFRouteSpecPair = (String, CTFRouteSpec);
@@ -41,10 +59,11 @@ pub struct CTFRouteSpec {
     #[serde(default)]
     pub logs: bool,
     pub backend: String,
+    pub port: Option<u16>,
     pub tls: Option<CTFRouteSpecTLS>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteSpecPOW {
     #[serde(deserialize_with = "clamp_u64")]
@@ -53,22 +72,10 @@ pub struct CTFRouteSpecPOW {
     pub enable_admin_bypass: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteSpecTLS {
     pub key: Option<String>,
-}
-
-#[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
-#[kube(
-    group = "aincrad.noctf.dev",
-    version = "v1",
-    kind = "CTFPort",
-    namespaced
-)]
-#[serde(rename_all = "camelCase")]
-pub struct CTFPortSpec {
-    pub route: String,
 }
 
 #[cfg(test)]
@@ -84,6 +91,7 @@ mod tests {
         assert_eq!(spec_omitted.backend, "127.0.0.1:8080");
         assert_eq!(spec_omitted.flag, None);
         assert_eq!(spec_omitted.tls, None);
+        assert_eq!(spec_omitted.port, None);
 
         let json_empty_tag = serde_json::json!({
             "backend": "127.0.0.1:8080",
@@ -92,21 +100,17 @@ mod tests {
         let spec_empty_tag: CTFRouteSpec = serde_json::from_value(json_empty_tag).unwrap();
         assert_eq!(spec_empty_tag.tls, Some(CTFRouteSpecTLS { key: None }));
 
-        let json_false = serde_json::json!({
-            "backend": "127.0.0.1:8080",
-        });
-        let spec_false: CTFRouteSpec = serde_json::from_value(json_false).unwrap();
-        assert_eq!(spec_false.tls, None);
-
         let json_full = serde_json::json!({
             "backend": "127.0.0.1:8080",
             "flag": "my_flag",
+            "port": 20001,
             "tls": {
                 "key": "web"
             },
         });
         let spec_full: CTFRouteSpec = serde_json::from_value(json_full).unwrap();
         assert_eq!(spec_full.flag, Some("my_flag".to_string()));
+        assert_eq!(spec_full.port, Some(20001));
         assert_eq!(
             spec_full.tls,
             Some(CTFRouteSpecTLS {

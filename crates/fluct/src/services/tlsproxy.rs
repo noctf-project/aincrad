@@ -38,7 +38,7 @@ pub async fn run(service: Arc<ServiceContext>) -> Result<(), fluct::Error> {
         .with_single_cert(certs, key)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
-    let spec = format!("{}:{}", service.config.tls_host, service.config.tls_port);
+    let spec = format!("[::]:{}", service.config.tls_port);
     let listener = TcpListener::bind(&spec).await?;
     info!("Binding TLS listener to {}", spec);
 

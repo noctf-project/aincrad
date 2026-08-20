@@ -23,11 +23,18 @@ async fn main() -> Result<(), Error> {
     let _ = ring::default_provider().install_default();
 
     let config = ServiceConfig::parse();
+    config.validate()?;
+
     let shutdown = CancellationToken::new();
 
     let kubernetes_client = KubernetesClient::new().await?;
 
-    let challenges_store = RoutesStore::new(kubernetes_client.clone(), &config.hostname_suffix);
+    let challenges_store = RoutesStore::new(
+        kubernetes_client.clone(),
+        &config.hostname_suffix,
+        config.reserved_ports.clone(),
+        config.auto_ports.clone(),
+    );
     let secrets_store = SecretsStore::new(kubernetes_client.clone(), &config.secret_root);
 
     let service_context = Arc::new(ServiceContext {

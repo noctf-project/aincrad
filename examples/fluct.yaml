@@ -1,21 +1,32 @@
+# TLS Route
 apiVersion: aincrad.noctf.dev/v1
 kind: CTFRoute
 metadata:
-  name: test-challenge
+  name: test-web-route
   namespace: kubectf-challenges
 spec:
   availableAt: 2010-12-31T00:00:00.000Z
   secret: testing
   tls:
     key: any-entropy
-  backend: google.com:80
+  backend: 10.244.0.15:8080
 ---
+# TCP Route with auto-allocated port from Fluct
 apiVersion: aincrad.noctf.dev/v1
-kind: CTFPort
+kind: CTFRoute
 metadata:
-  name: '30003'
+  name: test-pwn-auto-port
   namespace: kubectf-challenges
-  annotations:
-    janitor/expires: '2025-09-14T00:30:00.000Z'
 spec:
-  route: test-challenge
+  backend: 10.244.0.16:1337
+  port: 0 
+---
+# TCP Route with fixed port
+apiVersion: aincrad.noctf.dev/v1
+kind: CTFRoute
+metadata:
+  name: test-pwn-fixed-port
+  namespace: kubectf-challenges
+spec:
+  backend: 10.244.0.17:1337
+  port: 20001

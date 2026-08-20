@@ -256,7 +256,7 @@ impl Handler {
 mod tests {
     use super::*;
     use crate::clients::KubernetesClient;
-    use crate::config::ServiceConfig;
+    use crate::config::{PortRange, ServiceConfig};
     use crate::crd::{CTFRouteSpec, CTFRouteSpecPOW};
     use crate::store::{RoutesStore, SecretsStore};
     use chrono::{Duration as ChronoDuration, Utc};
@@ -271,15 +271,20 @@ mod tests {
                 secret_root: "root".into(),
                 http_port: 8000,
                 tls_port: 4433,
-                tls_host: "[::]".into(),
                 tls_cert: "cert.pem".into(),
                 tls_key: "key.pem".into(),
                 hostname_suffix: "".into(),
                 flag_prefix: "CTF".into(),
-                tcp_namespace: None,
                 logs_dir: "./data/".into(),
+                reserved_ports: PortRange(20000..=20999),
+                auto_ports: PortRange(30000..=30999),
             },
-            challenges_store: RoutesStore::new(client.clone(), ""),
+            challenges_store: RoutesStore::new(
+                client.clone(),
+                "",
+                PortRange(20000..=20999),
+                PortRange(30000..=30999),
+            ),
             secrets_store: SecretsStore::new(client, "root"),
             shutdown: CancellationToken::new(),
         })
