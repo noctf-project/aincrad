@@ -1,0 +1,18 @@
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - $LOCATION-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/services/aincrad-fluct:latest
+      - "-f"
+      - "fluct/Dockerfile"
+      - "."
+  - id: push
+    name: "gcr.io/cloud-builders/docker"
+    args:
+      - push
+      - $LOCATION-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/services/aincrad-fluct:latest
+
+substitutions:
+  _REPOSITORY: 'infra'

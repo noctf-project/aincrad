@@ -1,0 +1,21 @@
+apiVersion: aincrad.noctf.dev/v1
+kind: CTFRoute
+metadata:
+  name: test-challenge
+  namespace: kubectf-challenges
+spec:
+  availableAt: 2010-12-31T00:00:00.000Z
+  secret: testing
+  tls: true
+  challengeDifficulty: 0
+  backend: google.com:80
+---
+apiVersion: aincrad.noctf.dev/v1
+kind: CTFPort
+metadata:
+  name: '30003'
+  namespace: kubectf-challenges
+  annotations:
+    janitor/expires: '2025-09-14T00:30:00.000Z'
+spec:
+  challengeName: test-challenge

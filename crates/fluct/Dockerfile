@@ -1,21 +1,44 @@
-FROM rust:slim-trixie AS rust-builder
+FROM rust:alpine AS builder
 
-RUN apt-get update -y && \
-  apt-get install -y pkg-config make g++ libssl-dev capnproto libmpfr-dev libgmp-dev
+RUN apk add --no-cache \
+    pkgconfig \
+    make \
+    g++ \
+    openssl-dev \
+    openssl-libs-static \
+    capnproto \
+    capnproto-dev \
+    mpfr-dev \
+    mpfr-static \
+    gmp-dev \
+    musl-dev
 
-COPY fluct/Cargo.toml Cargo.lock /build/
-RUN mkdir -p /build/src && echo "fn main() {}" > /build/src/main.rs
+ENV RUSTFLAGS="-C target-feature=+crt-static"
+
 WORKDIR /build
-RUN cargo build --release
-COPY fluct/ /build
-RUN cargo build --release
 
-FROM debian:trixie-slim
-RUN apt-get update -y && \
-  apt-get install -y libssl3 ca-certificates libmpfr6 libgmp10 && \
-  rm -rf /var/lib/apt/lists/*
+# Copy root manifest and workspace member manifests
+COPY Cargo.toml Cargo.lock ./
+COPY crates/*/Cargo.toml ./crates/
 
-COPY --from=rust-builder /build/target/release/fluct /bin
+# Inject dummy source files (both main.rs and lib.rs) for all workspace crates
+RUN for dir in crates/*; do \
+      mkdir -p "$dir/src" && \
+      echo "fn main() {}" > "$dir/src/main.rs" && \
+      touch "$dir/src/lib.rs"; \
+    done
+
+RUN cargo build --release -p fluct
+
+COPY crates/ ./crates/
+RUN touch crates/*/src/*.rs 2>/dev/null || true
+
+RUN cargo build --release -p fluct
+
+FROM alpine:latest
+RUN apk add --no-cache ca-certificates
+
+COPY --from=builder /build/target/release/fluct /bin/fluct
 
 USER 1000
 ENTRYPOINT ["/bin/fluct"]
