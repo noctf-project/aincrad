@@ -1,7 +1,7 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: ctfroute.aincrad.noctf.dev
+  name: ctfroutes.aincrad.noctf.dev
 spec:
   group: aincrad.noctf.dev
   scope: Namespaced
@@ -47,22 +47,23 @@ spec:
                   logs:
                     type: boolean
                   tls:
-                    oneOf:
-                      - type: boolean
-                      - type: string
+                    type: object
+                    properties:
+                      key:
+                        type: string
                 required: [backend]
               status:
                 type: object
                 properties:
                   observedGeneration:
                     type: integer
-                  tlsHostname:
+                  endpoint:
                     type: string
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: ctfport.aincrad.noctf.dev
+  name: ctfports.aincrad.noctf.dev
 spec:
   group: aincrad.noctf.dev
   scope: Namespaced

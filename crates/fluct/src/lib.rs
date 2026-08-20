@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 
 use chrono::{DateTime, Utc};
+use tracing::info;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub mod proto_capnp {

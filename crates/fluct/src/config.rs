@@ -4,11 +4,11 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::store::{ChallengesStore, SecretsStore};
+use crate::store::{RoutesStore, SecretsStore};
 
 pub struct ServiceContext {
     pub config: ServiceConfig,
-    pub challenges_store: ChallengesStore,
+    pub challenges_store: RoutesStore,
     pub secrets_store: SecretsStore,
     pub shutdown: CancellationToken,
 }

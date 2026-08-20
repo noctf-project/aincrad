@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use dashmap::{DashMap, DashSet};
 use fluct::Error;
 use kube::runtime::watcher::Event;
-use tokio::{join, select, sync::mpsc};
+use tokio::{select, sync::mpsc, try_join};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -49,40 +49,40 @@ struct MetadataAndSpec {
     spec: Arc<CTFRouteSpecPair>,
 }
 
-pub struct ChallengesStore {
+pub struct RoutesStore {
     client: KubernetesClient,
     hostname_suffix: String,
-    challenges: DashMap<String, MetadataAndSpec>,
+    routes: DashMap<String, MetadataAndSpec>,
     ports: DashMap<u16, String>,
-    tls_hostnames: DashMap<String, Arc<CTFRouteSpecPair>>,
+    tls_routes: DashMap<String, Arc<CTFRouteSpecPair>>,
 }
 
-impl ChallengesStore {
+impl RoutesStore {
     pub fn new(client: KubernetesClient, hostname_suffix: &str) -> Self {
         Self {
             client,
             hostname_suffix: hostname_suffix.to_owned(),
-            challenges: DashMap::new(),
+            routes: DashMap::new(),
             ports: DashMap::new(),
-            tls_hostnames: DashMap::new(),
+            tls_routes: DashMap::new(),
         }
     }
 
-    pub fn get_tls_challenge(&self, hostname: &str) -> Option<Arc<CTFRouteSpecPair>> {
+    pub fn get_tls_route(&self, hostname: &str) -> Option<Arc<CTFRouteSpecPair>> {
         let clean_host = extract_sni_hostname(hostname);
-        Some(self.tls_hostnames.get(clean_host)?.value().clone())
+        Some(self.tls_routes.get(clean_host)?.value().clone())
     }
 
     #[cfg(test)]
     fn get_observed_generation(&self, namespaced_name: &str) -> Option<i64> {
-        self.challenges
+        self.routes
             .get(namespaced_name)
             .map(|g| g.value().observed_generation)
             .flatten()
     }
 
     pub fn unsynced_status_updates(&self) -> Vec<CTFRouteStatusPair> {
-        self.challenges
+        self.routes
             .iter()
             .filter(|x| x.generation > x.observed_generation)
             .map(|x| self.get_desired_status(x.value().generation, &x.value().spec))
@@ -101,10 +101,10 @@ impl ChallengesStore {
             spec.0.to_string(),
             CTFRouteStatus {
                 observed_generation: generation,
-                tls_hostname: spec.1.tls.as_ref().map(|x| {
+                endpoint: spec.1.tls.as_ref().map(|x| {
                     format!(
                         "{}{}",
-                        derive_hostname(name, namespace, x.as_deref()),
+                        derive_hostname(name, namespace, x.key.as_deref()),
                         self.hostname_suffix
                     )
                 }),
@@ -112,7 +112,7 @@ impl ChallengesStore {
         )
     }
 
-    pub fn handle_challenge_event(&self, event: Event<CTFRoute>) -> Option<CTFRouteStatusPair> {
+    fn handle_route_event(&self, event: Event<CTFRoute>) -> Option<CTFRouteStatusPair> {
         match event {
             Event::Apply(data) | Event::InitApply(data) => {
                 let Some(name) = data.metadata.name else {
@@ -122,7 +122,7 @@ impl ChallengesStore {
                 let namespaced_name = format!("{}:{}", namespace, name);
 
                 let spec = Arc::new((namespaced_name.clone(), data.spec));
-                let prev = self.challenges.insert(
+                let prev = self.routes.insert(
                     namespaced_name.clone(),
                     MetadataAndSpec {
                         generation: data.metadata.generation,
@@ -143,23 +143,17 @@ impl ChallengesStore {
                         && prev.spec.1.tls != spec.1.tls
                     {
                         hostname_changed = true;
-                        let host = derive_hostname(&name, namespace, prev_tls.as_deref());
-                        info!(
-                            "Deregistering challenge {} hostname: {}",
-                            namespaced_name, host
-                        );
-                        self.tls_hostnames.remove(&host);
+                        let host = derive_hostname(&name, namespace, prev_tls.key.as_deref());
+                        info!("Deregistering route {} hostname: {}", namespaced_name, host);
+                        self.tls_routes.remove(&host);
                     }
                 }
                 if let Some(tls) = spec.1.tls.as_ref() {
-                    let host = derive_hostname(&name, namespace, tls.as_deref());
+                    let host = derive_hostname(&name, namespace, tls.key.as_deref());
                     if hostname_changed {
-                        info!(
-                            "Registering challenge {} hostname: {}",
-                            namespaced_name, host
-                        );
+                        info!("Registering route {} hostname: {}", namespaced_name, host);
                     }
-                    self.tls_hostnames.insert(host, spec.clone());
+                    self.tls_routes.insert(host, spec.clone());
                 }
                 Some(self.get_desired_status(data.metadata.generation, &spec))
             }
@@ -170,24 +164,21 @@ impl ChallengesStore {
                 let namespace = data.metadata.namespace.as_deref().unwrap_or("default");
                 let namespaced_name = format!("{}:{}", namespace, name);
 
-                if let Some((_, prev)) = self.challenges.remove(&namespaced_name) {
+                if let Some((_, prev)) = self.routes.remove(&namespaced_name) {
                     if let Some(tls) = &prev.spec.1.tls {
-                        let host = derive_hostname(&name, namespace, tls.as_deref());
-                        info!(
-                            "Deregistering challenge {} hostname: {}",
-                            namespaced_name, host
-                        );
-                        self.tls_hostnames.remove(&host);
+                        let host = derive_hostname(&name, namespace, tls.key.as_deref());
+                        info!("Deregistering route {} hostname: {}", namespaced_name, host);
+                        self.tls_routes.remove(&host);
                     }
                 }
-                info!("Removed challenge {}", namespaced_name);
+                info!("Removed route {}", namespaced_name);
                 None
             }
             _ => None,
         }
     }
 
-    pub fn handle_port_event(&self, event: Event<CTFPort>) {
+    fn handle_port_event(&self, event: Event<CTFPort>) {
         match event {
             Event::Apply(data) | Event::InitApply(data) => {
                 let Some(port) = get_port_from_metadata(&data.metadata.name) else {
@@ -195,12 +186,9 @@ impl ChallengesStore {
                     return;
                 };
                 let namespace = data.metadata.namespace.as_deref().unwrap_or("default");
-                let namespaced_challenge = format!("{}:{}", namespace, data.spec.route);
-                info!(
-                    "Binding port {} to challenge {}",
-                    port, namespaced_challenge
-                );
-                self.ports.insert(port, namespaced_challenge);
+                let namespaced_route = format!("{}:{}", namespace, data.spec.route);
+                info!("Binding port {} to route {}", port, namespaced_route);
+                self.ports.insert(port, namespaced_route);
             }
             Event::Delete(data) => {
                 let Some(port) = get_port_from_metadata(&data.metadata.name) else {
@@ -214,7 +202,7 @@ impl ChallengesStore {
         }
     }
 
-    async fn watch_challenges(
+    async fn run_watch_routes(
         &self,
         cancel: CancellationToken,
         mut receiver: mpsc::Receiver<Event<CTFRoute>>,
@@ -223,7 +211,7 @@ impl ChallengesStore {
         loop {
             select! {
               Some(event) = receiver.recv() => {
-                if let Some(status) = self.handle_challenge_event(event) {
+                if let Some(status) = self.handle_route_event(event) {
                     let _ = status_tx.send(status).await
                         .map_err(|err| warn!("error queueing status {:?}", err));
                 }
@@ -233,10 +221,9 @@ impl ChallengesStore {
               }
             }
         }
-        info!("Stopped watching challenges");
     }
 
-    async fn watch_ports(
+    async fn run_watch_ports(
         &self,
         cancel: CancellationToken,
         mut receiver: mpsc::Receiver<Event<CTFPort>>,
@@ -251,7 +238,6 @@ impl ChallengesStore {
               }
             }
         }
-        info!("Stopped watching ports");
     }
 
     async fn update_status(&self, full: &str, status: CTFRouteStatus) {
@@ -273,7 +259,7 @@ impl ChallengesStore {
         cancel: CancellationToken,
         mut rx: mpsc::Receiver<CTFRouteStatusPair>,
     ) -> Result<(), Error> {
-        info!("Started challenge status updater");
+        info!("started route status updater");
         let manager = self
             .client
             .get_lease_manager("fluct-routes", Duration::from_secs(15))
@@ -292,12 +278,12 @@ impl ChallengesStore {
                             continue;
                         }
                         locked = true;
-                        info!("Gained challenge status leader");
+                        info!("Gained route status leader");
                         for (full, status) in self.unsynced_status_updates() {
                             self.update_status(&full, status).await;
                         }
                     } else {
-                        info!("Lost challenge status leader");
+                        info!("Lost route status leader");
                         locked = false;
                     }
                 }
@@ -325,7 +311,7 @@ impl ChallengesStore {
 
         // Wait for the finish of the manager and get it back
         let _manager = tokio::join!(task).0.unwrap()?;
-        info!("Stopped challenge status updater");
+        info!("stopped route status updater");
 
         Ok(())
     }
@@ -337,27 +323,38 @@ impl ChallengesStore {
             .collect::<DashSet<u16>>()
     }
 
-    pub fn get_challenge_from_port(&self, port: u16) -> Option<Arc<CTFRouteSpecPair>> {
+    pub fn get_route_from_port(&self, port: u16) -> Option<Arc<CTFRouteSpecPair>> {
         let port = self.ports.get(&port)?;
-        let challenge = self.challenges.get(port.value())?;
-        Some(challenge.value().spec.clone())
+        let route = self.routes.get(port.value())?;
+        Some(route.value().spec.clone())
     }
 
     pub async fn run(&self, ctx: Arc<ServiceContext>) -> Result<(), Error> {
         let cancel = &ctx.shutdown;
         let namespace = &ctx.config.tcp_namespace;
-        let (ports_tx, ports_rx) = mpsc::channel(128);
-        let (challenges_tx, challenges_rx) = mpsc::channel(128);
+        let (port_tx, port_rx) = mpsc::channel(128);
+        let (route_tx, route_rx) = mpsc::channel(128);
         let (status_tx, status_rx) = mpsc::channel(128);
-        join!(
-            self.client
-                .watch(cancel.clone(), ports_tx, namespace.clone()),
-            self.client.watch(cancel.clone(), challenges_tx, None),
-            self.watch_ports(cancel.clone(), ports_rx),
-            self.watch_challenges(cancel.clone(), challenges_rx, status_tx),
+        try_join!(
+            log_job(
+                "kube CTFPort watcher",
+                self.client
+                    .watch(cancel.clone(), port_tx, namespace.clone())
+            ),
+            log_job(
+                "kube CTFRoute watcher",
+                self.client.watch(cancel.clone(), route_tx, None)
+            ),
+            log_job(
+                "kube CTFPort processor",
+                self.run_watch_ports(cancel.clone(), port_rx)
+            ),
+            log_job(
+                "kube CTFRoute processor",
+                self.run_watch_routes(cancel.clone(), route_rx, status_tx)
+            ),
             self.run_updates(cancel.clone(), status_rx),
-        )
-        .0;
+        )?;
         Ok(())
     }
 }
@@ -369,10 +366,20 @@ fn get_port_from_metadata(name: &Option<String>) -> Option<u16> {
     }
 }
 
+pub async fn log_job<F, R>(name: &str, task: F) -> Result<R, Error>
+where
+    F: Future<Output = R>,
+{
+    info!("started {}", name);
+    let r = task.await;
+    info!("stopped {}", name);
+    Ok(r)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{CTFPortSpec, CTFRouteSpec, CTFRouteStatus};
+    use crate::crd::{CTFPortSpec, CTFRouteSpec, CTFRouteSpecTLS, CTFRouteStatus};
     use kube::core::ObjectMeta;
 
     #[test]
@@ -422,14 +429,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_challenges_store_port_lookup() {
-        let store = ChallengesStore::new(KubernetesClient::new_dummy_for_tests(), "");
+        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), "");
 
         let spec = CTFRouteSpec {
             flag: Some("test_flag".into()),
             backend: "127.0.0.1:1337".into(),
             ..Default::default()
         };
-        store.challenges.insert(
+        store.routes.insert(
             "default:my-chal".into(),
             MetadataAndSpec {
                 generation: None,
@@ -442,16 +449,16 @@ mod tests {
         let active_ports = store.get_active_ports();
         assert!(active_ports.contains(&30000));
 
-        let found = store.get_challenge_from_port(30000);
+        let found = store.get_route_from_port(30000);
         assert!(found.is_some());
         assert_eq!(found.unwrap().0, "default:my-chal");
 
-        assert!(store.get_challenge_from_port(30001).is_none());
+        assert!(store.get_route_from_port(30001).is_none());
     }
 
     #[tokio::test]
     async fn test_handle_challenge_event_lifecycle() {
-        let store = ChallengesStore::new(KubernetesClient::new_dummy_for_tests(), "");
+        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), "");
         let chal = CTFRoute {
             metadata: ObjectMeta {
                 name: Some("test-chal".into()),
@@ -460,7 +467,9 @@ mod tests {
             },
             spec: CTFRouteSpec {
                 backend: "backend-service:80".into(),
-                tls: Some(Some("web".into())),
+                tls: Some(CTFRouteSpecTLS {
+                    key: Some("web".to_string()),
+                }),
                 ..Default::default()
             },
             status: None,
@@ -469,8 +478,8 @@ mod tests {
         let derived_host = derive_hostname("test-chal", "default", Some("web"));
 
         // Apply event
-        store.handle_challenge_event(Event::Apply(chal.clone()));
-        let fetched_chal = store.get_tls_challenge(&derived_host);
+        store.handle_route_event(Event::Apply(chal.clone()));
+        let fetched_chal = store.get_tls_route(&derived_host);
         assert!(fetched_chal.is_some());
         assert_eq!(fetched_chal.as_ref().unwrap().0, "default:test-chal");
         assert_eq!(
@@ -479,13 +488,13 @@ mod tests {
         );
 
         // Delete event
-        store.handle_challenge_event(Event::Delete(chal));
-        assert!(store.get_tls_challenge(&derived_host).is_none());
+        store.handle_route_event(Event::Delete(chal));
+        assert!(store.get_tls_route(&derived_host).is_none());
     }
 
     #[tokio::test]
     async fn test_handle_port_event_lifecycle() {
-        let store = ChallengesStore::new(KubernetesClient::new_dummy_for_tests(), "");
+        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), "");
         let port_chal = CTFPort {
             metadata: ObjectMeta {
                 name: Some("30005".into()),
@@ -506,7 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_challenge_event_update_tag() {
-        let store = ChallengesStore::new(KubernetesClient::new_dummy_for_tests(), "");
+        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), "");
         let mut chal = CTFRoute {
             metadata: ObjectMeta {
                 name: Some("test-chal".into()),
@@ -516,49 +525,53 @@ mod tests {
             },
             spec: CTFRouteSpec {
                 backend: "backend-service:80".into(),
-                tls: Some(Some("web".into())),
+                tls: Some(CTFRouteSpecTLS {
+                    key: Some("web".to_string()),
+                }),
                 ..Default::default()
             },
             status: None,
         };
 
         let host_v1 = derive_hostname("test-chal", "default", Some("web"));
-        store.handle_challenge_event(Event::Apply(chal.clone()));
+        store.handle_route_event(Event::Apply(chal.clone()));
         assert_eq!(
-            store.get_tls_challenge(&host_v1).unwrap().1.backend,
+            store.get_tls_route(&host_v1).unwrap().1.backend,
             "backend-service:80"
         );
 
         // Apply update with SAME tag (should not deregister)
         chal.metadata.generation = Some(2);
         chal.spec.backend = "backend-service:8080".into();
-        store.handle_challenge_event(Event::Apply(chal.clone()));
+        store.handle_route_event(Event::Apply(chal.clone()));
         assert_eq!(
-            store.get_tls_challenge(&host_v1).unwrap().1.backend,
+            store.get_tls_route(&host_v1).unwrap().1.backend,
             "backend-service:8080"
         );
 
         // Apply update with NEW tag (should register new first, then deregister old)
         chal.metadata.generation = Some(3);
-        chal.spec.tls = Some(Some("web2".into()));
+        chal.spec.tls = Some(CTFRouteSpecTLS {
+            key: Some("web2".to_string()),
+        });
         let host_v2 = derive_hostname("test-chal", "default", Some("web2"));
-        store.handle_challenge_event(Event::Apply(chal.clone()));
+        store.handle_route_event(Event::Apply(chal.clone()));
         assert_eq!(
-            store.get_tls_challenge(&host_v2).unwrap().1.backend,
+            store.get_tls_route(&host_v2).unwrap().1.backend,
             "backend-service:8080"
         );
-        assert!(store.get_tls_challenge(&host_v1).is_none());
+        assert!(store.get_tls_route(&host_v1).is_none());
 
         // Apply update with NO tag (should deregister old tag)
         chal.metadata.generation = Some(4);
         chal.spec.tls = None;
-        store.handle_challenge_event(Event::Apply(chal.clone()));
-        assert!(store.get_tls_challenge(&host_v2).is_none());
+        store.handle_route_event(Event::Apply(chal.clone()));
+        assert!(store.get_tls_route(&host_v2).is_none());
     }
 
     #[tokio::test]
     async fn test_handle_challenge_observed_generation() {
-        let store = ChallengesStore::new(KubernetesClient::new_dummy_for_tests(), "");
+        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), "");
         let chal = CTFRoute {
             metadata: ObjectMeta {
                 name: Some("status-chal".into()),
@@ -571,15 +584,15 @@ mod tests {
             },
             status: Some(CTFRouteStatus {
                 observed_generation: Some(42),
-                tls_hostname: Some("status-chal.example.com".into()),
+                endpoint: Some("status-chal.example.com".into()),
             }),
         };
 
-        store.handle_challenge_event(Event::Apply(chal.clone()));
+        store.handle_route_event(Event::Apply(chal.clone()));
         let observed_gen = store.get_observed_generation("default:status-chal");
         assert_eq!(observed_gen, Some(42));
 
-        store.handle_challenge_event(Event::Delete(chal));
+        store.handle_route_event(Event::Delete(chal));
         assert!(
             store
                 .get_observed_generation("default:status-chal")
@@ -589,10 +602,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_desired_status() {
-        let store = ChallengesStore::new(KubernetesClient::new_dummy_for_tests(), ".example.com");
+        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), ".example.com");
         let spec = CTFRouteSpec {
             backend: "backend:80".into(),
-            tls: Some(Some("web".into())),
+            tls: Some(CTFRouteSpecTLS {
+                key: Some("web".to_string()),
+            }),
             ..Default::default()
         };
         let pair = ("prod:my-challenge".to_string(), spec);
@@ -605,6 +620,6 @@ mod tests {
             "{}.example.com",
             derive_hostname("my-challenge", "prod", Some("web"))
         );
-        assert_eq!(status.tls_hostname, Some(expected_hostname));
+        assert_eq!(status.endpoint, Some(expected_hostname));
     }
 }

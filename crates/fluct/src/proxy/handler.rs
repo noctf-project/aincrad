@@ -26,7 +26,7 @@ use crate::{
 
 pub struct Handler {
     service: Arc<ServiceContext>,
-    challenge: Arc<CTFRouteSpecPair>,
+    route: Arc<CTFRouteSpecPair>,
     session: Session,
     flag: String,
 }
@@ -41,12 +41,12 @@ type LogMessage = (u8, Vec<u8>);
 impl Handler {
     pub fn new(
         service: Arc<ServiceContext>,
-        challenge: Arc<CTFRouteSpecPair>,
+        route: Arc<CTFRouteSpecPair>,
         addr: SocketAddr,
     ) -> Self {
         Self {
             service,
-            challenge,
+            route,
             session: Session {
                 uid: b"".to_vec(),
                 addr: addr.ip(),
@@ -67,8 +67,8 @@ impl Handler {
         W: AsyncWrite + Unpin,
     {
         let mut c_rx = BufReader::with_capacity(BUF_SIZE, c_rx);
-        let name = &self.challenge.0;
-        let spec = &self.challenge.1;
+        let name = &self.route.0;
+        let spec = &self.route.1;
 
         let secret_name = match &spec.secret {
             Some(secret) => secret,
@@ -248,7 +248,7 @@ impl Handler {
     fn get_log_filename(&self) -> String {
         let timestamp_nanos = (self.session.timestamp.timestamp() as u64) * 1_000_000_000
             + (self.session.timestamp.nanosecond() as u64);
-        format!("{}:{}", self.challenge.0, timestamp_nanos)
+        format!("{}:{}", self.route.0, timestamp_nanos)
     }
 }
 
@@ -257,8 +257,8 @@ mod tests {
     use super::*;
     use crate::clients::KubernetesClient;
     use crate::config::ServiceConfig;
-    use crate::crd::{CTFRouteSpec, CTFRouteSpecPow};
-    use crate::store::{ChallengesStore, SecretsStore};
+    use crate::crd::{CTFRouteSpec, CTFRouteSpecPOW};
+    use crate::store::{RoutesStore, SecretsStore};
     use chrono::{Duration as ChronoDuration, Utc};
     use std::net::{IpAddr, Ipv4Addr};
     use tokio::io::AsyncReadExt;
@@ -279,7 +279,7 @@ mod tests {
                 tcp_namespace: None,
                 logs_dir: "./data/".into(),
             },
-            challenges_store: ChallengesStore::new(client.clone(), ""),
+            challenges_store: RoutesStore::new(client.clone(), ""),
             secrets_store: SecretsStore::new(client, "root"),
             shutdown: CancellationToken::new(),
         })
@@ -343,7 +343,7 @@ mod tests {
         let future_time = Utc::now() + ChronoDuration::hours(24);
         let spec = CTFRouteSpec {
             available_at: Some(future_time.into()),
-            pow: Some(CTFRouteSpecPow {
+            pow: Some(CTFRouteSpecPOW {
                 difficulty: 0,
                 enable_admin_bypass: false,
             }),
@@ -375,7 +375,7 @@ mod tests {
         let future_time = Utc::now() + ChronoDuration::hours(24);
         let spec = CTFRouteSpec {
             available_at: Some(future_time.into()),
-            pow: Some(CTFRouteSpecPow {
+            pow: Some(CTFRouteSpecPOW {
                 difficulty: 0,
                 enable_admin_bypass: true,
             }),

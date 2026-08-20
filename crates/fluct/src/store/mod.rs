@@ -1,5 +1,5 @@
-mod challenges;
+mod routes;
 mod secrets;
 
-pub use challenges::ChallengesStore;
+pub use routes::RoutesStore;
 pub use secrets::SecretsStore;

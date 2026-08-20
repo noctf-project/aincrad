@@ -74,7 +74,7 @@ async fn handle_connection(
     }
     .to_lowercase();
 
-    if let Some(pair) = service.challenges_store.get_tls_challenge(&hostname) {
+    if let Some(pair) = service.challenges_store.get_tls_route(&hostname) {
         trace!("client {} connected to TLS challenge {}", addr, pair.0);
         let (c_rx, c_tx) = tokio::io::split(stream);
         let mut handler = Handler::new(service, pair, addr);

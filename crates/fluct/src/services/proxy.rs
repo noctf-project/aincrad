@@ -84,7 +84,7 @@ async fn thread_accept(
         // TODO: add graceful shutdown
         select! {
           Some((port, socket, addr)) = rx.recv() => {
-            if let Some(pair) = service.challenges_store.get_challenge_from_port(port) {
+            if let Some(pair) = service.challenges_store.get_route_from_port(port) {
               let service = service.clone();
               trace!("Accepting connection {} on port {}", addr, port);
               let mut handler = Handler::new(service, pair, addr);
