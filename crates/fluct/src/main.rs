@@ -8,7 +8,6 @@ use store::{RoutesStore, SecretsStore};
 use tokio::try_join;
 use tokio_rustls::rustls::crypto::ring;
 use tokio_util::sync::CancellationToken;
-use tracing::error;
 mod clients;
 mod config;
 mod crd;

@@ -54,13 +54,10 @@ async fn thread_listeners(
             }
           },
           Some(port) = unbind_rx.recv() => {
-            match listeners.entry(port) {
-              Entry::Occupied(entry) => {
-                info!("Removing listener on {}:{}", config.host, port);
-                entry.get().abort();
-                entry.remove();
-              },
-              _ => (),
+            if let Entry::Occupied(entry) = listeners.entry(port) {
+              info!("Removing listener on {}:{}", config.host, port);
+              entry.get().abort();
+              entry.remove();
             }
           },
           _ = shutdown.cancelled() => {

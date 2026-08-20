@@ -31,7 +31,7 @@ pub struct Handler {
     flag: String,
 }
 
-const DEFAULT_SECRET: &'static [u8] = b"notsecret";
+const DEFAULT_SECRET: &[u8] = b"notsecret";
 const BUF_SIZE: usize = 16 * 1024;
 const MAX_UID_SIZE: usize = 64;
 const MAX_INPUT_TIME_UID: Duration = Duration::from_secs(30);
@@ -77,8 +77,8 @@ impl Handler {
 
         let mut request_pow: Option<ChallengeSolveState> = None;
         let pow = spec.pow.as_ref();
-        if let Some(available_at) = spec.available_at {
-            if available_at > self.session.timestamp {
+        if let Some(available_at) = spec.available_at
+            && available_at > self.session.timestamp {
                 c_tx.write_all(b"== info: This challenge is not currently available ==\n")
                     .await?;
                 if let Some(pow) = pow
@@ -89,7 +89,6 @@ impl Handler {
                     return Ok(());
                 }
             }
-        }
 
         if request_pow.is_none()
             && let Some(pow) = pow
@@ -102,7 +101,7 @@ impl Handler {
             let secret = self
                 .service
                 .secrets_store
-                .derive_key(secret_name, &name, "challenge")
+                .derive_key(secret_name, name, "challenge")
                 .await
                 .unwrap_or_else(|| DEFAULT_SECRET.to_vec());
 
@@ -136,7 +135,7 @@ impl Handler {
         let secret = self
             .service
             .secrets_store
-            .derive_key(secret_name, &name, "flag")
+            .derive_key(secret_name, name, "flag")
             .await
             .unwrap_or_else(|| DEFAULT_SECRET.to_vec());
 
@@ -202,7 +201,7 @@ impl Handler {
                       break Ok(());
                     }
                     let _ = log.try_send((stream, n.to_vec()));
-                    if let Err(_) = tx.write_all(&n).await {
+                    if tx.write_all(n).await.is_err() {
                       cancel.cancel();
                       break Ok(());
                     }
@@ -231,6 +230,7 @@ impl Handler {
             OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .open(Path::new(&self.service.config.logs_dir).join(self.get_log_filename()))
                 .await?,
         );

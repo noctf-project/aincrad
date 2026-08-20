@@ -25,7 +25,7 @@ impl V1FlagGenerator {
     const VERSION: &'static [u8] = b"DUCTF1";
     const MAGIC: &'static [u8] = b"TOM0NK3$";
     thread_local! {
-      pub static COUNTER: Cell<u8> = Cell::new(0);
+      pub static COUNTER: Cell<u8> = const { Cell::new(0) };
       pub static RNG: RefCell<StdRng> = RefCell::new(rand::make_rng());
     }
 }
@@ -73,15 +73,15 @@ impl FlagGenerator for V1FlagGenerator {
             let Ok(cipher) = Aes256::new_from_slice(&key) else {
                 return String::new();
             };
-            let mut block = GenericArray::from_mut_slice(&mut buf[16..32]);
-            cipher.encrypt_block(&mut block);
+            let block = GenericArray::from_mut_slice(&mut buf[16..32]);
+            cipher.encrypt_block(block);
         }
 
         let Ok(cipher) = Aes256::new_from_slice(&key) else {
             return String::new();
         };
-        let mut block = GenericArray::from_mut_slice(&mut buf[0..16]);
-        cipher.encrypt_block(&mut block);
+        let block = GenericArray::from_mut_slice(&mut buf[0..16]);
+        cipher.encrypt_block(block);
 
         let payload = BASE64_URL_SAFE_NO_PAD.encode(&buf);
         format!("{}{{{}|{}}}", flag_prefix, prefix, payload)

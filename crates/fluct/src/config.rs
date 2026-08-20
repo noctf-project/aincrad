@@ -61,13 +61,13 @@ pub struct ServiceConfig {
 }
 
 fn parse_hostname_suffix(s: &str) -> Result<String, String> {
-    if s == "" {
+    if s.is_empty() {
         return Ok("".to_string());
     }
-    if s.starts_with('.') || s.len() == 0 {
+    if s.starts_with('.') || s.is_empty() {
         return Ok("".to_string());
     }
-    return Ok(format!(".{s}"));
+    Ok(format!(".{s}"))
 }
 
 #[cfg(test)]

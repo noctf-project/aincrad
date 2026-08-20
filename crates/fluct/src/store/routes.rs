@@ -32,7 +32,7 @@ fn derive_hostname(namespaced_id: &str, namespace: &str, tls_tag: Option<&str>) 
     let hash = sha256(input.as_bytes());
     let mut id = base32::encode(base32::Alphabet::Crockford, &hash).to_lowercase();
     id.truncate(HOSTNAME_ID_LEN);
-    if prefix == "" {
+    if prefix.is_empty() {
         id
     } else {
         format!("{}-{}", prefix, id)
@@ -115,9 +115,7 @@ impl RoutesStore {
     fn handle_route_event(&self, event: Event<CTFRoute>) -> Option<CTFRouteStatusPair> {
         match event {
             Event::Apply(data) | Event::InitApply(data) => {
-                let Some(name) = data.metadata.name else {
-                    return None;
-                };
+                let name = data.metadata.name?;
                 let namespace = data.metadata.namespace.as_deref().unwrap_or("default");
                 let namespaced_name = format!("{}:{}", namespace, name);
 
@@ -126,7 +124,7 @@ impl RoutesStore {
                     namespaced_name.clone(),
                     MetadataAndSpec {
                         generation: data.metadata.generation,
-                        observed_generation: data.status.map(|x| x.observed_generation).flatten(),
+                        observed_generation: data.status.and_then(|x| x.observed_generation),
                         spec: spec.clone(),
                     },
                 );
@@ -158,19 +156,16 @@ impl RoutesStore {
                 Some(self.get_desired_status(data.metadata.generation, &spec))
             }
             Event::Delete(data) => {
-                let Some(name) = data.metadata.name else {
-                    return None;
-                };
+                let name = data.metadata.name?;
                 let namespace = data.metadata.namespace.as_deref().unwrap_or("default");
                 let namespaced_name = format!("{}:{}", namespace, name);
 
-                if let Some((_, prev)) = self.routes.remove(&namespaced_name) {
-                    if let Some(tls) = &prev.spec.1.tls {
+                if let Some((_, prev)) = self.routes.remove(&namespaced_name)
+                    && let Some(tls) = &prev.spec.1.tls {
                         let host = derive_hostname(&name, namespace, tls.key.as_deref());
                         info!("Deregistering route {} hostname: {}", namespaced_name, host);
                         self.tls_routes.remove(&host);
                     }
-                }
                 info!("Removed route {}", namespaced_name);
                 None
             }
