@@ -1,6 +1,5 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use dashmap::{DashMap, Entry};
 use fluct::Error;
 use tokio::{
     join,
@@ -31,7 +30,7 @@ async fn thread_listeners(
     acceptor: mpsc::Sender<ConnectionHandle>,
 ) -> Result<(), Error> {
     let shutdown = service.shutdown.clone();
-    let listeners: DashMap<u16, JoinHandle<Result<(), Error>>> = DashMap::new();
+    let mut listeners: HashMap<u16, JoinHandle<Result<(), Error>>> = HashMap::new();
     let (unbind_tx, mut unbind_rx) = mpsc::channel(128);
     let config = &service.config;
 
@@ -40,30 +39,29 @@ async fn thread_listeners(
           _ = sleep(Duration::from_secs(2)) => {
             let intended = service.routes_service.get_active_ports();
             let mut all = intended.clone();
-            all.extend(listeners.iter().map(|k| *k.key()));
+            all.extend(listeners.keys().copied());
             for port in all {
               if port == service.config.tls_port {
                 warn!("cannot bind on port used for tls challenges :{}", port);
                 continue;
               }
-              if intended.contains(&port) && listeners.get(&port).is_none() {
+              if intended.contains(&port) && !listeners.contains_key(&port) {
                 listeners.insert(port, tokio::spawn(thread_listen(acceptor.clone(), unbind_tx.clone(), config.host.clone(), port)));
-              } else if !intended.contains(&port) && listeners.get(&port).is_some() {
+              } else if !intended.contains(&port) && listeners.contains_key(&port) {
                 unbind_tx.send(port).await?;
               }
             }
           },
           Some(port) = unbind_rx.recv() => {
-            if let Entry::Occupied(entry) = listeners.entry(port) {
+            if let Some(handle) = listeners.remove(&port) {
               info!("Removing listener on {}:{}", config.host, port);
-              entry.get().abort();
-              entry.remove();
+              handle.abort();
             }
           },
           _ = shutdown.cancelled() => {
-            for r in &listeners {
-              r.value().abort();
-              info!("Removing listener for port {}", r.key());
+            for (port, handle) in listeners {
+              handle.abort();
+              info!("Removing listener for port {}", port);
             }
             break Ok(());
           }

@@ -172,12 +172,10 @@ impl Table {
 
         if let Some(s) = old_spec
             && s != spec
+            && let Some(PortAllocation::Pending { next, .. }) = self.mappings.remove(&s)
+            && next != port
         {
-            if let Some(PortAllocation::Pending { next, .. }) = self.mappings.remove(&s)
-                && next != port
-            {
-                self.bindings[next as usize] = None;
-            }
+            self.bindings[next as usize] = None;
         }
         if let Some(p) = old_port
             && p != port

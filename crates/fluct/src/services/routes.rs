@@ -176,10 +176,10 @@ impl RoutesService {
                     .map(|tcp| tcp.port);
                 self.ports.insert(&namespaced_name, port);
 
-                if let Some(prev) = prev {
-                    if prev.generation == data.metadata.generation {
-                        return None;
-                    }
+                if let Some(prev) = prev
+                    && prev.generation == data.metadata.generation
+                {
+                    return None;
                 }
 
                 Some(spec)
