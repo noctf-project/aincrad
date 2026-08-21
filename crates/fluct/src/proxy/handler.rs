@@ -259,7 +259,8 @@ mod tests {
     use crate::clients::KubernetesClient;
     use crate::config::{PortRange, ServiceConfig};
     use crate::crd::{CTFRouteSpec, CTFRouteSpecPOW};
-    use crate::store::{RoutesStore, SecretsStore};
+    use crate::services::routes::RoutesService;
+    use crate::store::secrets::SecretsStore;
     use chrono::{Duration as ChronoDuration, Utc};
     use std::net::{IpAddr, Ipv4Addr};
     use tokio::io::AsyncReadExt;
@@ -280,7 +281,7 @@ mod tests {
                 reserved_ports: PortRange(20000..=20999),
                 auto_ports: PortRange(30000..=30999),
             },
-            challenges_store: RoutesStore::new(
+            routes_service: RoutesService::new(
                 client.clone(),
                 "",
                 443,

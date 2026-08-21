@@ -38,7 +38,7 @@ async fn thread_listeners(
     loop {
         select! {
           _ = sleep(Duration::from_secs(2)) => {
-            let intended = service.challenges_store.get_active_ports();
+            let intended = service.routes_service.get_active_ports();
             let mut all = intended.clone();
             all.extend(listeners.iter().map(|k| *k.key()));
             for port in all {
@@ -81,7 +81,7 @@ async fn thread_accept(
         // TODO: add graceful shutdown
         select! {
           Some((port, socket, addr)) = rx.recv() => {
-            if let Some(pair) = service.challenges_store.get_route_from_port(port) {
+            if let Some(pair) = service.routes_service.get_route_from_port(port) {
               let service = service.clone();
               trace!("Accepting connection {} on port {}", addr, port);
               let mut handler = Handler::new(service, pair, addr);

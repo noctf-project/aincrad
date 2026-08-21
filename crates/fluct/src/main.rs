@@ -4,10 +4,11 @@ use clap::Parser;
 use clients::KubernetesClient;
 use config::{ServiceConfig, ServiceContext};
 use fluct::Error;
-use store::{RoutesStore, SecretsStore};
 use tokio::try_join;
 use tokio_rustls::rustls::crypto::ring;
 use tokio_util::sync::CancellationToken;
+
+use crate::{services::routes::RoutesService, store::secrets::SecretsStore};
 mod clients;
 mod config;
 mod crd;
@@ -29,7 +30,7 @@ async fn main() -> Result<(), Error> {
 
     let kubernetes_client = KubernetesClient::new().await?;
 
-    let challenges_store = RoutesStore::new(
+    let routes_service = RoutesService::new(
         kubernetes_client.clone(),
         &config.hostname_suffix,
         config.tls_port,
@@ -40,7 +41,7 @@ async fn main() -> Result<(), Error> {
 
     let service_context = Arc::new(ServiceContext {
         config,
-        challenges_store,
+        routes_service,
         secrets_store,
         shutdown: shutdown.clone(),
     });
@@ -64,9 +65,7 @@ async fn main() -> Result<(), Error> {
         ),
         wrap_err(
             "challenges_store.run",
-            service_context
-                .challenges_store
-                .run(service_context.clone())
+            service_context.routes_service.run(service_context.clone())
         ),
         wrap_err(
             "secrets_store.run",

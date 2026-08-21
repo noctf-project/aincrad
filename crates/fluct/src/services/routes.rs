@@ -12,7 +12,7 @@ use crate::{
     config::{PortRange, ServiceContext},
     crd::{CTFRoute, CTFRouteEndpoints, CTFRouteSpecPair, CTFRouteStatus, EndpointTarget},
     crypto::hash::sha256,
-    store::{PortAllocation, PortManager, PortSyncResult},
+    store::port::{self, PortAllocation, PortManager},
 };
 
 const HOSTNAME_ID_LEN: usize = 16;
@@ -44,13 +44,14 @@ fn extract_sni_hostname(sni: &str) -> &str {
     sni.split('.').next().unwrap_or(sni)
 }
 
+#[derive(Clone)]
 struct MetadataAndSpec {
     generation: Option<i64>,
     observed_generation: Option<i64>,
     spec: Arc<CTFRouteSpecPair>,
 }
 
-pub struct RoutesStore {
+pub struct RoutesService {
     client: KubernetesClient,
     hostname_suffix: String,
     tls_port: u16,
@@ -59,7 +60,7 @@ pub struct RoutesStore {
     tls_routes: DashMap<String, Arc<CTFRouteSpecPair>>,
 }
 
-impl RoutesStore {
+impl RoutesService {
     pub fn new(
         client: KubernetesClient,
         hostname_suffix: &str,
@@ -147,15 +148,15 @@ impl RoutesStore {
             Err(e) => {
                 error!("{}", e);
                 let (reason, message) = match &e {
-                    super::port::PortError::Occupied(port, owner) => (
+                    port::PortError::Occupied(port, owner) => (
                         "PortOccupied".to_string(),
                         format!("port {port} is already occupied by route '{owner}'"),
                     ),
-                    super::port::PortError::OutOfRange(port) => (
+                    port::PortError::OutOfRange(port) => (
                         "PortOutOfRange".to_string(),
                         format!("port {port} is outside reserved range"),
                     ),
-                    super::port::PortError::Exhausted => (
+                    port::PortError::Exhausted => (
                         "PortExhausted".to_string(),
                         "auto port pool is exhausted".to_string(),
                     ),
@@ -230,14 +231,14 @@ impl RoutesStore {
                     .and_then(|status| status.endpoints.as_ref())
                     .and_then(|endpoints| endpoints.tcp.as_ref())
                     .map(|tcp| tcp.port);
-                match self.ports.sync(&namespaced_name, port) {
-                    PortSyncResult::Added(p) => {
+                match self.ports.insert(&namespaced_name, port) {
+                    port::PortSyncResult::Added(p) => {
                         info!("route {namespaced_name} bound port {p}",)
                     }
-                    PortSyncResult::Changed { old, new } => {
+                    port::PortSyncResult::Changed { old, new } => {
                         info!("route {namespaced_name} swapped from {old} -> {new}")
                     }
-                    PortSyncResult::Removed(p) => {
+                    port::PortSyncResult::Removed(p) => {
                         info!("route {namespaced_name} unbound port {p}")
                     }
                     _ => (),
@@ -281,7 +282,7 @@ impl RoutesStore {
                     info!("Deregistering route {} hostname: {}", namespaced_name, host);
                     self.tls_routes.remove(&host);
                 }
-                if let PortSyncResult::Removed(p) = self.ports.sync(&namespaced_name, None) {
+                if let port::PortSyncResult::Removed(p) = self.ports.insert(&namespaced_name, None) {
                     info!("route {namespaced_name} unbound port {p}")
                 }
                 info!("Removed route {}", namespaced_name);
@@ -312,18 +313,14 @@ impl RoutesStore {
         }
     }
 
-    async fn update_status(&self, full: &str, status: CTFRouteStatus) {
+    async fn update_status(&self, full: &str, status: CTFRouteStatus) -> Result<(), Error> {
         let mut parts = full.split(":");
         let namespace = parts.next().unwrap_or("default");
         let name = parts.next().unwrap_or("");
-        match self
-            .client
+        self.client
             .update_object_status::<CTFRoute, _>(name, namespace, status)
-            .await
-        {
-            Ok(()) => info!("updated status for {}", full),
-            Err(e) => error!("could not update status: {}", e),
-        }
+            .await?;
+        Ok(())
     }
 
     async fn run_updates(
@@ -353,7 +350,9 @@ impl RoutesStore {
                         info!("Gained route status leader");
                         self.ports.clear_pending();
                         for (full, status) in self.unsynced_status_updates() {
-                            self.update_status(&full, status).await;
+                            self.update_status(&full, status).await
+                                .inspect(|_| info!("successfully updated status for {}", full))
+                                .unwrap_or_else(|e| error!("failed to update status: {}", e));
                         }
                     } else {
                         info!("Lost route status leader");
@@ -365,9 +364,11 @@ impl RoutesStore {
                     if !locked {
                         continue;
                     }
-                    if let Some(entry) = self.routes.get(&arc.0) {
-                        let (full, status) = self.desired_status(entry.value().generation, &arc);
-                        self.update_status(&full, status).await;
+                    if let Some(metadata) = self.routes.get(&arc.0).map(|e| e.value().clone()) {
+                        let (full, status) = self.desired_status(metadata.generation, &arc);
+                        self.update_status(&full, status).await
+                            .inspect(|_| info!("successfully updated status for {}", full))
+                            .unwrap_or_else(|e| error!("failed to update status: {}", e));
                     }
                 },
                 _ = cancel.cancelled() => {
@@ -430,8 +431,8 @@ mod tests {
     use crate::crd::{CTFRouteSpec, CTFRouteSpecTLS, CTFRouteStatus};
     use kube::core::ObjectMeta;
 
-    fn make_store(suffix: &str) -> RoutesStore {
-        RoutesStore::new(
+    fn make_store(suffix: &str) -> RoutesService {
+        RoutesService::new(
             KubernetesClient::new_dummy_for_tests(),
             suffix,
             443,
@@ -496,7 +497,7 @@ mod tests {
                 spec: Arc::new(("default:my-chal".to_string(), spec)),
             },
         );
-        store.ports.sync("default:my-chal", Some(20001));
+        store.ports.insert("default:my-chal", Some(20001));
 
         let active_ports = store.get_active_ports();
         assert!(active_ports.contains(&20001));

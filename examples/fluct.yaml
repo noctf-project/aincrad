@@ -19,7 +19,7 @@ metadata:
   namespace: kubectf-challenges
 spec:
   backend: example.com:80
-  port: 20007
+  port: 0
 ---
 # TCP Route with fixed port
 apiVersion: aincrad.noctf.dev/v1
