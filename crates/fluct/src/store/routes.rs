@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use fluct::Error;
 use kube::runtime::watcher::Event;
 use tokio::{select, sync::mpsc, try_join};
@@ -9,9 +9,10 @@ use tracing::{error, info, warn};
 
 use crate::{
     clients::KubernetesClient,
-    config::ServiceContext,
-    crd::{CTFPort, CTFRoute, CTFRouteSpecPair, CTFRouteStatus},
+    config::{PortRange, ServiceContext},
+    crd::{CTFRoute, CTFRouteEndpoints, CTFRouteSpecPair, CTFRouteStatus, EndpointTarget},
     crypto::hash::sha256,
+    store::{PortAllocation, PortManager, PortSyncResult},
 };
 
 const HOSTNAME_ID_LEN: usize = 16;
@@ -53,17 +54,22 @@ pub struct RoutesStore {
     client: KubernetesClient,
     hostname_suffix: String,
     routes: DashMap<String, MetadataAndSpec>,
-    ports: DashMap<u16, String>,
+    ports: PortManager,
     tls_routes: DashMap<String, Arc<CTFRouteSpecPair>>,
 }
 
 impl RoutesStore {
-    pub fn new(client: KubernetesClient, hostname_suffix: &str) -> Self {
+    pub fn new(
+        client: KubernetesClient,
+        hostname_suffix: &str,
+        range_reserved: PortRange,
+        range_auto: PortRange,
+    ) -> Self {
         Self {
             client,
             hostname_suffix: hostname_suffix.to_owned(),
             routes: DashMap::new(),
-            ports: DashMap::new(),
+            ports: PortManager::new(range_reserved, range_auto),
             tls_routes: DashMap::new(),
         }
     }
@@ -85,11 +91,11 @@ impl RoutesStore {
         self.routes
             .iter()
             .filter(|x| x.generation > x.observed_generation)
-            .map(|x| self.get_desired_status(x.value().generation, &x.value().spec))
+            .map(|x| self.desired_status(x.value().generation, &x.value().spec))
             .collect()
     }
 
-    fn get_desired_status(
+    fn desired_status(
         &self,
         generation: Option<i64>,
         spec: &CTFRouteSpecPair,
@@ -101,18 +107,33 @@ impl RoutesStore {
             spec.0.to_string(),
             CTFRouteStatus {
                 observed_generation: generation,
-                endpoint: spec.1.tls.as_ref().map(|x| {
-                    format!(
-                        "{}{}",
-                        derive_hostname(name, namespace, x.key.as_deref()),
-                        self.hostname_suffix
-                    )
+                endpoints: Some(CTFRouteEndpoints {
+                    tls: spec.1.tls.as_ref().map(|x| EndpointTarget {
+                        host: format!(
+                            "{}{}",
+                            derive_hostname(name, namespace, x.key.as_deref()),
+                            self.hostname_suffix
+                        ),
+                        port: 0,
+                    }),
+                    tcp: self
+                        .ports
+                        .reserve(&spec.0, spec.1.port)
+                        .inspect_err(|e| error!("{}", e))
+                        .unwrap_or(None)
+                        .map(|r| EndpointTarget {
+                            host: self.hostname_suffix.clone(),
+                            port: match r {
+                                PortAllocation::Intended(p) => p,
+                                PortAllocation::Pending { next, .. } => next,
+                            },
+                        }),
                 }),
             },
         )
     }
 
-    fn handle_route_event(&self, event: Event<CTFRoute>) -> Option<CTFRouteStatusPair> {
+    fn handle_route_event(&self, event: Event<CTFRoute>) -> Option<Arc<CTFRouteSpecPair>> {
         match event {
             Event::Apply(data) | Event::InitApply(data) => {
                 let name = data.metadata.name?;
@@ -134,7 +155,7 @@ impl RoutesStore {
                     if prev.generation == data.metadata.generation {
                         return None;
                     }
-
+                    
                     hostname_changed = false;
                     // deregister old hostname if tls changed
                     if let Some(prev_tls) = &prev.spec.1.tls
@@ -153,19 +174,35 @@ impl RoutesStore {
                     }
                     self.tls_routes.insert(host, spec.clone());
                 }
-                Some(self.get_desired_status(data.metadata.generation, &spec))
+                match self.ports.sync(&namespaced_name, spec.1.port) {
+                    PortSyncResult::Added(p) => {
+                        info!("route {namespaced_name} bound port {p}",)
+                    }
+                    PortSyncResult::Changed { old, new } => {
+                        info!("route {namespaced_name} swapped from {old} -> {new}")
+                    }
+                    PortSyncResult::Removed(p) => {
+                        info!("route {namespaced_name} unbound port {p}")
+                    }
+                    _ => (),
+                }
+
+                Some(spec.clone())
             }
             Event::Delete(data) => {
                 let name = data.metadata.name?;
                 let namespace = data.metadata.namespace.as_deref().unwrap_or("default");
                 let namespaced_name = format!("{}:{}", namespace, name);
-
                 if let Some((_, prev)) = self.routes.remove(&namespaced_name)
-                    && let Some(tls) = &prev.spec.1.tls {
-                        let host = derive_hostname(&name, namespace, tls.key.as_deref());
-                        info!("Deregistering route {} hostname: {}", namespaced_name, host);
-                        self.tls_routes.remove(&host);
-                    }
+                    && let Some(tls) = &prev.spec.1.tls
+                {
+                    let host = derive_hostname(&name, namespace, tls.key.as_deref());
+                    info!("Deregistering route {} hostname: {}", namespaced_name, host);
+                    self.tls_routes.remove(&host);
+                }
+                if let PortSyncResult::Removed(p) = self.ports.sync(&namespaced_name, None) {
+                    info!("route {namespaced_name} unbound port {p}")
+                }
                 info!("Removed route {}", namespaced_name);
                 None
             }
@@ -173,60 +210,19 @@ impl RoutesStore {
         }
     }
 
-    fn handle_port_event(&self, event: Event<CTFPort>) {
-        match event {
-            Event::Apply(data) | Event::InitApply(data) => {
-                let Some(port) = get_port_from_metadata(&data.metadata.name) else {
-                    warn!("Port {:?} is not a port", data.metadata.name);
-                    return;
-                };
-                let namespace = data.metadata.namespace.as_deref().unwrap_or("default");
-                let namespaced_route = format!("{}:{}", namespace, data.spec.route);
-                info!("Binding port {} to route {}", port, namespaced_route);
-                self.ports.insert(port, namespaced_route);
-            }
-            Event::Delete(data) => {
-                let Some(port) = get_port_from_metadata(&data.metadata.name) else {
-                    warn!("Port {:?} is not a port", data.metadata.name);
-                    return;
-                };
-                info!("Removing port {}", port);
-                self.ports.remove(&port);
-            }
-            _ => (),
-        }
-    }
-
     async fn run_watch_routes(
         &self,
         cancel: CancellationToken,
         mut receiver: mpsc::Receiver<Event<CTFRoute>>,
-        status_tx: mpsc::Sender<CTFRouteStatusPair>,
+        update_tx: mpsc::Sender<Arc<CTFRouteSpecPair>>,
     ) {
         loop {
             select! {
               Some(event) = receiver.recv() => {
                 if let Some(status) = self.handle_route_event(event) {
-                    let _ = status_tx.send(status).await
+                    let _ = update_tx.send(status).await
                         .map_err(|err| warn!("error queueing status {:?}", err));
                 }
-              },
-              _ = cancel.cancelled() => {
-                break;
-              }
-            }
-        }
-    }
-
-    async fn run_watch_ports(
-        &self,
-        cancel: CancellationToken,
-        mut receiver: mpsc::Receiver<Event<CTFPort>>,
-    ) {
-        loop {
-            select! {
-              Some(event) = receiver.recv() => {
-                self.handle_port_event(event);
               },
               _ = cancel.cancelled() => {
                 break;
@@ -252,7 +248,7 @@ impl RoutesStore {
     async fn run_updates(
         &self,
         cancel: CancellationToken,
-        mut rx: mpsc::Receiver<CTFRouteStatusPair>,
+        mut rx: mpsc::Receiver<Arc<CTFRouteSpecPair>>,
     ) -> Result<(), Error> {
         info!("started route status updater");
         let manager = self
@@ -274,6 +270,7 @@ impl RoutesStore {
                         }
                         locked = true;
                         info!("Gained route status leader");
+                        self.ports.clear_pending();
                         for (full, status) in self.unsynced_status_updates() {
                             self.update_status(&full, status).await;
                         }
@@ -282,11 +279,12 @@ impl RoutesStore {
                         locked = false;
                     }
                 }
-                Some((full, status)) = rx.recv() => {
+                Some(arc) = rx.recv() => {
                     // discard if not locked
                     if !locked {
                         continue;
                     }
+                    let (full, status) = &*arc;
                     let mut parts = full.split(":");
                     let namespace = parts.next().unwrap_or("default");
                     let name = parts.next().unwrap_or("");
@@ -311,53 +309,32 @@ impl RoutesStore {
         Ok(())
     }
 
-    pub fn get_active_ports(&self) -> DashSet<u16> {
-        self.ports
-            .iter()
-            .map(|e| *e.key())
-            .collect::<DashSet<u16>>()
+    pub fn get_active_ports(&self) -> Vec<u16> {
+        self.ports.active_ports()
     }
 
     pub fn get_route_from_port(&self, port: u16) -> Option<Arc<CTFRouteSpecPair>> {
-        let port = self.ports.get(&port)?;
-        let route = self.routes.get(port.value())?;
+        let port = self.ports.active_route(port)?;
+        let route = self.routes.get(&port)?;
         Some(route.value().spec.clone())
     }
 
     pub async fn run(&self, ctx: Arc<ServiceContext>) -> Result<(), Error> {
         let cancel = &ctx.shutdown;
-        let namespace = &ctx.config.tcp_namespace;
-        let (port_tx, port_rx) = mpsc::channel(128);
         let (route_tx, route_rx) = mpsc::channel(128);
-        let (status_tx, status_rx) = mpsc::channel(128);
+        let (update_tx, update_rx) = mpsc::channel(128);
         try_join!(
-            log_job(
-                "kube CTFPort watcher",
-                self.client
-                    .watch(cancel.clone(), port_tx, namespace.clone())
-            ),
             log_job(
                 "kube CTFRoute watcher",
                 self.client.watch(cancel.clone(), route_tx, None)
             ),
             log_job(
-                "kube CTFPort processor",
-                self.run_watch_ports(cancel.clone(), port_rx)
-            ),
-            log_job(
                 "kube CTFRoute processor",
-                self.run_watch_routes(cancel.clone(), route_rx, status_tx)
+                self.run_watch_routes(cancel.clone(), route_rx, update_tx)
             ),
-            self.run_updates(cancel.clone(), status_rx),
+            self.run_updates(cancel.clone(), update_rx),
         )?;
         Ok(())
-    }
-}
-
-fn get_port_from_metadata(name: &Option<String>) -> Option<u16> {
-    match name {
-        Some(name) => name.parse().ok(),
-        None => None,
     }
 }
 
@@ -374,8 +351,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{CTFPortSpec, CTFRouteSpec, CTFRouteSpecTLS, CTFRouteStatus};
+    use crate::crd::{CTFRouteSpec, CTFRouteSpecTLS, CTFRouteStatus};
     use kube::core::ObjectMeta;
+
+    fn make_store(suffix: &str) -> RoutesStore {
+        RoutesStore::new(
+            KubernetesClient::new_dummy_for_tests(),
+            suffix,
+            PortRange(20000..=20010),
+            PortRange(30000..=30010),
+        )
+    }
 
     #[test]
     fn test_derive_hostname_empty_and_tag() {
@@ -415,18 +401,12 @@ mod tests {
         assert_eq!(extract_sni_hostname(""), "");
     }
 
-    #[test]
-    fn test_get_port_from_metadata() {
-        assert_eq!(get_port_from_metadata(&Some("30000".into())), Some(30000));
-        assert_eq!(get_port_from_metadata(&Some("invalid".into())), None);
-        assert_eq!(get_port_from_metadata(&None), None);
-    }
-
     #[tokio::test]
     async fn test_challenges_store_port_lookup() {
-        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), "");
+        let store = make_store("");
 
         let spec = CTFRouteSpec {
+            port: Some(20001),
             flag: Some("test_flag".into()),
             backend: "127.0.0.1:1337".into(),
             ..Default::default()
@@ -439,21 +419,21 @@ mod tests {
                 spec: Arc::new(("default:my-chal".to_string(), spec)),
             },
         );
-        store.ports.insert(30000, "default:my-chal".into());
+        store.ports.sync("default:my-chal", Some(20001));
 
         let active_ports = store.get_active_ports();
-        assert!(active_ports.contains(&30000));
+        assert!(active_ports.contains(&20001));
 
-        let found = store.get_route_from_port(30000);
+        let found = store.get_route_from_port(20001);
         assert!(found.is_some());
         assert_eq!(found.unwrap().0, "default:my-chal");
 
-        assert!(store.get_route_from_port(30001).is_none());
+        assert!(store.get_route_from_port(20002).is_none());
     }
 
     #[tokio::test]
     async fn test_handle_challenge_event_lifecycle() {
-        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), "");
+        let store = make_store("");
         let chal = CTFRoute {
             metadata: ObjectMeta {
                 name: Some("test-chal".into()),
@@ -488,29 +468,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_port_event_lifecycle() {
-        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), "");
-        let port_chal = CTFPort {
-            metadata: ObjectMeta {
-                name: Some("30005".into()),
-                namespace: Some("default".into()),
-                ..Default::default()
-            },
-            spec: CTFPortSpec {
-                route: "pwn-chal".into(),
-            },
-        };
-
-        store.handle_port_event(Event::Apply(port_chal.clone()));
-        assert!(store.get_active_ports().contains(&30005));
-
-        store.handle_port_event(Event::Delete(port_chal));
-        assert!(!store.get_active_ports().contains(&30005));
-    }
-
-    #[tokio::test]
     async fn test_handle_challenge_event_update_tag() {
-        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), "");
+        let store = make_store("");
         let mut chal = CTFRoute {
             metadata: ObjectMeta {
                 name: Some("test-chal".into()),
@@ -566,7 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_challenge_observed_generation() {
-        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), "");
+        let store = make_store("");
         let chal = CTFRoute {
             metadata: ObjectMeta {
                 name: Some("status-chal".into()),
@@ -579,7 +538,7 @@ mod tests {
             },
             status: Some(CTFRouteStatus {
                 observed_generation: Some(42),
-                endpoint: Some("status-chal.example.com".into()),
+                endpoints: None,
             }),
         };
 
@@ -596,9 +555,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_desired_status() {
-        let store = RoutesStore::new(KubernetesClient::new_dummy_for_tests(), ".example.com");
+    async fn test_prepare_desired_status() {
+        let store = make_store(".example.com");
         let spec = CTFRouteSpec {
+            port: Some(20001),
             backend: "backend:80".into(),
             tls: Some(CTFRouteSpecTLS {
                 key: Some("web".to_string()),
@@ -607,7 +567,7 @@ mod tests {
         };
         let pair = ("prod:my-challenge".to_string(), spec);
 
-        let (full, status) = store.get_desired_status(Some(5), &pair);
+        let (full, status) = store.desired_status(Some(5), &pair);
         assert_eq!(full, "prod:my-challenge");
         assert_eq!(status.observed_generation, Some(5));
 
@@ -615,6 +575,8 @@ mod tests {
             "{}.example.com",
             derive_hostname("my-challenge", "prod", Some("web"))
         );
-        assert_eq!(status.endpoint, Some(expected_hostname));
+        let endpoints = status.endpoints.unwrap();
+        assert_eq!(endpoints.tls.unwrap().host, expected_hostname);
+        assert_eq!(endpoints.tcp.unwrap().port, 20001);
     }
 }

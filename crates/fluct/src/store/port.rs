@@ -1,11 +1,10 @@
-use std::fmt;
 use std::{collections::HashMap, iter::Cycle, ops::RangeInclusive, sync::RwLock};
 use thiserror::Error;
 
 use crate::config::PortRange;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Allocation<T> {
+pub enum PortAllocation<T> {
     Intended(T),
     Pending { current: Option<T>, next: T },
 }
@@ -23,21 +22,29 @@ pub enum PortError {
     Exhausted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortSyncResult {
+    Unchanged,
+    Added(u16),
+    Changed { old: u16, new: u16 },
+    Removed(u16),
+}
+
 struct Table {
-    bindings: Vec<Option<Allocation<String>>>,
-    mappings: HashMap<String, Allocation<u16>>,
+    bindings: Vec<Option<PortAllocation<String>>>,
+    mappings: HashMap<String, PortAllocation<u16>>,
     cycle: Cycle<RangeInclusive<u16>>,
-    range: PortRange,
+    range_auto: PortRange,
 }
 
 impl Table {
-    fn reserve(&mut self, spec: &str, port: u16) -> Result<Option<Allocation<u16>>, PortError> {
+    fn reserve(&mut self, spec: &str, port: u16) -> Result<Option<PortAllocation<u16>>, PortError> {
         // Allocate fixed
         if port != 0 {
             if let Some(allocation) = &self.bindings[port as usize] {
                 let owner = match allocation {
-                    Allocation::Intended(s) => s.as_str(),
-                    Allocation::Pending { next, .. } => next.as_str(),
+                    PortAllocation::Intended(s) => s.as_str(),
+                    PortAllocation::Pending { next, .. } => next.as_str(),
                 };
 
                 if owner == spec {
@@ -49,16 +56,16 @@ impl Table {
             self.remove_pending(spec);
 
             let current_port = self.mappings.get(spec).and_then(|a| match a {
-                Allocation::Intended(p) => Some(*p),
+                PortAllocation::Intended(p) => Some(*p),
                 _ => None,
             });
 
-            self.bindings[port as usize] = Some(Allocation::Pending {
+            self.bindings[port as usize] = Some(PortAllocation::Pending {
                 current: current_port.map(|_| spec.to_string()),
                 next: spec.to_string(),
             });
 
-            let alloc = Allocation::Pending {
+            let alloc = PortAllocation::Pending {
                 current: current_port,
                 next: port,
             };
@@ -69,20 +76,20 @@ impl Table {
         // Allocate auto
         if let Some(existing) = self.mappings.get(spec).cloned() {
             match existing {
-                Allocation::Intended(p) if self.range.contains(p) => {
-                    return Ok(Some(Allocation::Intended(p)));
+                PortAllocation::Intended(p) if self.range_auto.contains(p) => {
+                    return Ok(Some(PortAllocation::Intended(p)));
                 }
-                Allocation::Pending {
+                PortAllocation::Pending {
                     current: Some(c), ..
-                } if self.range.contains(c) => {
+                } if self.range_auto.contains(c) => {
                     self.remove_pending(spec);
-                    return Ok(Some(Allocation::Intended(c)));
+                    return Ok(Some(PortAllocation::Intended(c)));
                 }
-                Allocation::Pending {
+                PortAllocation::Pending {
                     current: None,
                     next,
-                } if self.range.contains(next) => {
-                    return Ok(Some(Allocation::Pending {
+                } if self.range_auto.contains(next) => {
+                    return Ok(Some(PortAllocation::Pending {
                         current: None,
                         next,
                     }));
@@ -94,11 +101,11 @@ impl Table {
         }
 
         let current_port = self.mappings.get(spec).and_then(|a| match a {
-            Allocation::Intended(p) => Some(*p),
+            PortAllocation::Intended(p) => Some(*p),
             _ => None,
         });
 
-        let count = (self.range.0.end() - self.range.0.start() + 1) as usize;
+        let count = (self.range_auto.0.end() - self.range_auto.0.start() + 1) as usize;
         let mut allocated_port = None;
 
         for _ in 0..count {
@@ -111,12 +118,12 @@ impl Table {
 
         let candidate = allocated_port.ok_or(PortError::Exhausted)?;
 
-        self.bindings[candidate as usize] = Some(Allocation::Pending {
+        self.bindings[candidate as usize] = Some(PortAllocation::Pending {
             current: current_port.map(|_| spec.to_string()),
             next: spec.to_string(),
         });
 
-        let alloc = Allocation::Pending {
+        let alloc = PortAllocation::Pending {
             current: current_port,
             next: candidate,
         };
@@ -124,59 +131,80 @@ impl Table {
         Ok(Some(alloc))
     }
 
-    fn sync(&mut self, spec: &str, port: Option<u16>) {
+    fn sync(&mut self, spec: &str, port: Option<u16>) -> PortSyncResult {
         let port = match port {
             Some(p) => p,
             None => {
-                self.remove(spec);
-                return;
+                let old_mapping = self.mappings.get(spec).cloned();
+                let removed = self.remove(spec);
+                if !removed {
+                    return PortSyncResult::Unchanged;
+                }
+                return match old_mapping {
+                    Some(PortAllocation::Intended(p)) => PortSyncResult::Removed(p),
+                    Some(PortAllocation::Pending {
+                        current: Some(p), ..
+                    }) => PortSyncResult::Removed(p),
+                    _ => PortSyncResult::Unchanged,
+                };
             }
         };
 
         let idx = port as usize;
 
-        let old_binding = self.bindings[idx].replace(Allocation::Intended(spec.to_string()));
+        let old_binding = self.bindings[idx].replace(PortAllocation::Intended(spec.to_string()));
         let old_mapping = self
             .mappings
-            .insert(spec.to_string(), Allocation::Intended(port));
+            .insert(spec.to_string(), PortAllocation::Intended(port));
 
         let old_spec = match old_binding {
-            Some(Allocation::Intended(s)) => Some(s),
-            Some(Allocation::Pending { next, .. }) => Some(next),
+            Some(PortAllocation::Intended(s)) => Some(s),
+            Some(PortAllocation::Pending { next, .. }) => Some(next),
             None => None,
         };
 
         let old_port = match old_mapping {
-            Some(Allocation::Intended(p)) => Some(p),
-            Some(Allocation::Pending { current, .. }) => current,
+            Some(PortAllocation::Intended(p)) => Some(p),
+            Some(PortAllocation::Pending { current, .. }) => current,
             None => None,
         };
 
-        if let Some(s) = old_spec {
-            if s != spec {
-                self.mappings.remove(&s);
-            }
+        if let Some(s) = old_spec
+            && s != spec
+        {
+            self.mappings.remove(&s);
         }
-        if let Some(p) = old_port {
-            if p != port {
-                self.bindings[p as usize] = None;
-            }
+        if let Some(p) = old_port
+            && p != port
+        {
+            self.bindings[p as usize] = None;
+        }
+
+        match old_port {
+            Some(old_p) if old_p == port => PortSyncResult::Unchanged,
+            Some(old_p) => PortSyncResult::Changed {
+                old: old_p,
+                new: port,
+            },
+            None => PortSyncResult::Added(port),
         }
     }
 
     fn remove_pending(&mut self, spec: &str) -> bool {
-        if matches!(self.mappings.get(spec), Some(Allocation::Pending { .. })) {
-            if let Some(Allocation::Pending { current, next }) = self.mappings.remove(spec) {
-                self.bindings[next as usize] = None;
+        if matches!(
+            self.mappings.get(spec),
+            Some(PortAllocation::Pending { .. })
+        ) && let Some(PortAllocation::Pending { current, next }) = self.mappings.remove(spec)
+        {
+            self.bindings[next as usize] = None;
 
-                if let Some(current_port) = current {
-                    self.mappings
-                        .insert(spec.to_string(), Allocation::Intended(current_port));
-                    self.bindings[current_port as usize] =
-                        Some(Allocation::Intended(spec.to_string()));
-                }
-                return true;
+            if let Some(current_port) = current {
+                self.mappings
+                    .insert(spec.to_string(), PortAllocation::Intended(current_port));
+                self.bindings[current_port as usize] =
+                    Some(PortAllocation::Intended(spec.to_string()));
             }
+            return true;
         }
         false
     }
@@ -184,10 +212,10 @@ impl Table {
     fn remove(&mut self, spec: &str) -> bool {
         if let Some(mapping) = self.mappings.remove(spec) {
             match mapping {
-                Allocation::Intended(port) => {
+                PortAllocation::Intended(port) => {
                     self.bindings[port as usize] = None;
                 }
-                Allocation::Pending { current, next } => {
+                PortAllocation::Pending { current, next } => {
                     self.bindings[next as usize] = None;
                     if let Some(current_port) = current {
                         self.bindings[current_port as usize] = None;
@@ -204,13 +232,13 @@ impl Table {
             bindings, mappings, ..
         } = self;
         mappings.retain(|spec, allocation| match allocation {
-            Allocation::Intended(_) => true,
-            Allocation::Pending { current, next } => {
+            PortAllocation::Intended(_) => true,
+            PortAllocation::Pending { current, next } => {
                 bindings[*next as usize] = None;
 
                 if let Some(current_port) = current {
-                    bindings[*current_port as usize] = Some(Allocation::Intended(spec.clone()));
-                    *allocation = Allocation::Intended(*current_port);
+                    bindings[*current_port as usize] = Some(PortAllocation::Intended(spec.clone()));
+                    *allocation = PortAllocation::Intended(*current_port);
                     true
                 } else {
                     false
@@ -219,14 +247,14 @@ impl Table {
         });
     }
 
-    fn get(&self, port: u16) -> Option<Allocation<String>> {
+    fn get(&self, port: u16) -> Option<PortAllocation<String>> {
         self.bindings[port as usize].clone()
     }
 
     fn active_route(&self, port: u16) -> Option<String> {
         self.bindings[port as usize].as_ref().and_then(|a| match a {
-            Allocation::Intended(a) => Some(a.clone()),
-            Allocation::Pending { current, .. } => current.clone(),
+            PortAllocation::Intended(a) => Some(a.clone()),
+            PortAllocation::Pending { current, .. } => current.clone(),
         })
     }
 
@@ -234,14 +262,18 @@ impl Table {
         self.mappings
             .values()
             .filter_map(|allocation| match allocation {
-                Allocation::Intended(port) => Some(*port),
-                Allocation::Pending {
+                PortAllocation::Intended(port) => Some(*port),
+                PortAllocation::Pending {
                     current: Some(current_port),
                     ..
                 } => Some(*current_port),
-                Allocation::Pending { current: None, .. } => None,
+                PortAllocation::Pending { current: None, .. } => None,
             })
             .collect()
+    }
+
+    fn get_route(&self, spec: &str) -> Option<PortAllocation<u16>> {
+        self.mappings.get(spec).cloned()
     }
 }
 
@@ -260,7 +292,7 @@ impl PortManager {
             table: RwLock::new(Table {
                 bindings: vec![None; PORTS],
                 mappings: HashMap::new(),
-                range: range_auto.clone(),
+                range_auto: range_auto.clone(),
                 cycle,
             }),
         }
@@ -271,7 +303,7 @@ impl PortManager {
         &self,
         spec: &str,
         port: Option<u16>,
-    ) -> Result<Option<Allocation<u16>>, PortError> {
+    ) -> Result<Option<PortAllocation<u16>>, PortError> {
         let port = match port {
             Some(p) => p,
             None => {
@@ -292,13 +324,14 @@ impl PortManager {
 
     /// Commits a port from an authoritative source into the tracking array.
     /// This will overwrite the existing allocation and should be called authoritatively.
-    pub fn sync(&self, spec: &str, port: Option<u16>) {
+    pub fn sync(&self, spec: &str, port: Option<u16>) -> PortSyncResult {
         let mut table = self.table.write().expect(LOCK_POISONED_ERROR);
-        table.sync(spec, port);
+        table.sync(spec, port)
     }
 
     /// Removes a pending port from the table and return it.
-    pub fn remove_pending(&self, spec: &str) -> bool {
+    #[cfg(test)]
+    fn remove_pending(&self, spec: &str) -> bool {
         let mut table = self.table.write().expect(LOCK_POISONED_ERROR);
         table.remove_pending(spec)
     }
@@ -310,11 +343,20 @@ impl PortManager {
     }
 
     /// Gets the allocation (Active or Pending) if it exists.
-    pub fn get(&self, port: u16) -> Option<Allocation<String>> {
+    #[allow(dead_code)]
+    pub fn get(&self, port: u16) -> Option<PortAllocation<String>> {
         if !self.range_reserved.contains(port) && !self.range_auto.contains(port) {
             return None;
         }
         self.table.read().expect(LOCK_POISONED_ERROR).get(port)
+    }
+
+    #[allow(dead_code)]
+    pub fn get_route(&self, spec: &str) -> Option<PortAllocation<u16>> {
+        self.table
+            .read()
+            .expect(LOCK_POISONED_ERROR)
+            .get_route(spec)
     }
 
     /// Returns the spec only if the service is Active
@@ -331,12 +373,6 @@ impl PortManager {
     /// Get active ports to listen on
     pub fn active_ports(&self) -> Vec<u16> {
         self.table.read().expect(LOCK_POISONED_ERROR).active_ports()
-    }
-
-    /// Removes an allocation (Active or Pending) from the routing table.
-    fn remove(&self, spec: &str) -> bool {
-        let mut table = self.table.write().expect(LOCK_POISONED_ERROR);
-        table.remove(spec)
     }
 }
 
@@ -371,7 +407,7 @@ mod tests {
         let alloc = pm.reserve("r1", Some(20001)).unwrap().unwrap();
         assert_eq!(
             alloc,
-            Allocation::Pending {
+            PortAllocation::Pending {
                 current: None,
                 next: 20001
             }
@@ -388,7 +424,7 @@ mod tests {
         let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
         assert_eq!(
             alloc,
-            Allocation::Pending {
+            PortAllocation::Pending {
                 current: None,
                 next: 30000
             }
@@ -471,7 +507,7 @@ mod tests {
         let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
         assert_eq!(
             alloc,
-            Allocation::Pending {
+            PortAllocation::Pending {
                 current: Some(20001),
                 next: 30000
             }
@@ -493,7 +529,7 @@ mod tests {
         assert_eq!(pm.get(20002), None);
         assert_eq!(
             pm.get(20003),
-            Some(Allocation::Pending {
+            Some(PortAllocation::Pending {
                 current: None,
                 next: "r1".to_string()
             })
@@ -508,7 +544,7 @@ mod tests {
 
         pm.reserve("r1", Some(20001)).unwrap();
         let reverted = pm.reserve("r1", Some(0)).unwrap().unwrap();
-        assert_eq!(reverted, Allocation::Intended(30000));
+        assert_eq!(reverted, PortAllocation::Intended(30000));
         assert_eq!(pm.get(20001), None);
     }
 
@@ -567,7 +603,7 @@ mod tests {
 
         assert_eq!(
             pm.get(20001),
-            Some(Allocation::Pending {
+            Some(PortAllocation::Pending {
                 current: None,
                 next: "r1".to_string()
             })
@@ -575,7 +611,10 @@ mod tests {
         assert_eq!(pm.active_route(20001), None);
 
         pm.sync("r1", Some(20001));
-        assert_eq!(pm.get(20001), Some(Allocation::Intended("r1".to_string())));
+        assert_eq!(
+            pm.get(20001),
+            Some(PortAllocation::Intended("r1".to_string()))
+        );
         assert_eq!(pm.active_route(20001), Some("r1".to_string()));
     }
 
@@ -596,7 +635,7 @@ mod tests {
         let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
         assert_eq!(
             alloc,
-            Allocation::Pending {
+            PortAllocation::Pending {
                 current: None,
                 next: 30000
             }

@@ -13,10 +13,8 @@ where
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointTarget {
-    #[serde(default)]
-    pub host: Option<String>,
-    #[serde(default)]
-    pub port: Option<u16>,
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
