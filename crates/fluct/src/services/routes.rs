@@ -11,45 +11,11 @@ use crate::{
     clients::KubernetesClient,
     config::{PortRange, ServiceContext},
     crd::{CTFRoute, CTFRouteEndpoints, CTFRouteSpecPair, CTFRouteStatus, EndpointTarget},
-    crypto::hash::sha256,
-    store::port::{self, PortAllocation, PortManager},
+    store::{
+        port::{self, PortAllocation, PortManager},
+        routes::{derive_hostname, extract_sni_hostname, CTFRouteStatusPair, MetadataAndSpec, HOSTNAME_ID_LEN},
+    },
 };
-
-const HOSTNAME_ID_LEN: usize = 16;
-pub type CTFRouteStatusPair = (String, CTFRouteStatus);
-
-fn derive_hostname(namespaced_id: &str, namespace: &str, tls_tag: Option<&str>) -> String {
-    let mut prefix = namespaced_id;
-    let tls_tag = if let Some(tag) = tls_tag {
-        tag
-    } else if let Some((left, right)) = namespaced_id.rsplit_once('-') {
-        prefix = left;
-        right
-    } else {
-        prefix = "";
-        namespaced_id
-    };
-    let input = format!("aincrad:hostname:{}:{}", namespace, tls_tag);
-    let hash = sha256(input.as_bytes());
-    let mut id = base32::encode(base32::Alphabet::Crockford, &hash).to_lowercase();
-    id.truncate(HOSTNAME_ID_LEN);
-    if prefix.is_empty() {
-        id
-    } else {
-        format!("{}-{}", prefix, id)
-    }
-}
-
-fn extract_sni_hostname(sni: &str) -> &str {
-    sni.split('.').next().unwrap_or(sni)
-}
-
-#[derive(Clone)]
-struct MetadataAndSpec {
-    generation: Option<i64>,
-    observed_generation: Option<i64>,
-    spec: Arc<CTFRouteSpecPair>,
-}
 
 pub struct RoutesService {
     client: KubernetesClient,
@@ -231,18 +197,7 @@ impl RoutesService {
                     .and_then(|status| status.endpoints.as_ref())
                     .and_then(|endpoints| endpoints.tcp.as_ref())
                     .map(|tcp| tcp.port);
-                match self.ports.insert(&namespaced_name, port) {
-                    port::PortSyncResult::Added(p) => {
-                        info!("route {namespaced_name} bound port {p}",)
-                    }
-                    port::PortSyncResult::Changed { old, new } => {
-                        info!("route {namespaced_name} swapped from {old} -> {new}")
-                    }
-                    port::PortSyncResult::Removed(p) => {
-                        info!("route {namespaced_name} unbound port {p}")
-                    }
-                    _ => (),
-                }
+                self.ports.insert(&namespaced_name, port);
 
                 let mut hostname_changed = true;
                 if let Some(prev) = prev {
@@ -282,9 +237,7 @@ impl RoutesService {
                     info!("Deregistering route {} hostname: {}", namespaced_name, host);
                     self.tls_routes.remove(&host);
                 }
-                if let port::PortSyncResult::Removed(p) = self.ports.insert(&namespaced_name, None) {
-                    info!("route {namespaced_name} unbound port {p}")
-                }
+                self.ports.insert(&namespaced_name, None);
                 info!("Removed route {}", namespaced_name);
                 None
             }
