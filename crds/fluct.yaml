@@ -76,3 +76,22 @@ spec:
                             type: string
                           port:
                             type: integer
+                  conditions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                        status:
+                          type: string
+                        reason:
+                          type: string
+                        message:
+                          type: string
+                        lastTransitionTime:
+                          type: string
+                          format: date-time
+                        observedGeneration:
+                          type: integer
+                      required: [type, status, reason, message, lastTransitionTime]

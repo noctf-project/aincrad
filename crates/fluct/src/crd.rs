@@ -26,13 +26,17 @@ pub struct CTFRouteEndpoints {
     pub tcp: Option<EndpointTarget>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteStatus {
     #[serde(default)]
     pub observed_generation: Option<i64>,
     #[serde(default)]
     pub endpoints: Option<CTFRouteEndpoints>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
 }
 
 pub type CTFRouteSpecPair = (String, CTFRouteSpec);

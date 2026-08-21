@@ -9,17 +9,17 @@ spec:
   secret: testing
   tls:
     key: any-entropy
-  backend: 10.244.0.15:8080
+  backend: example.com:80
 ---
-# TCP Route with auto-allocated port from Fluct
+# TCP Route with auto-allocated port
 apiVersion: aincrad.noctf.dev/v1
 kind: CTFRoute
 metadata:
   name: test-pwn-auto-port
   namespace: kubectf-challenges
 spec:
-  backend: 10.244.0.16:1337
-  port: 0 
+  backend: example.com:80
+  port: 20007
 ---
 # TCP Route with fixed port
 apiVersion: aincrad.noctf.dev/v1
@@ -28,5 +28,5 @@ metadata:
   name: test-pwn-fixed-port
   namespace: kubectf-challenges
 spec:
-  backend: 10.244.0.17:1337
-  port: 20001
+  backend: example.com:80
+  port: 20002

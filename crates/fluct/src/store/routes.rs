@@ -53,6 +53,7 @@ struct MetadataAndSpec {
 pub struct RoutesStore {
     client: KubernetesClient,
     hostname_suffix: String,
+    tls_port: u16,
     routes: DashMap<String, MetadataAndSpec>,
     ports: PortManager,
     tls_routes: DashMap<String, Arc<CTFRouteSpecPair>>,
@@ -62,12 +63,14 @@ impl RoutesStore {
     pub fn new(
         client: KubernetesClient,
         hostname_suffix: &str,
+        tls_port: u16,
         range_reserved: PortRange,
         range_auto: PortRange,
     ) -> Self {
         Self {
             client,
             hostname_suffix: hostname_suffix.to_owned(),
+            tls_port,
             routes: DashMap::new(),
             ports: PortManager::new(range_reserved, range_auto),
             tls_routes: DashMap::new(),
@@ -103,32 +106,100 @@ impl RoutesStore {
         let mut parts = spec.0.split(":");
         let namespace = parts.next().unwrap_or("default");
         let name = parts.next().unwrap_or("");
+
+        let mut conditions = Vec::new();
+        let tcp_reserve = self.ports.reserve(&spec.0, spec.1.port);
+
+        let tcp_endpoint = match tcp_reserve {
+            Ok(Some(r)) => {
+                let port = match r {
+                    PortAllocation::Intended(p) => p,
+                    PortAllocation::Pending { next, .. } => next,
+                };
+                conditions.push(k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    reason: "Ready".to_string(),
+                    message: "Route endpoints ready".to_string(),
+                    last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                        k8s_openapi::jiff::Timestamp::now(),
+                    ),
+                    observed_generation: generation,
+                });
+                Some(EndpointTarget {
+                    host: self.hostname_suffix.clone(),
+                    port,
+                })
+            }
+            Ok(None) => {
+                conditions.push(k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    reason: "Ready".to_string(),
+                    message: "Route endpoints ready".to_string(),
+                    last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                        k8s_openapi::jiff::Timestamp::now(),
+                    ),
+                    observed_generation: generation,
+                });
+                None
+            }
+            Err(e) => {
+                error!("{}", e);
+                let (reason, message) = match &e {
+                    super::port::PortError::Occupied(port, owner) => (
+                        "PortOccupied".to_string(),
+                        format!("port {port} is already occupied by route '{owner}'"),
+                    ),
+                    super::port::PortError::OutOfRange(port) => (
+                        "PortOutOfRange".to_string(),
+                        format!("port {port} is outside reserved range"),
+                    ),
+                    super::port::PortError::Exhausted => (
+                        "PortExhausted".to_string(),
+                        "auto port pool is exhausted".to_string(),
+                    ),
+                };
+
+                conditions.push(k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition {
+                    type_: "Ready".to_string(),
+                    status: "False".to_string(),
+                    reason,
+                    message,
+                    last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                        k8s_openapi::jiff::Timestamp::now(),
+                    ),
+                    observed_generation: generation,
+                });
+                None
+            }
+        };
         (
             spec.0.to_string(),
             CTFRouteStatus {
                 observed_generation: generation,
                 endpoints: Some(CTFRouteEndpoints {
                     tls: spec.1.tls.as_ref().map(|x| EndpointTarget {
-                        host: format!(
-                            "{}{}",
-                            derive_hostname(name, namespace, x.key.as_deref()),
-                            self.hostname_suffix
-                        ),
-                        port: 0,
+                        host: if self.hostname_suffix.is_empty() {
+                            derive_hostname(name, namespace, x.key.as_deref())
+                        } else if self.hostname_suffix.starts_with('.') {
+                            format!(
+                                "{}{}",
+                                derive_hostname(name, namespace, x.key.as_deref()),
+                                self.hostname_suffix
+                            )
+                        } else {
+                            format!(
+                                "{}.{}",
+                                derive_hostname(name, namespace, x.key.as_deref()),
+                                self.hostname_suffix
+                            )
+                        },
+                        port: self.tls_port,
                     }),
-                    tcp: self
-                        .ports
-                        .reserve(&spec.0, spec.1.port)
-                        .inspect_err(|e| error!("{}", e))
-                        .unwrap_or(None)
-                        .map(|r| EndpointTarget {
-                            host: self.hostname_suffix.clone(),
-                            port: match r {
-                                PortAllocation::Intended(p) => p,
-                                PortAllocation::Pending { next, .. } => next,
-                            },
-                        }),
+                    tcp: tcp_endpoint,
                 }),
+                conditions,
             },
         )
     }
@@ -145,17 +216,39 @@ impl RoutesStore {
                     namespaced_name.clone(),
                     MetadataAndSpec {
                         generation: data.metadata.generation,
-                        observed_generation: data.status.and_then(|x| x.observed_generation),
+                        observed_generation: data
+                            .status
+                            .as_ref()
+                            .and_then(|x| x.observed_generation),
                         spec: spec.clone(),
                     },
                 );
+
+                let port = data
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.endpoints.as_ref())
+                    .and_then(|endpoints| endpoints.tcp.as_ref())
+                    .map(|tcp| tcp.port);
+                match self.ports.sync(&namespaced_name, port) {
+                    PortSyncResult::Added(p) => {
+                        info!("route {namespaced_name} bound port {p}",)
+                    }
+                    PortSyncResult::Changed { old, new } => {
+                        info!("route {namespaced_name} swapped from {old} -> {new}")
+                    }
+                    PortSyncResult::Removed(p) => {
+                        info!("route {namespaced_name} unbound port {p}")
+                    }
+                    _ => (),
+                }
 
                 let mut hostname_changed = true;
                 if let Some(prev) = prev {
                     if prev.generation == data.metadata.generation {
                         return None;
                     }
-                    
+
                     hostname_changed = false;
                     // deregister old hostname if tls changed
                     if let Some(prev_tls) = &prev.spec.1.tls
@@ -173,18 +266,6 @@ impl RoutesStore {
                         info!("Registering route {} hostname: {}", namespaced_name, host);
                     }
                     self.tls_routes.insert(host, spec.clone());
-                }
-                match self.ports.sync(&namespaced_name, spec.1.port) {
-                    PortSyncResult::Added(p) => {
-                        info!("route {namespaced_name} bound port {p}",)
-                    }
-                    PortSyncResult::Changed { old, new } => {
-                        info!("route {namespaced_name} swapped from {old} -> {new}")
-                    }
-                    PortSyncResult::Removed(p) => {
-                        info!("route {namespaced_name} unbound port {p}")
-                    }
-                    _ => (),
                 }
 
                 Some(spec.clone())
@@ -284,14 +365,9 @@ impl RoutesStore {
                     if !locked {
                         continue;
                     }
-                    let (full, status) = &*arc;
-                    let mut parts = full.split(":");
-                    let namespace = parts.next().unwrap_or("default");
-                    let name = parts.next().unwrap_or("");
-                    match self.client
-                        .update_object_status::<CTFRoute, _>(name, namespace, status).await {
-                        Ok(()) => info!("updated status for {}", full),
-                        Err(e) => error!("could not update status: {}", e)
+                    if let Some(entry) = self.routes.get(&arc.0) {
+                        let (full, status) = self.desired_status(entry.value().generation, &arc);
+                        self.update_status(&full, status).await;
                     }
                 },
                 _ = cancel.cancelled() => {
@@ -358,6 +434,7 @@ mod tests {
         RoutesStore::new(
             KubernetesClient::new_dummy_for_tests(),
             suffix,
+            443,
             PortRange(20000..=20010),
             PortRange(30000..=30010),
         )
@@ -539,6 +616,7 @@ mod tests {
             status: Some(CTFRouteStatus {
                 observed_generation: Some(42),
                 endpoints: None,
+                conditions: Vec::new(),
             }),
         };
 
@@ -578,5 +656,90 @@ mod tests {
         let endpoints = status.endpoints.unwrap();
         assert_eq!(endpoints.tls.unwrap().host, expected_hostname);
         assert_eq!(endpoints.tcp.unwrap().port, 20001);
+
+        assert_eq!(status.conditions.len(), 1);
+        assert_eq!(status.conditions[0].type_, "Ready");
+        assert_eq!(status.conditions[0].status, "True");
+        assert_eq!(status.conditions[0].reason, "Ready");
+    }
+
+    #[tokio::test]
+    async fn test_desired_status_port_occupied_error() {
+        let store = make_store(".example.com");
+        store.ports.reserve("prod:r1", Some(20001)).unwrap();
+
+        let spec = CTFRouteSpec {
+            port: Some(20001),
+            backend: "backend:80".into(),
+            ..Default::default()
+        };
+        let pair = ("prod:r2".to_string(), spec);
+
+        let (_, status) = store.desired_status(Some(1), &pair);
+        assert!(status.endpoints.as_ref().unwrap().tcp.is_none());
+
+        assert_eq!(status.conditions.len(), 1);
+        assert_eq!(status.conditions[0].type_, "Ready");
+        assert_eq!(status.conditions[0].status, "False");
+        assert_eq!(status.conditions[0].reason, "PortOccupied");
+        assert!(status.conditions[0].message.contains("20001"));
+    }
+
+    #[tokio::test]
+    async fn test_desired_status_port_out_of_range_error() {
+        let store = make_store("example.com");
+
+        let spec = CTFRouteSpec {
+            port: Some(10000),
+            backend: "backend:80".into(),
+            ..Default::default()
+        };
+        let pair = ("prod:r1".to_string(), spec);
+
+        let (_, status) = store.desired_status(Some(1), &pair);
+        assert!(status.endpoints.as_ref().unwrap().tcp.is_none());
+
+        assert_eq!(status.conditions.len(), 1);
+        assert_eq!(status.conditions[0].type_, "Ready");
+        assert_eq!(status.conditions[0].status, "False");
+        assert_eq!(status.conditions[0].reason, "PortOutOfRange");
+    }
+
+    #[tokio::test]
+    async fn test_desired_status_hostname_suffix_formatting() {
+        let store = make_store("c.sk8.dog");
+        let spec = CTFRouteSpec {
+            backend: "backend:80".into(),
+            tls: Some(CTFRouteSpecTLS {
+                key: Some("web".to_string()),
+            }),
+            ..Default::default()
+        };
+        let pair = ("default:test-web-route".to_string(), spec);
+
+        let (_, status) = store.desired_status(Some(1), &pair);
+        let tls_host = status.endpoints.unwrap().tls.unwrap().host;
+
+        let expected_prefix = derive_hostname("test-web-route", "default", Some("web"));
+        assert_eq!(tls_host, format!("{expected_prefix}.c.sk8.dog"));
+    }
+
+    #[tokio::test]
+    async fn test_desired_status_empty_hostname_suffix() {
+        let store = make_store("");
+        let spec = CTFRouteSpec {
+            backend: "backend:80".into(),
+            tls: Some(CTFRouteSpecTLS {
+                key: Some("web".to_string()),
+            }),
+            ..Default::default()
+        };
+        let pair = ("default:test-web-route".to_string(), spec);
+
+        let (_, status) = store.desired_status(Some(1), &pair);
+        let tls_host = status.endpoints.unwrap().tls.unwrap().host;
+
+        let expected_prefix = derive_hostname("test-web-route", "default", Some("web"));
+        assert_eq!(tls_host, expected_prefix);
     }
 }

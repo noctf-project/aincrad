@@ -133,8 +133,7 @@ impl Table {
 
     fn sync(&mut self, spec: &str, port: Option<u16>) -> PortSyncResult {
         let port = match port {
-            Some(p) => p,
-            None => {
+            Some(0) | None => {
                 let old_mapping = self.mappings.get(spec).cloned();
                 let removed = self.remove(spec);
                 if !removed {
@@ -148,6 +147,7 @@ impl Table {
                     _ => PortSyncResult::Unchanged,
                 };
             }
+            Some(p) => p,
         };
 
         let idx = port as usize;
@@ -163,18 +163,27 @@ impl Table {
             None => None,
         };
 
-        let old_port = match old_mapping {
-            Some(PortAllocation::Intended(p)) => Some(p),
-            Some(PortAllocation::Pending { current, .. }) => current,
-            None => None,
+        let (old_port, old_next) = match old_mapping {
+            Some(PortAllocation::Intended(p)) => (Some(p), None),
+            Some(PortAllocation::Pending { current, next }) => (current, Some(next)),
+            None => (None, None),
         };
 
         if let Some(s) = old_spec
             && s != spec
         {
-            self.mappings.remove(&s);
+            if let Some(PortAllocation::Pending { next, .. }) = self.mappings.remove(&s)
+                && next != port
+            {
+                self.bindings[next as usize] = None;
+            }
         }
         if let Some(p) = old_port
+            && p != port
+        {
+            self.bindings[p as usize] = None;
+        }
+        if let Some(p) = old_next
             && p != port
         {
             self.bindings[p as usize] = None;
@@ -639,6 +648,52 @@ mod tests {
                 current: None,
                 next: 30000
             }
+        );
+    }
+
+    #[test]
+    fn test_sync_over_pending_clears_next_binding() {
+        let pm = make_pm();
+
+        pm.reserve("r1", Some(20002)).unwrap();
+        pm.sync("r1", Some(20001));
+
+        assert_eq!(pm.active_route(20001), Some("r1".to_string()));
+        assert_eq!(pm.get(20002), None);
+        assert_eq!(
+            pm.reserve("r2", Some(20002)),
+            Ok(Some(PortAllocation::Pending {
+                current: None,
+                next: 20002
+            }))
+        );
+    }
+
+    #[test]
+    fn test_sync_port_zero_ignored() {
+        let pm = make_pm();
+        let res = pm.sync("r1", Some(0));
+        assert_eq!(res, PortSyncResult::Unchanged);
+        assert!(!pm.active_ports().contains(&0));
+        assert_eq!(pm.active_route(0), None);
+    }
+
+    #[test]
+    fn test_sync_displacing_spec_with_pending_next_clears_ghost_binding() {
+        let pm = make_pm();
+
+        pm.sync("r1", Some(20001));
+        pm.reserve("r1", Some(20002)).unwrap();
+
+        pm.sync("r2", Some(20001));
+
+        assert_eq!(pm.get(20002), None);
+        assert_eq!(
+            pm.reserve("r3", Some(20002)),
+            Ok(Some(PortAllocation::Pending {
+                current: None,
+                next: 20002
+            }))
         );
     }
 }

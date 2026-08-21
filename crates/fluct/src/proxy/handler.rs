@@ -283,6 +283,7 @@ mod tests {
             challenges_store: RoutesStore::new(
                 client.clone(),
                 "",
+                443,
                 PortRange(20000..=20999),
                 PortRange(30000..=30999),
             ),
