@@ -287,13 +287,13 @@ impl Table {
     }
 }
 
-pub struct PortManager {
+pub struct PortsStore {
     range_reserved: PortRange,
     range_auto: PortRange,
     table: RwLock<Table>,
 }
 
-impl PortManager {
+impl PortsStore {
     pub fn new(range_reserved: PortRange, range_auto: PortRange) -> Self {
         let cycle = range_auto.clone().0.cycle();
         Self {
@@ -403,8 +403,8 @@ impl PortManager {
 mod tests {
     use super::*;
 
-    fn make_pm() -> PortManager {
-        PortManager::new(PortRange(20000..=20010), PortRange(30000..=30010))
+    fn make_pm() -> PortsStore {
+        PortsStore::new(PortRange(20000..=20010), PortRange(30000..=30010))
     }
 
     #[test]
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_auto_port_exhaustion() {
-        let pm = PortManager::new(PortRange(20000..=20010), PortRange(30000..=30001));
+        let pm = PortsStore::new(PortRange(20000..=20010), PortRange(30000..=30001));
         pm.reserve("r1", Some(0)).unwrap();
         pm.reserve("r2", Some(0)).unwrap();
         assert_eq!(pm.reserve("r3", Some(0)), Err(PortError::Exhausted));

@@ -10,21 +10,18 @@ use crate::{
     crypto::hash::sha256,
 };
 
-pub const HOSTNAME_ID_LEN: usize = 16;
+const HOSTNAME_ID_LEN: usize = 16;
 pub type CTFRouteStatusPair = (String, CTFRouteStatus);
 
-pub fn derive_hostname(name: &str, namespace: &str, tls_tag: Option<&str>) -> String {
-    let mut prefix = name;
-    let tls_tag = if let Some(tag) = tls_tag {
-        tag
+fn derive_hostname(name: &str, namespace: &str, tls_tag: Option<&str>) -> String {
+    let (prefix, tag, source) = if let Some(tag) = tls_tag {
+        (name, tag, "metadata")
     } else if let Some((left, right)) = name.rsplit_once('-') {
-        prefix = left;
-        right
+        (left, right, "key")
     } else {
-        prefix = "";
-        name
+        ("", name, "key")
     };
-    let input = format!("aincrad:hostname:{}:{}", namespace, tls_tag);
+    let input = format!("aincrad:hostname:{}:{}:{}", source, namespace, tag);
     let hash = sha256(input.as_bytes());
     let mut id = base32::encode(base32::Alphabet::Crockford, &hash).to_lowercase();
     id.truncate(HOSTNAME_ID_LEN);
@@ -35,7 +32,7 @@ pub fn derive_hostname(name: &str, namespace: &str, tls_tag: Option<&str>) -> St
     }
 }
 
-pub fn extract_sni_hostname(sni: &str) -> &str {
+fn extract_sni_hostname(sni: &str) -> &str {
     sni.split('.').next().unwrap_or(sni)
 }
 
@@ -380,8 +377,8 @@ mod tests {
         // Lookup with exact host prefix
         assert!(store.get_tls_route(&host).is_some());
 
-        // Lookup with domain suffix attached (e.g. SNI: chal-sni-xxx.c.sk8.dog)
-        let full_fqdn = format!("{host}.c.sk8.dog");
+        // Lookup with domain suffix attached (e.g. SNI: chal-sni-xxx.c.noctf.dev)
+        let full_fqdn = format!("{host}.c.noctf.dev");
         assert!(store.get_tls_route(&full_fqdn).is_some());
     }
 
@@ -480,5 +477,58 @@ mod tests {
             output.contains("Registering route default:chal-relog"),
             "Expected 'Registering route' log on same-TLS re-registration, but got: '{output}'"
         );
+    }
+
+    #[test]
+    fn test_derive_hostname_empty_and_tag() {
+        let host1 = derive_hostname("my-chal", "default", Some(""));
+        let host2 = derive_hostname("my-chal", "default", Some("web"));
+        let host3 = derive_hostname("my-chal", "other-ns", Some(""));
+        let host4 = derive_hostname("my-chal", "other-ns", None);
+        let host5 = derive_hostname("chal", "other-ns", None);
+
+        assert!(host1.starts_with("my-chal-"));
+        assert!(host2.starts_with("my-chal-"));
+        assert!(host3.starts_with("my-chal-"));
+
+        assert!(host4.starts_with("my-"));
+        assert!(!host4.starts_with("my-chal-"));
+        assert!(host4.len() == 3 + HOSTNAME_ID_LEN);
+
+        assert!(host5.len() == HOSTNAME_ID_LEN);
+        assert!(!host5.starts_with("chal-"));
+
+        assert_ne!(host1, host2);
+        assert_ne!(host1, host3);
+        assert_eq!(host1.len(), "my-chal-".len() + HOSTNAME_ID_LEN);
+    }
+
+    #[test]
+    fn test_extract_sni_hostname() {
+        assert_eq!(
+            extract_sni_hostname("my-chal-12345.c.noctf.dev"),
+            "my-chal-12345"
+        );
+        assert_eq!(extract_sni_hostname("my-chal-12345"), "my-chal-12345");
+        assert_eq!(extract_sni_hostname(""), "");
+    }
+
+    #[test]
+    fn test_derive_hostname_shared_hash_and_explicit_collision_prevention() {
+        // Shared hash for services sharing same key-derived team tag
+        let h1 = derive_hostname("web-chal1-service1-team1", "default", None);
+        let h2 = derive_hostname("web-chal1-service2-team1", "default", None);
+        assert!(h1.starts_with("web-chal1-service1-"));
+        assert!(h2.starts_with("web-chal1-service2-"));
+        // Hash component (last HOSTNAME_ID_LEN chars) matches
+        let hash1 = &h1[h1.len() - HOSTNAME_ID_LEN..];
+        let hash2 = &h2[h2.len() - HOSTNAME_ID_LEN..];
+        assert_eq!(hash1, hash2);
+        assert_ne!(h1, h2);
+
+        // Collision prevention between metadata tag vs key-derived tag
+        let h_metadata = derive_hostname("chal", "default", Some("web"));
+        let h_key = derive_hostname("chal-web", "default", None);
+        assert_ne!(h_metadata, h_key);
     }
 }
