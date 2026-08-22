@@ -1,6 +1,7 @@
 use std::{
     io::{self, Write},
     ops::RangeInclusive,
+    os::fd::RawFd,
     process::{Command, Stdio},
 };
 
@@ -52,9 +53,28 @@ enum Expression {
         #[serde(rename = "match")]
         match_expr: MatchExpr,
     },
-    Redirect {
-        redirect: RedirectExpr,
+    TProxy {
+        tproxy: TProxyExpr,
     },
+    Mangle {
+        mangle: MangleExpr,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct MangleExpr {
+    key: MangleKey,
+    value: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct MangleKey {
+    meta: MetaKey,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct MetaKey {
+    key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,14 +99,33 @@ struct PayloadExpr {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct RedirectExpr {
+struct TProxyExpr {
     port: u16,
+}
+
+/// Sets IP_TRANSPARENT on a socket file descriptor for Linux TPROXY.
+pub fn set_ip_transparent(fd: RawFd) -> io::Result<()> {
+    const IP_TRANSPARENT: libc::c_int = 19;
+    let opt: libc::c_int = 1;
+    let res = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_IP,
+            IP_TRANSPARENT,
+            &opt as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if res != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 const TABLE_NAME: &str = "fluct";
 const PREROUTING: &str = "prerouting";
 
-/// Generates the strongly-typed `NftablesPayload` for NAT redirection.
+/// Generates the strongly-typed `NftablesPayload` for TPROXY redirection.
 fn build_nat_payload(dest: u16, ranges: &[RangeInclusive<u16>]) -> NftablesPayload {
     let mut objects = vec![
         NftObject::Table {
@@ -100,9 +139,9 @@ fn build_nat_payload(dest: u16, ranges: &[RangeInclusive<u16>]) -> NftablesPaylo
                 family: "inet".to_string(),
                 table: TABLE_NAME.to_string(),
                 name: PREROUTING.to_string(),
-                chain_type: "nat".to_string(),
+                chain_type: "filter".to_string(),
                 hook: PREROUTING.to_string(),
-                prio: -100,
+                prio: -150,
                 policy: "accept".to_string(),
             },
         },
@@ -131,8 +170,18 @@ fn build_nat_payload(dest: u16, ranges: &[RangeInclusive<u16>]) -> NftablesPaylo
                             },
                         },
                     },
-                    Expression::Redirect {
-                        redirect: RedirectExpr { port: dest },
+                    Expression::TProxy {
+                        tproxy: TProxyExpr { port: dest },
+                    },
+                    Expression::Mangle {
+                        mangle: MangleExpr {
+                            key: MangleKey {
+                                meta: MetaKey {
+                                    key: "mark".to_string(),
+                                },
+                            },
+                            value: 1,
+                        },
                     },
                 ],
             },
@@ -162,8 +211,7 @@ fn apply_nat_payload(payload: &NftablesPayload) -> io::Result<()> {
     let output = child.wait_with_output()?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
+        return Err(io::Error::other(
             format!("nft failed: {err}"),
         ));
     }
@@ -192,10 +240,13 @@ mod tests {
         let json_bytes = serde_json::to_vec(&payload).unwrap();
         let json_str = String::from_utf8(json_bytes).unwrap();
 
-        assert!(json_str.contains("\"redirect\":{\"port\":32767}"));
+        assert!(json_str.contains("\"tproxy\":{\"port\":32767}"));
+        assert!(
+            json_str.contains("\"mangle\":{\"key\":{\"meta\":{\"key\":\"mark\"}},\"value\":1}")
+        );
         assert!(json_str.contains("\"table\":{\"family\":\"inet\",\"name\":\"fluct\"}"));
         assert!(!json_str.contains("\"table\":{\"table\""));
-        assert!(!json_str.contains("\"redirect\":{\"redirect\""));
+        assert!(!json_str.contains("\"tproxy\":{\"tproxy\""));
         assert!(json_str.contains("\"range\":[1000,2000]"));
         assert!(json_str.contains("\"range\":[3000,4000]"));
         assert!(json_str.contains("\"payload\":{\"protocol\":\"tcp\",\"field\":\"dport\"}"));

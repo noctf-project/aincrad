@@ -17,8 +17,8 @@ use crate::{config::ServiceContext, proxy::Handler};
 type ConnectionHandle = (u16, TcpStream, SocketAddr);
 
 pub async fn run(service: Arc<ServiceContext>) -> Result<(), Error> {
-    if service.config.nf_port.is_some() {
-        run_nf_listener(service).await
+    if service.config.tproxy_port.is_some() {
+        run_tproxy_listener(service).await
     } else {
         let (tx, rx) = mpsc::channel::<ConnectionHandle>(128);
         join!(
@@ -48,20 +48,34 @@ fn accept_connection(
     Some(())
 }
 
-async fn run_nf_listener(service: Arc<ServiceContext>) -> Result<(), Error> {
+async fn run_tproxy_listener(service: Arc<ServiceContext>) -> Result<(), Error> {
     let port = service
         .config
-        .nf_port
-        .ok_or_else(|| "DNAT port not configured in ServiceConfig".to_string())?;
+        .tproxy_port
+        .ok_or_else(|| "tproxy port not configured in ServiceConfig".to_string())?;
 
     let spec = format!("{}:{}", service.config.host, port);
-    let listener = match TcpListener::bind(&spec).await {
+    let socket_addr: SocketAddr = spec
+        .parse()
+        .map_err(|e| format!("Invalid listener address {spec}: {e}"))?;
+
+    let socket = if socket_addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+
+    crate::util::netfilter::set_ip_transparent(socket.as_raw_fd())?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(socket_addr)?;
+
+    let listener = match socket.listen(1024) {
         Ok(l) => {
-            info!("Bound DNAT listener on {}", spec);
+            info!("Bound TPROXY listener on {}", spec);
             l
         }
         Err(e) => {
-            error!("Unable to bind DNAT listener on {}", spec);
+            error!("Unable to bind TPROXY listener on {}: {}", spec, e);
             return Err(Box::new(e));
         }
     };
@@ -75,27 +89,24 @@ async fn run_nf_listener(service: Arc<ServiceContext>) -> Result<(), Error> {
                 let (socket, addr) = match res {
                     Ok(conn) => conn,
                     Err(err) => {
-                        error!("Error accepting connection on DNAT listener: {}", err);
+                        error!("Error accepting connection on tproxy listener: {}", err);
                         continue;
                     }
                 };
 
-                let original_dst = match crate::util::net::get_original_dst(
-                    socket.as_raw_fd(),
-                    socket.local_addr()?,
-                ) {
-                    Ok(dst) => dst,
+                let local_addr = match socket.local_addr() {
+                    Ok(l) => l,
                     Err(err) => {
-                        warn!("Failed to get SO_ORIGINAL_DST for connection {}: {}", addr, err);
+                        warn!("Failed to get local_addr for connection {}: {}", addr, err);
                         continue;
                     }
                 };
-                let port = original_dst.port();
+                let port = local_addr.port();
                 accept_connection(service.clone(), &tracker, port, socket, addr)
                   .unwrap_or_else(|| debug!("{addr} connected to unknown service at port {port}"));
             }
             _ = shutdown.cancelled() => {
-                info!("Shutting down DNAT listeners");
+                info!("Shutting down tproxy listeners");
                 break;
             }
         }

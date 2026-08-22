@@ -31,6 +31,4 @@ RUN cargo build --release -p fluct
 FROM alpine:3
 RUN apk add --no-cache nftables libcap
 COPY --from=builder /build/target/release/fluct /usr/local/bin/fluct
-RUN setcap cap_net_admin+ep /usr/sbin/nft && setcap cap_net_admin+ep /usr/local/bin/fluct
-USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/fluct"]
