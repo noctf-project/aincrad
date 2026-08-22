@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::{net::IpAddr, ops::RangeInclusive};
 
 use chrono::{DateTime, Utc};
 
@@ -13,3 +13,4 @@ pub struct Session {
     pub addr: IpAddr,
     pub timestamp: DateTime<Utc>,
 }
+

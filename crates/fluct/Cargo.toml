@@ -23,6 +23,9 @@ k8s-openapi = { workspace = true, features = ["latest", "schemars"] }
 kctf-pow = "2.1"
 kube = { workspace = true, features = ["runtime", "derive"] }
 kube-lease-manager = { workspace = true }
+libc = "0.2"
+mnl = "0.3"
+nftnl = "0.9"
 rand = { workspace = true }
 rustls-pemfile = "2"
 schemars = { workspace = true, features = ["chrono04"] }

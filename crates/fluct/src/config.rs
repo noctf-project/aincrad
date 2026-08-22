@@ -6,7 +6,24 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use fluct::Error;
+
 use crate::{services::routes::RoutesService, store::secrets::SecretsStore};
+
+pub fn parse_config() -> Result<ServiceConfig, Error> {
+    let raw = RawServiceConfig::parse();
+    raw.into_validated()
+}
+
+#[cfg(test)]
+pub fn parse_config_from<I, T>(itr: I) -> Result<ServiceConfig, Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let raw = RawServiceConfig::try_parse_from(itr)?;
+    raw.into_validated()
+}
 
 pub struct ServiceContext {
     pub config: ServiceConfig,
@@ -51,8 +68,9 @@ fn parse_port_range(s: &str) -> Result<PortRange, String> {
     Ok(PortRange(start..=end))
 }
 
-#[derive(Clone, Serialize, Deserialize, Parser)]
-pub struct ServiceConfig {
+/// Private CLI argument parser
+#[derive(Clone, Debug, Serialize, Deserialize, Parser)]
+struct RawServiceConfig {
     /// Host to listen on
     #[clap(long, default_value = "[::]")]
     pub host: String,
@@ -77,6 +95,9 @@ pub struct ServiceConfig {
     #[clap(long, default_value = "30000-32767", value_parser = parse_port_range)]
     pub auto_ports: PortRange,
 
+    #[clap(long)]
+    pub dnat_port: Option<u16>,
+
     /// Public Key File
     #[arg(long)]
     pub tls_cert: PathBuf,
@@ -98,44 +119,84 @@ pub struct ServiceConfig {
     pub logs_dir: String,
 }
 
+impl RawServiceConfig {
+    fn into_validated(self) -> Result<ServiceConfig, Error> {
+        let config = ServiceConfig {
+            host: self.host,
+            secret_root: self.secret_root,
+            http_port: self.http_port,
+            tls_port: self.tls_port,
+            reserved_ports: self.reserved_ports,
+            auto_ports: self.auto_ports,
+            dnat_port: self.dnat_port,
+            tls_cert: self.tls_cert,
+            tls_key: self.tls_key,
+            hostname_suffix: self.hostname_suffix,
+            flag_prefix: self.flag_prefix,
+            logs_dir: self.logs_dir,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+/// Public validated configuration struct
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceConfig {
+    pub host: String,
+    pub secret_root: String,
+    pub http_port: u16,
+    pub tls_port: u16,
+    pub reserved_ports: PortRange,
+    pub auto_ports: PortRange,
+    pub dnat_port: Option<u16>,
+    pub tls_cert: PathBuf,
+    pub tls_key: PathBuf,
+    pub hostname_suffix: String,
+    pub flag_prefix: String,
+    pub logs_dir: String,
+}
+
 impl ServiceConfig {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.http_port == self.tls_port {
-            return Err(format!(
-                "http-port ({}) cannot be the same as tls-port ({})",
-                self.http_port, self.tls_port
-            ));
+    fn validate(&self) -> Result<(), String> {
+        let mut single_ports = vec![("http-port", self.http_port), ("tls-port", self.tls_port)];
+        if let Some(port) = self.dnat_port {
+            single_ports.push(("dnat-port", port));
         }
-        if self.reserved_ports.contains(self.tls_port) {
-            return Err(format!(
-                "tls-port ({}) overlaps with reserved-ports ({:?})",
-                self.tls_port, self.reserved_ports.0
-            ));
+
+        // Check single port equality collisions
+        for i in 0..single_ports.len() {
+            for j in (i + 1)..single_ports.len() {
+                if single_ports[i].1 == single_ports[j].1 {
+                    return Err(format!(
+                        "{} ({}) cannot be the same as {} ({})",
+                        single_ports[i].0, single_ports[i].1, single_ports[j].0, single_ports[j].1
+                    ));
+                }
+            }
         }
-        if self.auto_ports.contains(self.tls_port) {
-            return Err(format!(
-                "tls-port ({}) overlaps with auto-ports ({:?})",
-                self.tls_port, self.auto_ports.0
-            ));
+
+        // Check single port vs range collisions
+        let ranges = [
+            ("reserved-ports", &self.reserved_ports),
+            ("auto-ports", &self.auto_ports),
+        ];
+        for (name, port) in &single_ports {
+            for (rname, range) in &ranges {
+                if range.contains(*port) {
+                    return Err(format!("{name} ({port}) overlaps with {rname} ({:?})", range.0));
+                }
+            }
         }
-        if self.reserved_ports.contains(self.http_port) {
-            return Err(format!(
-                "http-port ({}) overlaps with reserved-ports ({:?})",
-                self.http_port, self.reserved_ports.0
-            ));
-        }
-        if self.auto_ports.contains(self.http_port) {
-            return Err(format!(
-                "http-port ({}) overlaps with auto-ports ({:?})",
-                self.http_port, self.auto_ports.0
-            ));
-        }
+
+        // Check range vs range collision
         if self.reserved_ports.overlaps(&self.auto_ports) {
             return Err(format!(
                 "reserved-ports ({:?}) and auto-ports ({:?}) overlap",
                 self.reserved_ports.0, self.auto_ports.0
             ));
         }
+
         Ok(())
     }
 }
@@ -169,8 +230,7 @@ mod tests {
             "--auto-ports",
             "20000-29999",
         ];
-        let cfg = ServiceConfig::try_parse_from(args).unwrap();
-        cfg.validate().unwrap();
+        let cfg = parse_config_from(args).unwrap();
         assert_eq!(cfg.tls_cert, PathBuf::from("cert.pem"));
         assert_eq!(cfg.tls_key, PathBuf::from("key.pem"));
         assert_eq!(cfg.hostname_suffix, "example.com".to_string());
@@ -193,8 +253,25 @@ mod tests {
             "--auto-ports",
             "25000-35000",
         ];
-        let cfg = ServiceConfig::try_parse_from(args).unwrap();
-        assert!(cfg.validate().is_err());
+        assert!(parse_config_from(args).is_err());
+    }
+
+    #[test]
+    fn test_service_config_dnat_port_validation() {
+        let args = [
+            "fluct",
+            "--tls-cert",
+            "cert.pem",
+            "--tls-key",
+            "key.pem",
+            "--reserved-ports",
+            "20000-29999",
+            "--auto-ports",
+            "30000-39999",
+            "--dnat-port",
+            "25000",
+        ];
+        assert!(parse_config_from(args).is_err());
     }
 
     #[test]
@@ -208,3 +285,5 @@ mod tests {
         assert!(parse_hostname_suffix("invalid..domain").is_err());
     }
 }
+
+

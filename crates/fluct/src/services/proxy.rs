@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, os::fd::AsRawFd, sync::Arc, time::Duration};
 
 use fluct::Error;
 use tokio::{
@@ -17,12 +17,93 @@ use crate::{config::ServiceContext, proxy::Handler};
 type ConnectionHandle = (u16, TcpStream, SocketAddr);
 
 pub async fn run(service: Arc<ServiceContext>) -> Result<(), Error> {
-    let (tx, rx) = mpsc::channel::<ConnectionHandle>(128);
-    join!(
-        thread_listeners(service.clone(), tx),
-        tokio::spawn(thread_accept(service.clone(), rx))
-    )
-    .0
+    if service.config.dnat_port.is_some() {
+        dnat_listeners(service).await
+    } else {
+        let (tx, rx) = mpsc::channel::<ConnectionHandle>(128);
+        join!(
+            thread_listeners(service.clone(), tx),
+            tokio::spawn(thread_accept(service.clone(), rx))
+        )
+        .0
+    }
+}
+
+fn accept_connection(
+    service: Arc<ServiceContext>,
+    tracker: &TaskTracker,
+    port: u16,
+    socket: TcpStream,
+    addr: SocketAddr,
+) -> Option<()> {
+  let pair = service.routes_service.get_route_from_port(port)?;
+  trace!("Accepting connection {} on port {}", addr, port);
+  let mut handler = Handler::new(service, pair, addr);
+  tracker.spawn(async move {
+      if let Err(err) = handler.handle_socket(socket).await {
+          debug!("Error while processing connection {} due to: {}", addr, err);
+      }
+      trace!("Closing connection {}", addr);
+  });
+  Some(())
+}
+
+async fn dnat_listeners(service: Arc<ServiceContext>) -> Result<(), Error> {
+    let dnat_port = service
+        .config
+        .dnat_port
+        .ok_or_else(|| "DNAT port not configured in ServiceConfig".to_string())?;
+
+    let spec = format!("{}:{}", service.config.host, dnat_port);
+    let listener = match TcpListener::bind(&spec).await {
+        Ok(l) => {
+            info!("Bound DNAT listener on {}", spec);
+            l
+        }
+        Err(e) => {
+            error!("Unable to bind DNAT listener on {}", spec);
+            return Err(Box::new(e));
+        }
+    };
+
+    let tracker = TaskTracker::new();
+    let shutdown = service.shutdown.clone();
+
+    loop {
+        select! {
+            res = listener.accept() => {
+                let (socket, addr) = match res {
+                    Ok(conn) => conn,
+                    Err(err) => {
+                        error!("Error accepting connection on DNAT listener: {}", err);
+                        continue;
+                    }
+                };
+
+                let original_dst = match crate::util::sys::get_original_dst(
+                    socket.as_raw_fd(),
+                    socket.local_addr()?,
+                ) {
+                    Ok(dst) => dst,
+                    Err(err) => {
+                        warn!("Failed to get SO_ORIGINAL_DST for connection {}: {}", addr, err);
+                        continue;
+                    }
+                };
+                let port = original_dst.port();
+                accept_connection(service.clone(), &tracker, port, socket, addr)
+                  .unwrap_or_else(|| debug!("{addr} connected to unknown service at port {port}"));
+            }
+            _ = shutdown.cancelled() => {
+                info!("Shutting down DNAT listener on {}", spec);
+                break;
+            }
+        }
+    }
+
+    tracker.close();
+    tracker.wait().await;
+    Ok(())
 }
 
 async fn thread_listeners(
@@ -76,20 +157,10 @@ async fn thread_accept(
     let tracker = TaskTracker::new();
     let shutdown = service.shutdown.clone();
     loop {
-        // TODO: add graceful shutdown
         select! {
           Some((port, socket, addr)) = rx.recv() => {
-            if let Some(pair) = service.routes_service.get_route_from_port(port) {
-              let service = service.clone();
-              trace!("Accepting connection {} on port {}", addr, port);
-              let mut handler = Handler::new(service, pair, addr);
-              tracker.spawn(async move {
-                if let Err(err) = handler.handle_socket(socket).await {
-                  debug!("Error while processing connection {} due to: {}", addr, err);
-                }
-                trace!("Closing connection {}", addr);
-              });
-            }
+            accept_connection(service.clone(), &tracker, port, socket, addr)
+              .unwrap_or_else(|| debug!("{addr} connected to unknown service at port {port}"));
           },
           _ = shutdown.cancelled() => {
             break;

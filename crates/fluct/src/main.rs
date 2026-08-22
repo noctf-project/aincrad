@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use clap::Parser;
 use clients::KubernetesClient;
-use config::{ServiceConfig, ServiceContext};
+use config::ServiceContext;
 use fluct::Error;
 use tokio::try_join;
 use tokio_rustls::rustls::crypto::ring;
@@ -17,14 +16,14 @@ mod logger;
 mod proxy;
 mod services;
 mod store;
+mod util;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
     let _ = ring::default_provider().install_default();
 
-    let config = ServiceConfig::parse();
-    config.validate()?;
+    let config = config::parse_config()?;
 
     let shutdown = CancellationToken::new();
 
@@ -38,6 +37,14 @@ async fn main() -> Result<(), Error> {
         config.auto_ports.clone(),
     );
     let secrets_store = SecretsStore::new(kubernetes_client.clone(), &config.secret_root);
+
+    if let Some(dnat_port) = config.dnat_port {
+        util::sys::configure_nat(dnat_port, &[
+            config.auto_ports.0.clone(),
+            config.reserved_ports.0.clone(),
+        ])?;
+        util::sys::drop_caps()?;
+    }
 
     let service_context = Arc::new(ServiceContext {
         config,
