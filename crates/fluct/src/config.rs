@@ -80,7 +80,7 @@ struct RawServiceConfig {
     pub secret_root: String,
 
     /// HTTP listening port for Kubernetes webhooks and stats
-    #[clap(long, default_value = "8000")]
+    #[clap(long, default_value = "32600")]
     pub http_port: u16,
 
     /// Listening port for TLS challenges
@@ -95,8 +95,9 @@ struct RawServiceConfig {
     #[clap(long, default_value = "30000-32767", value_parser = parse_port_range)]
     pub auto_ports: PortRange,
 
-    #[clap(long)]
-    pub dnat_port: Option<u16>,
+    /// Internal listener port for Netfilter TCP redirection. This feature requires NET_ADMIN
+    #[arg(long)]
+    pub nf_port: Option<u16>,
 
     /// Public Key File
     #[arg(long)]
@@ -128,7 +129,7 @@ impl RawServiceConfig {
             tls_port: self.tls_port,
             reserved_ports: self.reserved_ports,
             auto_ports: self.auto_ports,
-            dnat_port: self.dnat_port,
+            nf_port: self.nf_port,
             tls_cert: self.tls_cert,
             tls_key: self.tls_key,
             hostname_suffix: self.hostname_suffix,
@@ -149,7 +150,7 @@ pub struct ServiceConfig {
     pub tls_port: u16,
     pub reserved_ports: PortRange,
     pub auto_ports: PortRange,
-    pub dnat_port: Option<u16>,
+    pub nf_port: Option<u16>,
     pub tls_cert: PathBuf,
     pub tls_key: PathBuf,
     pub hostname_suffix: String,
@@ -160,7 +161,7 @@ pub struct ServiceConfig {
 impl ServiceConfig {
     fn validate(&self) -> Result<(), String> {
         let mut single_ports = vec![("http-port", self.http_port), ("tls-port", self.tls_port)];
-        if let Some(port) = self.dnat_port {
+        if let Some(port) = self.nf_port {
             single_ports.push(("dnat-port", port));
         }
 

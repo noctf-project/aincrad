@@ -280,7 +280,7 @@ mod tests {
                 logs_dir: "./data/".into(),
                 reserved_ports: PortRange(20000..=20999),
                 auto_ports: PortRange(30000..=30999),
-                dnat_port: None,
+                nf_port: None,
             },
             routes_service: RoutesService::new(
                 client.clone(),

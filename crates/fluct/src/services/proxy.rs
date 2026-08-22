@@ -17,8 +17,8 @@ use crate::{config::ServiceContext, proxy::Handler};
 type ConnectionHandle = (u16, TcpStream, SocketAddr);
 
 pub async fn run(service: Arc<ServiceContext>) -> Result<(), Error> {
-    if service.config.dnat_port.is_some() {
-        dnat_listeners(service).await
+    if service.config.nf_port.is_some() {
+        run_nf_listener(service).await
     } else {
         let (tx, rx) = mpsc::channel::<ConnectionHandle>(128);
         join!(
@@ -37,7 +37,7 @@ fn accept_connection(
     addr: SocketAddr,
 ) -> Option<()> {
     let pair = service.routes_service.get_route_from_port(port)?;
-    trace!("Accepting connection {} on port {}", addr, port);
+    trace!("Accepting connection from {} (route {})", addr, pair.0);
     let mut handler = Handler::new(service, pair, addr);
     tracker.spawn(async move {
         if let Err(err) = handler.handle_socket(socket).await {
@@ -48,13 +48,13 @@ fn accept_connection(
     Some(())
 }
 
-async fn dnat_listeners(service: Arc<ServiceContext>) -> Result<(), Error> {
-    let dnat_port = service
+async fn run_nf_listener(service: Arc<ServiceContext>) -> Result<(), Error> {
+    let port = service
         .config
-        .dnat_port
+        .nf_port
         .ok_or_else(|| "DNAT port not configured in ServiceConfig".to_string())?;
 
-    let spec = format!("{}:{}", service.config.host, dnat_port);
+    let spec = format!("{}:{}", service.config.host, port);
     let listener = match TcpListener::bind(&spec).await {
         Ok(l) => {
             info!("Bound DNAT listener on {}", spec);
@@ -80,7 +80,7 @@ async fn dnat_listeners(service: Arc<ServiceContext>) -> Result<(), Error> {
                     }
                 };
 
-                let original_dst = match crate::util::sys::get_original_dst(
+                let original_dst = match crate::util::net::get_original_dst(
                     socket.as_raw_fd(),
                     socket.local_addr()?,
                 ) {

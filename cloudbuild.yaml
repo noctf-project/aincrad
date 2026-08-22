@@ -6,7 +6,7 @@ steps:
       - -t
       - $LOCATION-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/services/aincrad-fluct:latest
       - "-f"
-      - "crates/Dockerfile"
+      - "docker/rust.Dockerfile"
       - "."
   - id: push
     name: "gcr.io/cloud-builders/docker"
