@@ -39,11 +39,12 @@ async fn main() -> Result<(), Error> {
     let secrets_store = SecretsStore::new(kubernetes_client.clone(), &config.secret_root);
 
     if let Some(dnat_port) = config.dnat_port {
-        util::sys::configure_nat(dnat_port, &[
-            config.auto_ports.0.clone(),
-            config.reserved_ports.0.clone(),
-        ])?;
-        util::sys::drop_caps()?;
+        util::sys::configure_nat(
+            dnat_port,
+            &[config.auto_ports.0.clone(), config.reserved_ports.0.clone()],
+        )
+        .map_err(|e| format!("unable to configure nat {}", e))?;
+        util::sys::drop_caps().map_err(|e| format!("unable to drop caps {}", e))?;
     }
 
     let service_context = Arc::new(ServiceContext {

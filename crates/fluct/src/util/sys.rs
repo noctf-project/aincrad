@@ -1,5 +1,4 @@
-
-use std::{ffi::CStr, io, net::SocketAddr, ops::RangeInclusive, os::fd::RawFd};
+use std::{ffi::CStr, io, mem::MaybeUninit, net::SocketAddr, ops::RangeInclusive, os::fd::RawFd};
 
 use nftnl::{
     Batch, Chain, ChainType, FinalizedBatch, Hook, MsgType, ProtoFamily, Rule, Table,
@@ -20,54 +19,72 @@ pub fn configure_nat(dest: u16, ranges: &[RangeInclusive<u16>]) -> io::Result<()
 /// Extracts the original pre-DNAT destination address/port from a socket file descriptor.
 pub fn get_original_dst(fd: RawFd, addr: SocketAddr) -> io::Result<SocketAddr> {
     match addr {
-        SocketAddr::V4(_) => {
-            let mut sockaddr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-
-            let res = unsafe {
-                libc::getsockopt(
-                    fd,
-                    0,  // IPPROTO_IP
-                    80, // SO_ORIGINAL_DST
-                    &mut sockaddr as *mut _ as *mut libc::c_void,
-                    &mut len,
-                )
-            };
-            if res != 0 {
-                return Err(io::Error::last_os_error());
+        SocketAddr::V4(_) => get_original_dst_v4(fd),
+        SocketAddr::V6(v6_addr) => {
+            if v6_addr.ip().to_ipv4_mapped().is_some() {
+                if let Ok(v4_dst) = get_original_dst_v4(fd) {
+                    return Ok(v4_dst);
+                }
             }
-
-            let port = u16::from_be(sockaddr.sin_port);
-            let ip = std::net::Ipv4Addr::from(u32::from_be(sockaddr.sin_addr.s_addr));
-            Ok(SocketAddr::V4(std::net::SocketAddrV4::new(ip, port)))
-        }
-        SocketAddr::V6(_) => {
-            let mut sockaddr6: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t;
-
-            let res = unsafe {
-                libc::getsockopt(
-                    fd,
-                    41, // IPPROTO_IPV6
-                    80, // IP6T_SO_ORIGINAL_DST
-                    &mut sockaddr6 as *mut _ as *mut libc::c_void,
-                    &mut len,
-                )
-            };
-            if res != 0 {
-                return Err(io::Error::last_os_error());
-            }
-
-            let port = u16::from_be(sockaddr6.sin6_port);
-            let ip = std::net::Ipv6Addr::from(sockaddr6.sin6_addr.s6_addr);
-            Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
-                ip,
-                port,
-                u32::from_be(sockaddr6.sin6_flowinfo),
-                sockaddr6.sin6_scope_id,
-            )))
+            get_original_dst_v6(fd)
         }
     }
+}
+
+fn get_original_dst_v4(fd: RawFd) -> io::Result<SocketAddr> {
+    let mut sockaddr = MaybeUninit::<libc::sockaddr_in>::zeroed();
+    let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+
+    let res = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_IP,
+            libc::SO_ORIGINAL_DST,
+            sockaddr.as_mut_ptr() as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if res != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let sockaddr = unsafe { sockaddr.assume_init() };
+
+    let port = u16::from_be(sockaddr.sin_port);
+    let ip = std::net::Ipv4Addr::from(u32::from_be(sockaddr.sin_addr.s_addr));
+    Ok(SocketAddr::V4(std::net::SocketAddrV4::new(ip, port)))
+}
+
+fn get_original_dst_v6(fd: RawFd) -> io::Result<SocketAddr> {
+    let mut sockaddr6 = MaybeUninit::<libc::sockaddr_in6>::zeroed();
+    let mut len = std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t;
+
+    let res = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_IPV6,
+            80, // IP6T_SO_ORIGINAL_DST
+            sockaddr6.as_mut_ptr() as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if res != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let sockaddr6 = unsafe { sockaddr6.assume_init() };
+
+    let port = u16::from_be(sockaddr6.sin6_port);
+    let ip = std::net::Ipv6Addr::from(sockaddr6.sin6_addr.s6_addr);
+
+    if let Some(v4_ip) = ip.to_ipv4_mapped() {
+        return Ok(SocketAddr::V4(std::net::SocketAddrV4::new(v4_ip, port)));
+    }
+
+    let flowinfo = u32::from_be(sockaddr6.sin6_flowinfo);
+    let scope_id = sockaddr6.sin6_scope_id;
+    Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
+        ip, port, flowinfo, scope_id,
+    )))
 }
 
 #[repr(C)]
@@ -118,7 +135,7 @@ pub fn drop_caps() -> io::Result<()> {
     Ok(())
 }
 
-/// Builds the nftables NAT rule batch for multiple port ranges.
+/// Builds the nftables NAT rule batch for multiple port ranges (supporting IPv4 and IPv6).
 fn build_nat_batch(dest: u16, ranges: &[RangeInclusive<u16>]) -> FinalizedBatch {
     let table = Table::new(TABLE_NAME, ProtoFamily::Inet);
     let mut chain = Chain::new(CHAIN_NAME, &table);
@@ -129,38 +146,73 @@ fn build_nat_batch(dest: u16, ranges: &[RangeInclusive<u16>]) -> FinalizedBatch 
     batch.add(&table, MsgType::Add);
     batch.add(&chain, MsgType::Add);
 
+    let ip_v4 = u32::from(std::net::Ipv4Addr::new(127, 0, 0, 1)).to_be();
+    let ip_v6 = std::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1).octets();
+
     for range in ranges {
-        let mut rule = Rule::new(&chain);
-
-        // Match TCP protocol
-        rule.add_expr(&nft_expr!(meta l4proto));
-        rule.add_expr(&nft_expr!(cmp == libc::IPPROTO_TCP as u8));
-
-        // Load TCP destination port into Reg1
-        rule.add_expr(&Payload::Transport(TransportHeaderField::Tcp(
-            TcpHeaderField::Dport,
-        )));
-
-        // Match incoming port within specified range
-        rule.add_expr(&nft_expr!(cmp >= range.start().to_be()));
-        rule.add_expr(&nft_expr!(cmp <= range.end().to_be()));
-
-        // Set immediate destination port value in Reg1
-        rule.add_expr(&Immediate::new(dest.to_be(), Register::Reg1));
-
-        // Redirect to target destination port via DNAT
-        let nat_expr = Nat {
-            nat_type: NatType::DNat,
-            family: ProtoFamily::Inet,
-            ip_register: Register::Reg1,
-            port_register: Some(Register::Reg1),
-        };
-        rule.add_expr(&nat_expr);
-
-        batch.add(&rule, MsgType::Add);
+        add_nat_rule(
+            &mut batch,
+            &chain,
+            range,
+            libc::NFPROTO_IPV4 as u8,
+            ProtoFamily::Ipv4,
+            ip_v4,
+            dest,
+        );
+        add_nat_rule(
+            &mut batch,
+            &chain,
+            range,
+            libc::NFPROTO_IPV6 as u8,
+            ProtoFamily::Ipv6,
+            ip_v6,
+            dest,
+        );
     }
 
     batch.finalize()
+}
+
+fn add_nat_rule<T>(
+    batch: &mut Batch,
+    chain: &Chain,
+    range: &RangeInclusive<u16>,
+    nfproto: u8,
+    family: ProtoFamily,
+    ip_data: T,
+    dest: u16,
+) where
+    Immediate<T>: nftnl::expr::Expression,
+{
+    let mut rule = Rule::new(chain);
+
+    // Match L3 and L4 protocols
+    rule.add_expr(&nft_expr!(meta nfproto));
+    rule.add_expr(&nft_expr!(cmp == nfproto));
+    rule.add_expr(&nft_expr!(meta l4proto));
+    rule.add_expr(&nft_expr!(cmp == libc::IPPROTO_TCP as u8));
+
+    // Load and match TCP destination port range
+    rule.add_expr(&Payload::Transport(TransportHeaderField::Tcp(
+        TcpHeaderField::Dport,
+    )));
+    rule.add_expr(&nft_expr!(cmp >= range.start().to_be()));
+    rule.add_expr(&nft_expr!(cmp <= range.end().to_be()));
+
+    // Set destination IP in Reg1 and target port in Reg2
+    rule.add_expr(&Immediate::new(ip_data, Register::Reg1));
+    rule.add_expr(&Immediate::new(dest.to_be(), Register::Reg2));
+
+    // Redirect to target destination port via DNAT
+    let nat_expr = Nat {
+        nat_type: NatType::DNat,
+        family,
+        ip_register: Register::Reg1,
+        port_register: Some(Register::Reg2),
+    };
+    rule.add_expr(&nat_expr);
+
+    batch.add(&rule, MsgType::Add);
 }
 
 fn commit_batch(batch: &FinalizedBatch) -> io::Result<()> {

@@ -184,7 +184,10 @@ impl ServiceConfig {
         for (name, port) in &single_ports {
             for (rname, range) in &ranges {
                 if range.contains(*port) {
-                    return Err(format!("{name} ({port}) overlaps with {rname} ({:?})", range.0));
+                    return Err(format!(
+                        "{name} ({port}) overlaps with {rname} ({:?})",
+                        range.0
+                    ));
                 }
             }
         }
@@ -285,5 +288,3 @@ mod tests {
         assert!(parse_hostname_suffix("invalid..domain").is_err());
     }
 }
-
-

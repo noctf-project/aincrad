@@ -13,4 +13,3 @@ pub struct Session {
     pub addr: IpAddr,
     pub timestamp: DateTime<Utc>,
 }
-

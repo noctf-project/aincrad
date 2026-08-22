@@ -8,7 +8,7 @@ spec:
   availableAt: 2010-12-31T00:00:00.000Z
   secret: testing
   tls:
-    key: any-entropy
+    key: any-entropy2
   backend: example.com:80
 ---
 # TCP Route with auto-allocated port
@@ -29,4 +29,4 @@ metadata:
   namespace: kubectf-challenges
 spec:
   backend: example.com:80
-  port: 20002
+  port: 10000

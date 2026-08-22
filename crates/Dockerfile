@@ -9,6 +9,7 @@ RUN apk add --no-cache \
     capnproto \
     capnproto-dev \
     mpfr-dev \
+    libcap \
     libmnl-dev \
     libmnl-static \
     libnftnl-dev \
@@ -31,6 +32,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 RUN cargo build --release -p fluct
+RUN setcap cap_net_admin+ep /build/target/release/fluct
 
 # runtime image
 FROM gcr.io/distroless/static-debian13

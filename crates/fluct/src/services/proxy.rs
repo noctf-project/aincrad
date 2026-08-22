@@ -36,16 +36,16 @@ fn accept_connection(
     socket: TcpStream,
     addr: SocketAddr,
 ) -> Option<()> {
-  let pair = service.routes_service.get_route_from_port(port)?;
-  trace!("Accepting connection {} on port {}", addr, port);
-  let mut handler = Handler::new(service, pair, addr);
-  tracker.spawn(async move {
-      if let Err(err) = handler.handle_socket(socket).await {
-          debug!("Error while processing connection {} due to: {}", addr, err);
-      }
-      trace!("Closing connection {}", addr);
-  });
-  Some(())
+    let pair = service.routes_service.get_route_from_port(port)?;
+    trace!("Accepting connection {} on port {}", addr, port);
+    let mut handler = Handler::new(service, pair, addr);
+    tracker.spawn(async move {
+        if let Err(err) = handler.handle_socket(socket).await {
+            debug!("Error while processing connection {} due to: {}", addr, err);
+        }
+        trace!("Closing connection {}", addr);
+    });
+    Some(())
 }
 
 async fn dnat_listeners(service: Arc<ServiceContext>) -> Result<(), Error> {
@@ -95,7 +95,7 @@ async fn dnat_listeners(service: Arc<ServiceContext>) -> Result<(), Error> {
                   .unwrap_or_else(|| debug!("{addr} connected to unknown service at port {port}"));
             }
             _ = shutdown.cancelled() => {
-                info!("Shutting down DNAT listener on {}", spec);
+                info!("Shutting down DNAT listeners");
                 break;
             }
         }
