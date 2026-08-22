@@ -10,7 +10,7 @@ use crate::{
     crypto::hash::sha256,
 };
 
-const HOSTNAME_ID_LEN: usize = 13;
+const HOSTNAME_ID_LEN: usize = 14;
 pub type CTFRouteStatusPair = (String, CTFRouteStatus);
 
 fn derive_hostname(name: &str, namespace: &str, tls_tag: Option<&str>) -> String {

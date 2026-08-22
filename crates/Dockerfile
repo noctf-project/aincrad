@@ -18,7 +18,7 @@ WORKDIR /build
 
 # Prepare recipe using only manifests and crates
 FROM chef AS planner
-COPY Cargo.toml Cargo.lock .cargo ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -28,7 +28,7 @@ COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Copy source files and compile the final binary
-COPY Cargo.toml Cargo.lock .cargo ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 RUN cargo build --release -p fluct
 
