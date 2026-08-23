@@ -16,8 +16,14 @@ struct NftablesPayload {
 #[serde(untagged)]
 enum NftObject {
     Table { table: TableDef },
+    Flush { flush: FlushObj },
     Chain { chain: ChainDef },
     Rule { rule: RuleDef },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FlushObj {
+    table: TableDef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,6 +140,14 @@ fn build_nat_payload(dest: u16, ranges: &[RangeInclusive<u16>]) -> NftablesPaylo
                 name: TABLE_NAME.to_string(),
             },
         },
+        NftObject::Flush {
+            flush: FlushObj {
+                table: TableDef {
+                    family: "inet".to_string(),
+                    name: TABLE_NAME.to_string(),
+                },
+            },
+        },
         NftObject::Chain {
             chain: ChainDef {
                 family: "inet".to_string(),
@@ -211,9 +225,7 @@ fn apply_nat_payload(payload: &NftablesPayload) -> io::Result<()> {
     let output = child.wait_with_output()?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(io::Error::other(
-            format!("nft failed: {err}"),
-        ));
+        return Err(io::Error::other(format!("nft failed: {err}")));
     }
 
     Ok(())
@@ -234,12 +246,13 @@ mod tests {
         let ranges = [1000..=2000, 3000..=4000];
         let payload = build_nat_payload(32767, &ranges);
 
-        // 1 Table + 1 Chain + 2 Rules = 4 objects
-        assert_eq!(payload.nftables.len(), 4);
+        // 1 Table + 1 Flush + 1 Chain + 2 Rules = 5 objects
+        assert_eq!(payload.nftables.len(), 5);
 
         let json_bytes = serde_json::to_vec(&payload).unwrap();
         let json_str = String::from_utf8(json_bytes).unwrap();
 
+        assert!(json_str.contains("\"flush\":{\"table\":{\"family\":\"inet\",\"name\":\"fluct\"}}"));
         assert!(json_str.contains("\"tproxy\":{\"port\":32767}"));
         assert!(
             json_str.contains("\"mangle\":{\"key\":{\"meta\":{\"key\":\"mark\"}},\"value\":1}")

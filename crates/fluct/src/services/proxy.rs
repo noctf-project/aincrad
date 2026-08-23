@@ -16,9 +16,13 @@ use crate::{config::ServiceContext, proxy::Handler};
 
 type ConnectionHandle = (u16, TcpStream, SocketAddr);
 
-pub async fn run(service: Arc<ServiceContext>) -> Result<(), Error> {
+pub async fn run(
+    service: Arc<ServiceContext>,
+    tls_tx: Option<mpsc::Sender<(TcpStream, SocketAddr)>>,
+) -> Result<(), Error> {
     if service.config.tproxy_port.is_some() {
-        run_tproxy_listener(service).await
+        let tls_tx = tls_tx.ok_or_else(|| "tls_tx channel missing for tproxy".to_string())?;
+        run_tproxy_listener(service, tls_tx).await
     } else {
         let (tx, rx) = mpsc::channel::<ConnectionHandle>(128);
         join!(
@@ -48,7 +52,10 @@ fn accept_connection(
     Some(())
 }
 
-async fn run_tproxy_listener(service: Arc<ServiceContext>) -> Result<(), Error> {
+async fn run_tproxy_listener(
+    service: Arc<ServiceContext>,
+    tls_tx: mpsc::Sender<(TcpStream, SocketAddr)>,
+) -> Result<(), Error> {
     let port = service
         .config
         .tproxy_port
@@ -102,8 +109,14 @@ async fn run_tproxy_listener(service: Arc<ServiceContext>) -> Result<(), Error> 
                     }
                 };
                 let port = local_addr.port();
-                accept_connection(service.clone(), &tracker, port, socket, addr)
-                  .unwrap_or_else(|| debug!("{addr} connected to unknown service at port {port}"));
+                if port == service.config.tls_port {
+                    if let Err(err) = tls_tx.send((socket, addr)).await {
+                        warn!("Failed to send stream to tlsproxy channel: {}", err);
+                    }
+                } else {
+                    accept_connection(service.clone(), &tracker, port, socket, addr)
+                      .unwrap_or_else(|| debug!("{addr} connected to unknown service at port {port}"));
+                }
             }
             _ = shutdown.cancelled() => {
                 info!("Shutting down tproxy listeners");

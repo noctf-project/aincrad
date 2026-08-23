@@ -11,6 +11,7 @@ use crate::proxy::Handler;
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
+    sync::mpsc,
 };
 use tokio_rustls::{
     TlsAcceptor,
@@ -30,7 +31,27 @@ fn load_keys(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "cannot find private key"))
 }
 
-pub async fn run(service: Arc<ServiceContext>) -> Result<(), fluct::Error> {
+enum IncomingSource {
+    Listener(TcpListener),
+    Channel(mpsc::Receiver<(TcpStream, SocketAddr)>),
+}
+
+impl IncomingSource {
+    async fn accept(&mut self) -> Result<(TcpStream, SocketAddr), ()> {
+        match self {
+            IncomingSource::Listener(listener) => match listener.accept().await {
+                Ok(conn) => Ok(conn),
+                Err(_) => Err(()),
+            },
+            IncomingSource::Channel(rx) => rx.recv().await.ok_or(()),
+        }
+    }
+}
+
+pub async fn run(
+    service: Arc<ServiceContext>,
+    tls_rx: Option<mpsc::Receiver<(TcpStream, SocketAddr)>>,
+) -> Result<(), fluct::Error> {
     let certs = load_certs(&service.config.tls_cert)?;
     let key = load_keys(&service.config.tls_key)?;
     let tls_config = ServerConfig::builder()
@@ -38,13 +59,27 @@ pub async fn run(service: Arc<ServiceContext>) -> Result<(), fluct::Error> {
         .with_single_cert(certs, key)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
-    let spec = format!("[::]:{}", service.config.tls_port);
-    let listener = TcpListener::bind(&spec).await?;
-    info!("Binding TLS listener to {}", spec);
+
+    let mut source = match tls_rx {
+        Some(rx) => {
+            info!("tlsproxy listening on tproxy channel");
+            IncomingSource::Channel(rx)
+        }
+        None => {
+            let spec = format!("[::]:{}", service.config.tls_port);
+            let listener = TcpListener::bind(&spec).await?;
+            info!("Binding TLS listener to {}", spec);
+            IncomingSource::Listener(listener)
+        }
+    };
 
     loop {
         select! {
-          Ok((stream, addr)) = listener.accept() => {
+          res = source.accept() => {
+            let (stream, addr) = match res {
+                Ok(conn) => conn,
+                Err(_) => continue,
+            };
             let fut = handle_connection(acceptor.clone(), service.clone(), stream, addr);
             tokio::spawn(async move {
               if let Err(err) = fut.await {

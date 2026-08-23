@@ -38,13 +38,22 @@ async fn main() -> Result<(), Error> {
     );
     let secrets_store = SecretsStore::new(kubernetes_client.clone(), &config.secret_root);
 
-    if let Some(port) = config.tproxy_port {
+    let (tls_tx, tls_rx) = if let Some(port) = config.tproxy_port {
         util::netfilter::configure_netfilter(
             port,
-            &[config.auto_ports.0.clone(), config.reserved_ports.0.clone()],
+            &[
+                config.auto_ports.0.clone(),
+                config.reserved_ports.0.clone(),
+                config.tls_port..=config.tls_port,
+            ],
         )
         .map_err(|e| format!("unable to configure netfilter {}", e))?;
-    }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
 
     let service_context = Arc::new(ServiceContext {
         config,
@@ -60,7 +69,7 @@ async fn main() -> Result<(), Error> {
         ),
         wrap_err(
             "services::proxy::run",
-            services::proxy::run(service_context.clone())
+            services::proxy::run(service_context.clone(), tls_tx)
         ),
         wrap_err(
             "services::api::run",
@@ -68,7 +77,7 @@ async fn main() -> Result<(), Error> {
         ),
         wrap_err(
             "services::tlsproxy::run",
-            services::tlsproxy::run(service_context.clone())
+            services::tlsproxy::run(service_context.clone(), tls_rx)
         ),
         wrap_err(
             "challenges_store.run",
