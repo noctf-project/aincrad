@@ -27,6 +27,8 @@ pub struct CTFRouteEndpoints {
     pub tcp: Option<EndpointTarget>,
 }
 
+use crate::crd::util::list_schema;
+
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteStatus {
@@ -35,6 +37,7 @@ pub struct CTFRouteStatus {
     #[serde(default)]
     pub endpoints: Option<CTFRouteEndpoints>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(schema_with = "list_schema::<Condition>")]
     pub conditions: Vec<Condition>,
 }
 

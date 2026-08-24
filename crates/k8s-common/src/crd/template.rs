@@ -6,12 +6,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::crd::{
     CTFRouteSpec,
-    util::{KubeListKey, default_val, list_schema},
+    util::{KubeListKey, default_val, embedded_resource_schema, list_schema},
 };
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFTemplateStatus {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(schema_with = "list_schema::<Condition>")]
     pub conditions: Vec<Condition>,
 }
 
@@ -61,6 +63,7 @@ pub struct CTFTemplateSpecPod {
     pub name: String,
     #[serde(default = "default_val::<1>")]
     pub replicas: i32,
+    #[schemars(schema_with = "embedded_resource_schema::<PodSpec>")]
     pub spec: PodSpec,
 }
 
