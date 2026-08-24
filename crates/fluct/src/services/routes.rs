@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 use crate::{
     clients::KubernetesClient,
     config::{PortRange, ServiceContext},
-    crd::{CTFRoute, CTFRouteEndpoints, CTFRouteSpecPair, CTFRouteStatus, EndpointTarget},
+    crd::{CTFRoute, CTFRouteEndpoints, CTFRouteStatus, EndpointTarget},
     store::{
         ports::{self, PortAllocation, PortsStore},
         routes::{CTFRouteStatusPair, MetadataAndSpec, RoutesStore},
@@ -41,15 +41,8 @@ impl RoutesService {
         }
     }
 
-    pub fn get_tls_route(&self, hostname: &str) -> Option<Arc<CTFRouteSpecPair>> {
+    pub fn get_tls_route(&self, hostname: &str) -> Option<Arc<MetadataAndSpec>> {
         self.routes.get_tls_route(hostname)
-    }
-
-    #[cfg(test)]
-    fn get_observed_generation(&self, namespaced_name: &str) -> Option<i64> {
-        self.routes
-            .get_route(namespaced_name)
-            .and_then(|g| g.observed_generation)
     }
 
     fn format_tls_host(&self, key: &str) -> Option<String> {
@@ -63,13 +56,10 @@ impl RoutesService {
         }
     }
 
-    fn desired_status(
-        &self,
-        generation: Option<i64>,
-        spec: &CTFRouteSpecPair,
-    ) -> CTFRouteStatusPair {
+    fn desired_status(&self, generation: i64, route: &Arc<MetadataAndSpec>) -> CTFRouteStatusPair {
         let mut conditions = Vec::new();
-        let tcp_reserve = self.ports.reserve(&spec.0, spec.1.target_port);
+        let namespaced_name = route.namespaced_name();
+        let tcp_reserve = self.ports.reserve(&namespaced_name, route.spec.target_port);
 
         let tcp_endpoint = match tcp_reserve {
             Ok(Some(r)) => {
@@ -85,7 +75,7 @@ impl RoutesService {
                     last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                         k8s_openapi::jiff::Timestamp::now(),
                     ),
-                    observed_generation: generation,
+                    observed_generation: Some(generation),
                 });
                 Some(EndpointTarget {
                     host: self.hostname_suffix.clone(),
@@ -101,7 +91,7 @@ impl RoutesService {
                     last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                         k8s_openapi::jiff::Timestamp::now(),
                     ),
-                    observed_generation: generation,
+                    observed_generation: Some(generation),
                 });
                 None
             }
@@ -130,18 +120,18 @@ impl RoutesService {
                     last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                         k8s_openapi::jiff::Timestamp::now(),
                     ),
-                    observed_generation: generation,
+                    observed_generation: Some(generation),
                 });
                 None
             }
         };
         (
-            spec.0.to_string(),
+            namespaced_name.clone(),
             CTFRouteStatus {
-                observed_generation: generation,
+                observed_generation: Some(generation),
                 endpoints: Some(CTFRouteEndpoints {
-                    tls: spec.1.tls.as_ref().and_then(|_| {
-                        let host = self.format_tls_host(&spec.0)?;
+                    tls: route.spec.tls.as_ref().and_then(|_| {
+                        let host = self.format_tls_host(&namespaced_name)?;
                         Some(EndpointTarget {
                             host,
                             port: self.tls_port,
@@ -154,7 +144,7 @@ impl RoutesService {
         )
     }
 
-    fn handle_route_event(&self, event: Event<CTFRoute>) -> Option<Arc<CTFRouteSpecPair>> {
+    fn handle_route_event(&self, event: Event<CTFRoute>) -> Option<Arc<MetadataAndSpec>> {
         match event {
             Event::Apply(data) | Event::InitApply(data) => {
                 let name = data.metadata.name?;
@@ -165,16 +155,25 @@ impl RoutesService {
                         return None;
                     }
                 };
-                let namespace = data.metadata.namespace.as_deref().unwrap_or("default");
-                let namespaced_name = format!("{}:{}", namespace, name);
+                let generation = match data.metadata.generation {
+                    Some(g) => g,
+                    None => {
+                        warn!("Dropping CTFRoute {name}: missing metadata.generation");
+                        return None;
+                    }
+                };
+                let namespace = data.metadata.namespace.unwrap_or_else(|| "default".into());
 
-                let spec = Arc::new((namespaced_name.clone(), data.spec));
-                let prev = self.routes.insert(MetadataAndSpec {
+                let entry = Arc::new(MetadataAndSpec {
+                    name,
+                    namespace,
                     uid,
-                    generation: data.metadata.generation,
+                    generation,
                     observed_generation: data.status.as_ref().and_then(|x| x.observed_generation),
-                    spec: spec.clone(),
+                    spec: data.spec,
                 });
+                let namespaced_name = entry.namespaced_name();
+                let prev = self.routes.insert(entry.clone());
 
                 let port = data
                     .status
@@ -185,12 +184,12 @@ impl RoutesService {
                 self.ports.insert(&namespaced_name, port);
 
                 if let Some(prev) = prev
-                    && prev.generation == data.metadata.generation
+                    && prev.generation == generation
                 {
                     return None;
                 }
 
-                Some(spec)
+                Some(entry)
             }
             Event::Delete(data) => {
                 let name = data.metadata.name?;
@@ -210,7 +209,7 @@ impl RoutesService {
         &self,
         cancel: CancellationToken,
         mut receiver: mpsc::Receiver<Event<CTFRoute>>,
-        updater: Option<mpsc::Sender<Arc<CTFRouteSpecPair>>>,
+        updater: Option<mpsc::Sender<Arc<MetadataAndSpec>>>,
     ) {
         loop {
             select! {
@@ -241,7 +240,7 @@ impl RoutesService {
     async fn run_updates(
         &self,
         cancel: CancellationToken,
-        mut rx: mpsc::Receiver<Arc<CTFRouteSpecPair>>,
+        mut rx: mpsc::Receiver<Arc<MetadataAndSpec>>,
     ) -> Result<(), Error> {
         info!("started route status updater");
         let manager = self
@@ -265,7 +264,7 @@ impl RoutesService {
                         info!("Gained route status leader");
                         self.ports.clear_pending();
                         for route in self.routes.unsynced_routes() {
-                            let (full, status) = self.desired_status(route.generation, &route.spec);
+                            let (full, status) = self.desired_status(route.generation, &route);
                             self.update_status(&full, status).await
                                 .inspect(|_| info!("successfully updated status for {}", full))
                                 .unwrap_or_else(|e| error!("failed to update status: {}", e));
@@ -280,8 +279,8 @@ impl RoutesService {
                     if !locked {
                         continue;
                     }
-                    if let Some(metadata) = self.routes.get_route(&arc.0) {
-                        let (full, status) = self.desired_status(metadata.generation, &arc);
+                    if let Some(metadata) = self.routes.get_route(&arc.namespaced_name()) {
+                        let (full, status) = self.desired_status(metadata.generation, &metadata);
                         self.update_status(&full, status).await
                             .inspect(|_| info!("successfully updated status for {}", full))
                             .unwrap_or_else(|e| error!("failed to update status: {}", e));
@@ -306,9 +305,9 @@ impl RoutesService {
         self.ports.active_ports()
     }
 
-    pub fn get_route_from_port(&self, port: u16) -> Option<Arc<CTFRouteSpecPair>> {
+    pub fn get_route_from_port(&self, port: u16) -> Option<Arc<MetadataAndSpec>> {
         let port = self.ports.active_route(port)?;
-        self.routes.get_route(&port).map(|r| r.spec)
+        self.routes.get_route(&port)
     }
 
     pub async fn run(&self, ctx: Arc<ServiceContext>) -> Result<(), Error> {
@@ -369,12 +368,14 @@ mod tests {
             },
             ..Default::default()
         };
-        store.routes.insert(MetadataAndSpec {
+        store.routes.insert(Arc::new(MetadataAndSpec {
+            name: "my-chal".into(),
+            namespace: "default".into(),
             uid: "uid-port-lookup".into(),
-            generation: None,
+            generation: 1,
             observed_generation: None,
-            spec: Arc::new(("default:my-chal".to_string(), spec)),
-        });
+            spec,
+        }));
         store.ports.insert("default:my-chal", Some(20001));
 
         let active_ports = store.get_active_ports();
@@ -382,7 +383,7 @@ mod tests {
 
         let found = store.get_route_from_port(20001);
         assert!(found.is_some());
-        assert_eq!(found.unwrap().0, "default:my-chal");
+        assert_eq!(found.unwrap().namespaced_name(), "default:my-chal");
 
         assert!(store.get_route_from_port(20002).is_none());
     }
@@ -395,6 +396,7 @@ mod tests {
                 name: Some("test-chal".into()),
                 namespace: Some("default".into()),
                 uid: Some("uid-lifecycle".into()),
+                generation: Some(1),
                 ..Default::default()
             },
             spec: CTFRouteSpec {
@@ -415,9 +417,12 @@ mod tests {
         let derived_host = store.format_tls_host("default:test-chal").unwrap();
         let fetched_chal = store.get_tls_route(&derived_host);
         assert!(fetched_chal.is_some());
-        assert_eq!(fetched_chal.as_ref().unwrap().0, "default:test-chal");
         assert_eq!(
-            fetched_chal.as_ref().unwrap().1.backend,
+            fetched_chal.as_ref().unwrap().namespaced_name(),
+            "default:test-chal"
+        );
+        assert_eq!(
+            fetched_chal.as_ref().unwrap().spec.backend,
             CTFRouteBackend {
                 host: "backend-service".into(),
                 port: 80,
@@ -456,7 +461,7 @@ mod tests {
         store.handle_route_event(Event::Apply(chal.clone()));
         let host_v1 = store.format_tls_host("default:test-chal").unwrap();
         assert_eq!(
-            store.get_tls_route(&host_v1).unwrap().1.backend,
+            store.get_tls_route(&host_v1).unwrap().spec.backend,
             CTFRouteBackend {
                 host: "backend-service".into(),
                 port: 80,
@@ -471,7 +476,7 @@ mod tests {
         };
         store.handle_route_event(Event::Apply(chal.clone()));
         assert_eq!(
-            store.get_tls_route(&host_v1).unwrap().1.backend,
+            store.get_tls_route(&host_v1).unwrap().spec.backend,
             CTFRouteBackend {
                 host: "backend-service".into(),
                 port: 8080,
@@ -486,7 +491,7 @@ mod tests {
         store.handle_route_event(Event::Apply(chal.clone()));
         let host_v2 = store.format_tls_host("default:test-chal").unwrap();
         assert_eq!(
-            store.get_tls_route(&host_v2).unwrap().1.backend,
+            store.get_tls_route(&host_v2).unwrap().spec.backend,
             CTFRouteBackend {
                 host: "backend-service".into(),
                 port: 8080,
@@ -509,6 +514,7 @@ mod tests {
                 name: Some("status-chal".into()),
                 namespace: Some("default".into()),
                 uid: Some("uid-observed-gen".into()),
+                generation: Some(42),
                 ..Default::default()
             },
             spec: CTFRouteSpec {
@@ -526,13 +532,17 @@ mod tests {
         };
 
         store.handle_route_event(Event::Apply(chal.clone()));
-        let observed_gen = store.get_observed_generation("default:status-chal");
+        let observed_gen = store
+            .routes
+            .get_route("default:status-chal")
+            .and_then(|r| r.observed_generation);
         assert_eq!(observed_gen, Some(42));
 
         store.handle_route_event(Event::Delete(chal));
         assert!(
             store
-                .get_observed_generation("default:status-chal")
+                .routes
+                .get_route("default:status-chal")
                 .is_none()
         );
     }
@@ -551,15 +561,17 @@ mod tests {
             }),
             ..Default::default()
         };
-        let pair = ("prod:my-challenge".to_string(), spec);
-        store.routes.insert(MetadataAndSpec {
+        let route = Arc::new(MetadataAndSpec {
+            name: "my-challenge".into(),
+            namespace: "prod".into(),
             uid: "uid-desired-status".into(),
-            generation: Some(5),
+            generation: 5,
             observed_generation: None,
-            spec: Arc::new((pair.0.clone(), pair.1.clone())),
+            spec,
         });
+        store.routes.insert(route.clone());
 
-        let (full, status) = store.desired_status(Some(5), &pair);
+        let (full, status) = store.desired_status(5, &route);
         assert_eq!(full, "prod:my-challenge");
         assert_eq!(status.observed_generation, Some(5));
 
@@ -587,9 +599,16 @@ mod tests {
             },
             ..Default::default()
         };
-        let pair = ("prod:r2".to_string(), spec);
+        let route = Arc::new(MetadataAndSpec {
+            name: "r2".into(),
+            namespace: "prod".into(),
+            uid: "uid-r2".into(),
+            generation: 1,
+            observed_generation: None,
+            spec,
+        });
 
-        let (_, status) = store.desired_status(Some(1), &pair);
+        let (_, status) = store.desired_status(1, &route);
         assert!(status.endpoints.as_ref().unwrap().tcp.is_none());
 
         assert_eq!(status.conditions.len(), 1);
@@ -611,9 +630,16 @@ mod tests {
             },
             ..Default::default()
         };
-        let pair = ("prod:r1".to_string(), spec);
+        let route = Arc::new(MetadataAndSpec {
+            name: "r1".into(),
+            namespace: "prod".into(),
+            uid: "uid-r1".into(),
+            generation: 1,
+            observed_generation: None,
+            spec,
+        });
 
-        let (_, status) = store.desired_status(Some(1), &pair);
+        let (_, status) = store.desired_status(1, &route);
         assert!(status.endpoints.as_ref().unwrap().tcp.is_none());
 
         assert_eq!(status.conditions.len(), 1);
@@ -635,15 +661,17 @@ mod tests {
             }),
             ..Default::default()
         };
-        let pair = ("default:test-web-route".to_string(), spec);
-        store.routes.insert(MetadataAndSpec {
+        let route = Arc::new(MetadataAndSpec {
+            name: "test-web-route".into(),
+            namespace: "default".into(),
             uid: "uid-suffix-fmt".into(),
-            generation: Some(1),
+            generation: 1,
             observed_generation: None,
-            spec: Arc::new((pair.0.clone(), pair.1.clone())),
+            spec,
         });
+        store.routes.insert(route.clone());
 
-        let (_, status) = store.desired_status(Some(1), &pair);
+        let (_, status) = store.desired_status(1, &route);
         let tls_host = status.endpoints.unwrap().tls.unwrap().host;
 
         let expected_host = store.format_tls_host("default:test-web-route").unwrap();
@@ -664,15 +692,17 @@ mod tests {
             }),
             ..Default::default()
         };
-        let pair = ("default:test-web-route".to_string(), spec);
-        store.routes.insert(MetadataAndSpec {
+        let route = Arc::new(MetadataAndSpec {
+            name: "test-web-route".into(),
+            namespace: "default".into(),
             uid: "uid-empty-suffix".into(),
-            generation: Some(1),
+            generation: 1,
             observed_generation: None,
-            spec: Arc::new((pair.0.clone(), pair.1.clone())),
+            spec,
         });
+        store.routes.insert(route.clone());
 
-        let (_, status) = store.desired_status(Some(1), &pair);
+        let (_, status) = store.desired_status(1, &route);
         let tls_host = status.endpoints.unwrap().tls.unwrap().host;
 
         let expected_host = store.format_tls_host("default:test-web-route").unwrap();

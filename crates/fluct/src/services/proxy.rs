@@ -41,7 +41,11 @@ fn accept_connection(
     addr: SocketAddr,
 ) -> Option<()> {
     let pair = service.routes_service.get_route_from_port(port)?;
-    trace!("Accepting connection from {} (route {})", addr, pair.0);
+    trace!(
+        "Accepting connection from {} (route {})",
+        addr,
+        pair.namespaced_name()
+    );
     let mut handler = Handler::new(service, pair, addr);
     tracker.spawn(async move {
         if let Err(err) = handler.handle_socket(socket).await {

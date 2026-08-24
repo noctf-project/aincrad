@@ -15,18 +15,18 @@ use tracing::{debug, trace};
 
 use crate::{
     config::ServiceContext,
-    crd::CTFRouteSpecPair,
     logger::FileLogger,
     proxy::{
         challenge::{Challenge, ChallengeSolveState},
         flag::{FlagGenerator, V1FlagGenerator},
         get_line,
     },
+    store::routes::MetadataAndSpec,
 };
 
 pub struct Handler {
     service: Arc<ServiceContext>,
-    route: Arc<CTFRouteSpecPair>,
+    route: Arc<MetadataAndSpec>,
     session: Session,
     flag: String,
 }
@@ -41,7 +41,7 @@ type LogMessage = (u8, Vec<u8>);
 impl Handler {
     pub fn new(
         service: Arc<ServiceContext>,
-        route: Arc<CTFRouteSpecPair>,
+        route: Arc<MetadataAndSpec>,
         addr: SocketAddr,
     ) -> Self {
         Self {
@@ -67,8 +67,8 @@ impl Handler {
         W: AsyncWrite + Unpin,
     {
         let mut c_rx = BufReader::with_capacity(BUF_SIZE, c_rx);
-        let name = &self.route.0;
-        let spec = &self.route.1;
+        let name = self.route.namespaced_name();
+        let spec = &self.route.spec;
 
         let secret_name = match &spec.secret {
             Some(secret) => secret,
@@ -102,7 +102,7 @@ impl Handler {
             let secret = self
                 .service
                 .secrets_store
-                .derive_key(secret_name, name, "challenge")
+                .derive_key(secret_name, &name, "challenge")
                 .await
                 .unwrap_or_else(|| DEFAULT_SECRET.to_vec());
 
@@ -136,7 +136,7 @@ impl Handler {
         let secret = self
             .service
             .secrets_store
-            .derive_key(secret_name, name, "flag")
+            .derive_key(secret_name, &name, "flag")
             .await
             .unwrap_or_else(|| DEFAULT_SECRET.to_vec());
 
@@ -149,11 +149,7 @@ impl Handler {
             );
         }
 
-        let (namespace, _) = self
-            .route
-            .0
-            .split_once(':')
-            .unwrap_or(("default", &self.route.0));
+        let namespace = &self.route.namespace;
         let backend_addr = spec
             .backend
             .address(namespace, &self.service.config.cluster_domain);
@@ -257,7 +253,7 @@ impl Handler {
     fn get_log_filename(&self) -> String {
         let timestamp_nanos = (self.session.timestamp.timestamp() as u64) * 1_000_000_000
             + (self.session.timestamp.nanosecond() as u64);
-        format!("{}:{}", self.route.0, timestamp_nanos)
+        format!("{}:{}", self.route.namespaced_name(), timestamp_nanos)
     }
 }
 
@@ -314,20 +310,34 @@ mod tests {
             },
             ..Default::default()
         };
-        let challenge = Arc::new(("my-chal".to_string(), spec));
+        let challenge = Arc::new(MetadataAndSpec {
+            name: "my-chal".into(),
+            namespace: "default".into(),
+            uid: "uid-handler-log".into(),
+            generation: 1,
+            observed_generation: None,
+            spec,
+        });
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
         let mut handler = Handler::new(ctx, challenge, addr);
         handler.flag = "CTF{test_flag|secret_payload}".into();
 
         let filename = handler.get_log_filename();
-        assert!(filename.starts_with("my-chal:"));
+        assert!(filename.starts_with("default:my-chal:"));
     }
 
     #[tokio::test]
     async fn test_handler_pipe() {
         let ctx = create_test_service_context();
         let spec = CTFRouteSpec::default();
-        let challenge = Arc::new(("my-chal".to_string(), spec));
+        let challenge = Arc::new(MetadataAndSpec {
+            name: "my-chal".into(),
+            namespace: "default".into(),
+            uid: "uid-pipe".into(),
+            generation: 1,
+            observed_generation: None,
+            spec,
+        });
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
         let handler = Handler::new(ctx, challenge, addr);
 
@@ -370,7 +380,14 @@ mod tests {
             }),
             ..Default::default()
         };
-        let challenge = Arc::new(("my-chal".to_string(), spec));
+        let challenge = Arc::new(MetadataAndSpec {
+            name: "my-chal".into(),
+            namespace: "default".into(),
+            uid: "uid-unavail".into(),
+            generation: 1,
+            observed_generation: None,
+            spec,
+        });
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
         let mut handler = Handler::new(ctx, challenge, addr);
 
@@ -402,7 +419,14 @@ mod tests {
             }),
             ..Default::default()
         };
-        let challenge = Arc::new(("my-chal".to_string(), spec));
+        let challenge = Arc::new(MetadataAndSpec {
+            name: "my-chal".into(),
+            namespace: "default".into(),
+            uid: "uid-admin-bypass".into(),
+            generation: 1,
+            observed_generation: None,
+            spec,
+        });
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
         let mut handler = Handler::new(ctx, challenge, addr);
 

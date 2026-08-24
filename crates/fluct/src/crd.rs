@@ -39,8 +39,6 @@ pub struct CTFRouteStatus {
     pub conditions: Vec<Condition>,
 }
 
-pub type CTFRouteSpecPair = (String, CTFRouteSpec);
-
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteBackend {
@@ -64,7 +62,9 @@ impl CTFRouteBackend {
     }
 }
 
-#[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[derive(
+    CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq,
+)]
 #[kube(
     group = "aincrad.noctf.dev",
     version = "v1",

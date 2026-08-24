@@ -6,7 +6,7 @@ use std::{
 use tracing::info;
 
 use crate::{
-    crd::{CTFRouteSpecPair, CTFRouteStatus},
+    crd::{CTFRouteSpec, CTFRouteStatus},
     crypto::hash::sha256,
 };
 
@@ -25,36 +25,36 @@ fn extract_sni_hostname(sni: &str) -> &str {
     sni.split('.').next().unwrap_or(sni)
 }
 
-fn parse_namespaced_name(key: &str) -> (&str, &str) {
-    let mut parts = key.split(':');
-    let namespace = parts.next().unwrap_or("default");
-    let name = parts.next().unwrap_or("");
-    (namespace, name)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetadataAndSpec {
+    pub name: String,
+    pub namespace: String,
+    pub uid: String,
+    pub generation: i64,
+    pub observed_generation: Option<i64>,
+    pub spec: CTFRouteSpec,
 }
 
-#[derive(Clone, Debug)]
-pub struct MetadataAndSpec {
-    pub uid: String,
-    pub generation: Option<i64>,
-    pub observed_generation: Option<i64>,
-    pub spec: Arc<CTFRouteSpecPair>,
+impl MetadataAndSpec {
+    pub fn namespaced_name(&self) -> String {
+        format!("{}:{}", self.namespace, self.name)
+    }
 }
 
 #[derive(Default)]
 struct StoreInner {
-    routes: HashMap<String, MetadataAndSpec>,
-    tls: HashMap<String, Arc<CTFRouteSpecPair>>,
+    routes: HashMap<String, Arc<MetadataAndSpec>>,
+    tls: HashMap<String, Arc<MetadataAndSpec>>,
 }
 
 impl StoreInner {
-    fn insert(&mut self, entry: MetadataAndSpec) -> Option<MetadataAndSpec> {
-        let key = entry.spec.0.clone();
-        let (_namespace, name) = parse_namespaced_name(&key);
+    fn insert(&mut self, entry: Arc<MetadataAndSpec>) -> Option<Arc<MetadataAndSpec>> {
+        let key = entry.namespaced_name();
 
         let prev = self.routes.insert(key.clone(), entry.clone());
 
-        let prev_tls = prev.as_ref().and_then(|p| p.spec.1.tls.as_ref());
-        let new_tls = entry.spec.1.tls.as_ref();
+        let prev_tls = prev.as_ref().and_then(|p| p.spec.tls.as_ref());
+        let new_tls = entry.spec.tls.as_ref();
 
         if let Some(old_tls) = prev_tls
             && prev_tls != new_tls
@@ -64,7 +64,7 @@ impl StoreInner {
                 .prefix
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(name);
+                .unwrap_or(&prev_entry.name);
             let old_host = derive_hostname(old_prefix, &prev_entry.uid);
             info!("Deregistering route {key} hostname: {old_host}");
             self.tls.remove(&old_host);
@@ -75,27 +75,25 @@ impl StoreInner {
                 .prefix
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(name);
+                .unwrap_or(&entry.name);
             let host = derive_hostname(prefix, &entry.uid);
             info!("Registering route {key} hostname: {host}");
-            self.tls.insert(host, entry.spec.clone());
+            self.tls.insert(host, entry.clone());
         }
 
         prev
     }
 
-    fn remove(&mut self, key: &str) -> Option<MetadataAndSpec> {
-        let (_namespace, name) = parse_namespaced_name(key);
-
+    fn remove(&mut self, key: &str) -> Option<Arc<MetadataAndSpec>> {
         let prev = self.routes.remove(key);
         if let Some(ref prev_entry) = prev
-            && let Some(tls) = &prev_entry.spec.1.tls
+            && let Some(tls) = &prev_entry.spec.tls
         {
             let prefix = tls
                 .prefix
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(name);
+                .unwrap_or(&prev_entry.name);
             let host = derive_hostname(prefix, &prev_entry.uid);
             info!("Deregistering route {key} hostname: {host}");
             self.tls.remove(&host);
@@ -104,19 +102,19 @@ impl StoreInner {
         prev
     }
 
-    fn get_tls_route(&self, hostname: &str) -> Option<Arc<CTFRouteSpecPair>> {
+    fn get_tls_route(&self, hostname: &str) -> Option<Arc<MetadataAndSpec>> {
         let clean_host = extract_sni_hostname(hostname);
         self.tls.get(clean_host).cloned()
     }
 
-    fn get_route(&self, key: &str) -> Option<MetadataAndSpec> {
+    fn get_route(&self, key: &str) -> Option<Arc<MetadataAndSpec>> {
         self.routes.get(key).cloned()
     }
 
-    pub fn unsynced_routes(&self) -> Vec<MetadataAndSpec> {
+    pub fn unsynced_routes(&self) -> Vec<Arc<MetadataAndSpec>> {
         self.routes
             .values()
-            .filter(|v| v.generation > v.observed_generation)
+            .filter(|v| v.observed_generation.is_none_or(|obs| v.generation > obs))
             .cloned()
             .collect()
     }
@@ -135,27 +133,27 @@ impl RoutesStore {
         }
     }
 
-    pub fn insert(&self, entry: MetadataAndSpec) -> Option<MetadataAndSpec> {
+    pub fn insert(&self, entry: Arc<MetadataAndSpec>) -> Option<Arc<MetadataAndSpec>> {
         let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
         inner.insert(entry)
     }
 
-    pub fn remove(&self, key: &str) -> Option<MetadataAndSpec> {
+    pub fn remove(&self, key: &str) -> Option<Arc<MetadataAndSpec>> {
         let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
         inner.remove(key)
     }
 
-    pub fn get_tls_route(&self, hostname: &str) -> Option<Arc<CTFRouteSpecPair>> {
+    pub fn get_tls_route(&self, hostname: &str) -> Option<Arc<MetadataAndSpec>> {
         let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
         inner.get_tls_route(hostname)
     }
 
-    pub fn get_route(&self, key: &str) -> Option<MetadataAndSpec> {
+    pub fn get_route(&self, key: &str) -> Option<Arc<MetadataAndSpec>> {
         let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
         inner.get_route(key)
     }
 
-    pub fn unsynced_routes(&self) -> Vec<MetadataAndSpec> {
+    pub fn unsynced_routes(&self) -> Vec<Arc<MetadataAndSpec>> {
         let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
         inner.unsynced_routes()
     }
@@ -163,13 +161,12 @@ impl RoutesStore {
     pub fn get_hostname(&self, key: &str) -> Option<String> {
         let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
         let route = inner.get_route(key)?;
-        let tls = route.spec.1.tls.as_ref()?;
-        let (_namespace, name) = parse_namespaced_name(key);
+        let tls = route.spec.tls.as_ref()?;
         let prefix = tls
             .prefix
             .as_deref()
             .filter(|s| !s.is_empty())
-            .unwrap_or(name);
+            .unwrap_or(&route.name);
         Some(derive_hostname(prefix, &route.uid))
     }
 }
@@ -194,14 +191,15 @@ mod tests {
             ..Default::default()
         };
         let namespaced_name = "default:test-chal".to_string();
-        let pair = Arc::new((namespaced_name.clone(), spec));
 
-        let entry = MetadataAndSpec {
+        let entry = Arc::new(MetadataAndSpec {
+            name: "test-chal".into(),
+            namespace: "default".into(),
             uid: "uid-test".into(),
-            generation: Some(1),
+            generation: 1,
             observed_generation: None,
-            spec: pair.clone(),
-        };
+            spec,
+        });
 
         // Insert
         let prev = store.insert(entry);
@@ -210,16 +208,16 @@ mod tests {
         let host = derive_hostname("web", "uid-test");
         let tls_found = store.get_tls_route(&host);
         assert!(tls_found.is_some());
-        assert_eq!(tls_found.unwrap().0, namespaced_name);
+        assert_eq!(tls_found.unwrap().namespaced_name(), namespaced_name);
 
         let route_found = store.get_route(&namespaced_name);
         assert!(route_found.is_some());
-        assert_eq!(route_found.unwrap().generation, Some(1));
+        assert_eq!(route_found.unwrap().generation, 1);
 
         // Unsynced routes check
         let unsynced = store.unsynced_routes();
         assert_eq!(unsynced.len(), 1);
-        assert_eq!(unsynced[0].spec.0, namespaced_name);
+        assert_eq!(unsynced[0].namespaced_name(), namespaced_name);
 
         // Remove
         let removed = store.remove(&namespaced_name);
@@ -247,15 +245,17 @@ mod tests {
         let host_v1 = derive_hostname("v1", "uid-1");
 
         // Initial insert with tag "v1"
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "chal-web".into(),
+            namespace: "default".into(),
             uid: "uid-1".into(),
-            generation: Some(1),
+            generation: 1,
             observed_generation: None,
-            spec: Arc::new((key.clone(), spec.clone())),
-        });
+            spec: spec.clone(),
+        }));
 
         assert_eq!(
-            store.get_tls_route(&host_v1).unwrap().1.backend,
+            store.get_tls_route(&host_v1).unwrap().spec.backend,
             CTFRouteBackend {
                 host: "service".into(),
                 port: 80,
@@ -268,15 +268,17 @@ mod tests {
             host: "service".into(),
             port: 8080,
         };
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "chal-web".into(),
+            namespace: "default".into(),
             uid: "uid-1".into(),
-            generation: Some(2),
+            generation: 2,
             observed_generation: Some(1),
-            spec: Arc::new((key.clone(), spec.clone())),
-        });
+            spec: spec.clone(),
+        }));
 
         assert_eq!(
-            store.get_tls_route(&host_v1).unwrap().1.backend,
+            store.get_tls_route(&host_v1).unwrap().spec.backend,
             CTFRouteBackend {
                 host: "service".into(),
                 port: 8080,
@@ -288,16 +290,18 @@ mod tests {
         spec.tls = Some(CTFRouteSpecTLS {
             prefix: Some("v2".to_string()),
         });
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "chal-web".into(),
+            namespace: "default".into(),
             uid: "uid-1".into(),
-            generation: Some(3),
+            generation: 3,
             observed_generation: Some(2),
-            spec: Arc::new((key.clone(), spec.clone())),
-        });
+            spec: spec.clone(),
+        }));
 
         assert!(store.get_tls_route(&host_v1).is_none());
         assert_eq!(
-            store.get_tls_route(&host_v2).unwrap().1.backend,
+            store.get_tls_route(&host_v2).unwrap().spec.backend,
             CTFRouteBackend {
                 host: "service".into(),
                 port: 8080,
@@ -307,12 +311,14 @@ mod tests {
 
         // Update with TLS disabled (tls = None) -> host_v2 should be deregistered
         spec.tls = None;
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "chal-web".into(),
+            namespace: "default".into(),
             uid: "uid-1".into(),
-            generation: Some(4),
+            generation: 4,
             observed_generation: Some(3),
-            spec: Arc::new((key.clone(), spec.clone())),
-        });
+            spec: spec.clone(),
+        }));
 
         assert!(store.get_tls_route(&host_v2).is_none());
         assert_eq!(store.get_hostname(&key), None);
@@ -322,69 +328,60 @@ mod tests {
     fn test_generation_edge_cases_and_unsynced_filtering() {
         let store = RoutesStore::new();
 
-        // Edge Case: None vs None -> not unsynced
-        let key1 = "default:r1".to_string();
-        store.insert(MetadataAndSpec {
-            uid: "uid-r1".into(),
-            generation: None,
-            observed_generation: None,
-            spec: Arc::new((key1.clone(), CTFRouteSpec::default())),
-        });
-
-        // Edge Case: Some(1) vs None -> unsynced (Some(1) > None in Rust)
+        // Edge Case: 1 vs None -> unsynced
         let key2 = "default:r2".to_string();
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "r2".into(),
+            namespace: "default".into(),
             uid: "uid-r2".into(),
-            generation: Some(1),
+            generation: 1,
             observed_generation: None,
-            spec: Arc::new((key2.clone(), CTFRouteSpec::default())),
-        });
+            spec: CTFRouteSpec::default(),
+        }));
 
-        // Edge Case: Some(2) vs Some(1) -> unsynced (generation > observed_generation)
+        // Edge Case: 2 vs Some(1) -> unsynced (generation > observed_generation)
         let key3 = "default:r3".to_string();
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "r3".into(),
+            namespace: "default".into(),
             uid: "uid-r3".into(),
-            generation: Some(2),
+            generation: 2,
             observed_generation: Some(1),
-            spec: Arc::new((key3.clone(), CTFRouteSpec::default())),
-        });
+            spec: CTFRouteSpec::default(),
+        }));
 
-        // Edge Case: Some(3) vs Some(3) -> synced (generation == observed_generation)
-        let key4 = "default:r4".to_string();
-        store.insert(MetadataAndSpec {
+        // Edge Case: 3 vs Some(3) -> synced (generation == observed_generation)
+        let _key4 = "default:r4".to_string();
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "r4".into(),
+            namespace: "default".into(),
             uid: "uid-r4".into(),
-            generation: Some(3),
+            generation: 3,
             observed_generation: Some(3),
-            spec: Arc::new((key4.clone(), CTFRouteSpec::default())),
-        });
-
-        // Edge Case: None vs Some(1) -> not unsynced (None > Some(1) is false)
-        let key5 = "default:r5".to_string();
-        store.insert(MetadataAndSpec {
-            uid: "uid-r5".into(),
-            generation: None,
-            observed_generation: Some(1),
-            spec: Arc::new((key5.clone(), CTFRouteSpec::default())),
-        });
+            spec: CTFRouteSpec::default(),
+        }));
 
         let unsynced = store.unsynced_routes();
-        let unsynced_keys: Vec<String> = unsynced.into_iter().map(|m| m.spec.0.clone()).collect();
+        let unsynced_keys: Vec<String> =
+            unsynced.into_iter().map(|m| m.namespaced_name()).collect();
 
         assert_eq!(unsynced_keys.len(), 2);
         assert!(unsynced_keys.contains(&key2));
         assert!(unsynced_keys.contains(&key3));
 
         // Advance observed_generation for r3 to match generation -> r3 becomes synced
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "r3".into(),
+            namespace: "default".into(),
             uid: "uid-r3".into(),
-            generation: Some(2),
+            generation: 2,
             observed_generation: Some(2),
-            spec: Arc::new((key3.clone(), CTFRouteSpec::default())),
-        });
+            spec: CTFRouteSpec::default(),
+        }));
 
         let updated_unsynced = store.unsynced_routes();
         assert_eq!(updated_unsynced.len(), 1);
-        assert_eq!(updated_unsynced[0].spec.0, key2);
+        assert_eq!(updated_unsynced[0].namespaced_name(), key2);
     }
 
     #[test]
@@ -398,7 +395,7 @@ mod tests {
         assert!(store.remove("nonexistent:key").is_none());
 
         // Insert route with TLS
-        let key = "prod:chal-sni".to_string();
+        let _key = "prod:chal-sni".to_string();
         let spec = CTFRouteSpec {
             backend: CTFRouteBackend {
                 host: "backend".into(),
@@ -411,12 +408,14 @@ mod tests {
         };
         let host = derive_hostname("web", "uid-sni");
 
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "chal-sni".into(),
+            namespace: "prod".into(),
             uid: "uid-sni".into(),
-            generation: Some(1),
+            generation: 1,
             observed_generation: None,
-            spec: Arc::new((key.clone(), spec)),
-        });
+            spec,
+        }));
 
         // Lookup with exact host prefix
         assert!(store.get_tls_route(&host).is_some());
@@ -440,24 +439,28 @@ mod tests {
             tls: None,
             ..Default::default()
         };
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "chal-none-to-some".into(),
+            namespace: "default".into(),
             uid: "uid-none-to-some".into(),
-            generation: Some(1),
+            generation: 1,
             observed_generation: None,
-            spec: Arc::new((key.clone(), spec.clone())),
-        });
+            spec: spec.clone(),
+        }));
         assert_eq!(store.get_hostname(&key), None);
 
         // Transition from None -> Some(tls)
         spec.tls = Some(CTFRouteSpecTLS {
             prefix: Some("web".to_string()),
         });
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "chal-none-to-some".into(),
+            namespace: "default".into(),
             uid: "uid-none-to-some".into(),
-            generation: Some(2),
+            generation: 2,
             observed_generation: Some(1),
-            spec: Arc::new((key.clone(), spec.clone())),
-        });
+            spec: spec.clone(),
+        }));
 
         let host = derive_hostname("web", "uid-none-to-some");
         assert_eq!(store.get_hostname(&key), Some(host.clone()));
@@ -495,7 +498,7 @@ mod tests {
             .try_init();
 
         let store = RoutesStore::new();
-        let key = "default:chal-relog".to_string();
+        let _key = "default:chal-relog".to_string();
 
         let mut spec = CTFRouteSpec {
             backend: CTFRouteBackend {
@@ -509,12 +512,14 @@ mod tests {
         };
 
         // Initial insert
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "chal-relog".into(),
+            namespace: "default".into(),
             uid: "uid-relog".into(),
-            generation: Some(1),
+            generation: 1,
             observed_generation: None,
-            spec: Arc::new((key.clone(), spec.clone())),
-        });
+            spec: spec.clone(),
+        }));
 
         // Clear log buffer and insert update with SAME TLS tag, updated backend
         buf.lock().unwrap().clear();
@@ -522,12 +527,14 @@ mod tests {
             host: "service".into(),
             port: 8080,
         };
-        store.insert(MetadataAndSpec {
+        store.insert(Arc::new(MetadataAndSpec {
+            name: "chal-relog".into(),
+            namespace: "default".into(),
             uid: "uid-relog".into(),
-            generation: Some(2),
+            generation: 2,
             observed_generation: Some(1),
-            spec: Arc::new((key.clone(), spec.clone())),
-        });
+            spec: spec.clone(),
+        }));
 
         let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(
