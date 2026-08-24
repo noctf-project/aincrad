@@ -10,7 +10,7 @@ spec:
     port: 80
   secret: testing
   tls:
-    key: any-entropy2
+    prefix: tls-test
 ---
 # TCP Route with auto-allocated port
 apiVersion: aincrad.noctf.dev/v1

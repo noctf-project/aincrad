@@ -393,7 +393,7 @@ mod tests {
                     port: 80,
                 },
                 tls: Some(CTFRouteSpecTLS {
-                    key: Some("web".to_string()),
+                    prefix: Some("web".to_string()),
                 }),
                 ..Default::default()
             },
@@ -435,7 +435,7 @@ mod tests {
                     port: 80,
                 },
                 tls: Some(CTFRouteSpecTLS {
-                    key: Some("web".to_string()),
+                    prefix: Some("web".to_string()),
                 }),
                 ..Default::default()
             },
@@ -470,7 +470,7 @@ mod tests {
         // Apply update with NEW tag (should register new first, then deregister old)
         chal.metadata.generation = Some(3);
         chal.spec.tls = Some(CTFRouteSpecTLS {
-            key: Some("web2".to_string()),
+            prefix: Some("web2".to_string()),
         });
         store.handle_route_event(Event::Apply(chal.clone()));
         let host_v2 = store.format_tls_host("default:test-chal").unwrap();
@@ -535,7 +535,7 @@ mod tests {
                 port: 80,
             },
             tls: Some(CTFRouteSpecTLS {
-                key: Some("web".to_string()),
+                prefix: Some("web".to_string()),
             }),
             ..Default::default()
         };
@@ -618,7 +618,7 @@ mod tests {
                 port: 80,
             },
             tls: Some(CTFRouteSpecTLS {
-                key: Some("web".to_string()),
+                prefix: Some("web".to_string()),
             }),
             ..Default::default()
         };
@@ -646,7 +646,7 @@ mod tests {
                 port: 80,
             },
             tls: Some(CTFRouteSpecTLS {
-                key: Some("web".to_string()),
+                prefix: Some("web".to_string()),
             }),
             ..Default::default()
         };

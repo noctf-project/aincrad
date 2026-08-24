@@ -100,7 +100,7 @@ pub struct CTFRouteSpecPOW {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteSpecTLS {
-    pub key: Option<String>,
+    pub prefix: Option<String>,
 }
 
 #[cfg(test)]
@@ -130,7 +130,7 @@ mod tests {
             "tls": {},
         });
         let spec_empty_tag: CTFRouteSpec = serde_json::from_value(json_empty_tag).unwrap();
-        assert_eq!(spec_empty_tag.tls, Some(CTFRouteSpecTLS { key: None }));
+        assert_eq!(spec_empty_tag.tls, Some(CTFRouteSpecTLS { prefix: None }));
 
         let json_full = serde_json::json!({
             "backend": {
@@ -140,7 +140,7 @@ mod tests {
             "flag": "my_flag",
             "targetPort": 20001,
             "tls": {
-                "key": "web"
+                "prefix": "web"
             },
         });
         let spec_full: CTFRouteSpec = serde_json::from_value(json_full).unwrap();
@@ -149,7 +149,7 @@ mod tests {
         assert_eq!(
             spec_full.tls,
             Some(CTFRouteSpecTLS {
-                key: Some("web".to_string())
+                prefix: Some("web".to_string())
             })
         );
     }

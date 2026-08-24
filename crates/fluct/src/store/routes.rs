@@ -13,23 +13,13 @@ use crate::{
 const HOSTNAME_ID_LEN: usize = 14;
 pub type CTFRouteStatusPair = (String, CTFRouteStatus);
 
-fn derive_hostname(name: &str, namespace: &str, tls_tag: Option<&str>) -> String {
-    let (prefix, tag, source) = if let Some(tag) = tls_tag {
-        (name, tag, "metadata")
-    } else if let Some((left, right)) = name.rsplit_once('-') {
-        (left, right, "key")
-    } else {
-        ("", name, "key")
-    };
-    let input = format!("aincrad:hostname:{}:{}:{}", source, namespace, tag);
+fn derive_hostname(name: &str, namespace: &str, prefix: Option<&str>) -> String {
+    let p = prefix.filter(|s| !s.is_empty()).unwrap_or(name);
+    let input = format!("aincrad:hostname:{}:{}", namespace, name);
     let hash = sha256(input.as_bytes());
     let mut id = base32::encode(base32::Alphabet::Crockford, &hash).to_lowercase();
     id.truncate(HOSTNAME_ID_LEN);
-    if prefix.is_empty() {
-        id
-    } else {
-        format!("{}-{}", prefix, id)
-    }
+    format!("{}-{}", p, id)
 }
 
 fn extract_sni_hostname(sni: &str) -> &str {
@@ -69,13 +59,13 @@ impl StoreInner {
         if let Some(old_tls) = prev_tls
             && prev_tls != new_tls
         {
-            let old_host = derive_hostname(name, namespace, old_tls.key.as_deref());
+            let old_host = derive_hostname(name, namespace, old_tls.prefix.as_deref());
             info!("Deregistering route {key} hostname: {old_host}");
             self.tls.remove(&old_host);
         }
 
         if let Some(tls) = new_tls {
-            let host = derive_hostname(name, namespace, tls.key.as_deref());
+            let host = derive_hostname(name, namespace, tls.prefix.as_deref());
             info!("Registering route {key} hostname: {host}");
             self.tls.insert(host, entry.spec.clone());
         }
@@ -90,7 +80,7 @@ impl StoreInner {
         if let Some(ref prev_entry) = prev
             && let Some(tls) = &prev_entry.spec.1.tls
         {
-            let host = derive_hostname(name, namespace, tls.key.as_deref());
+            let host = derive_hostname(name, namespace, tls.prefix.as_deref());
             info!("Deregistering route {key} hostname: {host}");
             self.tls.remove(&host);
         }
@@ -159,7 +149,7 @@ impl RoutesStore {
         let route = inner.get_route(key)?;
         let tls = route.spec.1.tls.as_ref()?;
         let (namespace, name) = parse_namespaced_name(key);
-        Some(derive_hostname(name, namespace, tls.key.as_deref()))
+        Some(derive_hostname(name, namespace, tls.prefix.as_deref()))
     }
 }
 
@@ -178,7 +168,7 @@ mod tests {
                 port: 80,
             },
             tls: Some(CTFRouteSpecTLS {
-                key: Some("web".to_string()),
+                prefix: Some("web".to_string()),
             }),
             ..Default::default()
         };
@@ -227,7 +217,7 @@ mod tests {
                 port: 80,
             },
             tls: Some(CTFRouteSpecTLS {
-                key: Some("v1".to_string()),
+                prefix: Some("v1".to_string()),
             }),
             ..Default::default()
         };
@@ -272,7 +262,7 @@ mod tests {
         // Update with new tag "v2" -> host_v1 should be deregistered, host_v2 registered
         let host_v2 = derive_hostname("chal-web", "default", Some("v2"));
         spec.tls = Some(CTFRouteSpecTLS {
-            key: Some("v2".to_string()),
+            prefix: Some("v2".to_string()),
         });
         store.insert(MetadataAndSpec {
             generation: Some(3),
@@ -383,7 +373,7 @@ mod tests {
                 port: 443,
             },
             tls: Some(CTFRouteSpecTLS {
-                key: Some("web".to_string()),
+                prefix: Some("web".to_string()),
             }),
             ..Default::default()
         };
@@ -426,7 +416,7 @@ mod tests {
 
         // Transition from None -> Some(tls)
         spec.tls = Some(CTFRouteSpecTLS {
-            key: Some("web".to_string()),
+            prefix: Some("web".to_string()),
         });
         store.insert(MetadataAndSpec {
             generation: Some(2),
@@ -478,7 +468,7 @@ mod tests {
                 port: 80,
             },
             tls: Some(CTFRouteSpecTLS {
-                key: Some("web".to_string()),
+                prefix: Some("web".to_string()),
             }),
             ..Default::default()
         };
@@ -510,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_hostname_empty_and_tag() {
+    fn test_derive_hostname_prefix_and_default() {
         let host1 = derive_hostname("my-chal", "default", Some(""));
         let host2 = derive_hostname("my-chal", "default", Some("web"));
         let host3 = derive_hostname("my-chal", "other-ns", Some(""));
@@ -518,19 +508,16 @@ mod tests {
         let host5 = derive_hostname("chal", "other-ns", None);
 
         assert!(host1.starts_with("my-chal-"));
-        assert!(host2.starts_with("my-chal-"));
+        assert!(host2.starts_with("web-"));
         assert!(host3.starts_with("my-chal-"));
-
-        assert!(host4.starts_with("my-"));
-        assert!(!host4.starts_with("my-chal-"));
-        assert!(host4.len() == 3 + HOSTNAME_ID_LEN);
-
-        assert!(host5.len() == HOSTNAME_ID_LEN);
-        assert!(!host5.starts_with("chal-"));
+        assert!(host4.starts_with("my-chal-"));
+        assert!(host5.starts_with("chal-"));
 
         assert_ne!(host1, host2);
         assert_ne!(host1, host3);
+        assert_ne!(host1, host4); // Different namespace -> different hash ID
         assert_eq!(host1.len(), "my-chal-".len() + HOSTNAME_ID_LEN);
+        assert_eq!(host2.len(), "web-".len() + HOSTNAME_ID_LEN);
     }
 
     #[test]
@@ -544,19 +531,13 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_hostname_shared_hash_and_explicit_collision_prevention() {
-        // Shared hash for services sharing same key-derived team tag
+    fn test_derive_hostname_collision_prevention() {
         let h1 = derive_hostname("web-chal1-service1-team1", "default", None);
         let h2 = derive_hostname("web-chal1-service2-team1", "default", None);
-        assert!(h1.starts_with("web-chal1-service1-"));
-        assert!(h2.starts_with("web-chal1-service2-"));
-        // Hash component (last HOSTNAME_ID_LEN chars) matches
-        let hash1 = &h1[h1.len() - HOSTNAME_ID_LEN..];
-        let hash2 = &h2[h2.len() - HOSTNAME_ID_LEN..];
-        assert_eq!(hash1, hash2);
+        assert!(h1.starts_with("web-chal1-service1-team1-"));
+        assert!(h2.starts_with("web-chal1-service2-team1-"));
         assert_ne!(h1, h2);
 
-        // Collision prevention between metadata tag vs key-derived tag
         let h_metadata = derive_hostname("chal", "default", Some("web"));
         let h_key = derive_hostname("chal-web", "default", None);
         assert_ne!(h_metadata, h_key);

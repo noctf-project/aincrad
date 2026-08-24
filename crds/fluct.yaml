@@ -57,7 +57,7 @@ spec:
                   tls:
                     type: object
                     properties:
-                      key:
+                      prefix:
                         type: string
                 required: [backend]
               status:
