@@ -407,6 +407,7 @@ mod tests {
                 },
                 tls: Some(CTFRouteSpecTLS {
                     prefix: Some("web".to_string()),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -453,6 +454,7 @@ mod tests {
                 },
                 tls: Some(CTFRouteSpecTLS {
                     prefix: Some("web".to_string()),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -488,6 +490,7 @@ mod tests {
         chal.metadata.generation = Some(3);
         chal.spec.tls = Some(CTFRouteSpecTLS {
             prefix: Some("web2".to_string()),
+            ..Default::default()
         });
         store.handle_route_event(Event::Apply(chal.clone()));
         let host_v2 = store.format_tls_host("default:test-chal").unwrap();
@@ -554,6 +557,7 @@ mod tests {
             },
             tls: Some(CTFRouteSpecTLS {
                 prefix: Some("web".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -654,6 +658,7 @@ mod tests {
             },
             tls: Some(CTFRouteSpecTLS {
                 prefix: Some("web".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -685,6 +690,7 @@ mod tests {
             },
             tls: Some(CTFRouteSpecTLS {
                 prefix: Some("web".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };

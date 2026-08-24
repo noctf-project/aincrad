@@ -34,9 +34,10 @@ fn sanitize_prefix(input: &str) -> String {
     }
 }
 
-fn derive_hostname(prefix: &str, uid: &str) -> String {
+fn derive_hostname(prefix: &str, namespaced_name: &str) -> String {
     let clean_prefix = sanitize_prefix(prefix);
-    let hash = derive_key(uid, "route:tls");
+    let seed = format!("meta:{namespaced_name}");
+    let hash = derive_key(&seed, "route:tls");
     let mut id = base32::encode(base32::Alphabet::Crockford, &hash).to_lowercase();
     id.truncate(HOSTNAME_ID_LEN);
     format!("{}-{}", clean_prefix, id)
@@ -86,7 +87,7 @@ impl StoreInner {
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&prev_entry.name);
-            let old_host = derive_hostname(old_prefix, &prev_entry.uid);
+            let old_host = derive_hostname(old_prefix, &prev_entry.namespaced_name());
             info!("Deregistering route {key} hostname: {old_host}");
             self.tls.remove(&old_host);
         }
@@ -97,7 +98,7 @@ impl StoreInner {
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&entry.name);
-            let host = derive_hostname(prefix, &entry.uid);
+            let host = derive_hostname(prefix, &entry.namespaced_name());
             info!("Registering route {key} hostname: {host}");
             self.tls.insert(host, entry.clone());
         }
@@ -115,7 +116,7 @@ impl StoreInner {
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&prev_entry.name);
-            let host = derive_hostname(prefix, &prev_entry.uid);
+            let host = derive_hostname(prefix, &prev_entry.namespaced_name());
             info!("Deregistering route {key} hostname: {host}");
             self.tls.remove(&host);
         }
@@ -188,7 +189,7 @@ impl RoutesStore {
             .as_deref()
             .filter(|s| !s.is_empty())
             .unwrap_or(&route.name);
-        Some(derive_hostname(prefix, &route.uid))
+        Some(derive_hostname(prefix, &route.namespaced_name()))
     }
 }
 
@@ -208,6 +209,7 @@ mod tests {
             },
             tls: Some(CTFRouteSpecTLS {
                 prefix: Some("web".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -226,7 +228,7 @@ mod tests {
         let prev = store.insert(entry);
         assert!(prev.is_none());
 
-        let host = derive_hostname("web", "uid-test");
+        let host = derive_hostname("web", "default:test-chal");
         let tls_found = store.get_tls_route(&host);
         assert!(tls_found.is_some());
         assert_eq!(tls_found.unwrap().namespaced_name(), namespaced_name);
@@ -263,7 +265,7 @@ mod tests {
             ..Default::default()
         };
 
-        let host_v1 = derive_hostname("v1", "uid-1");
+        let host_v1 = derive_hostname("v1", "default:chal-web");
 
         // Initial insert with tag "v1"
         store.insert(Arc::new(MetadataAndSpec {
@@ -307,7 +309,7 @@ mod tests {
         );
 
         // Update with new tag "v2" -> host_v1 should be deregistered, host_v2 registered
-        let host_v2 = derive_hostname("v2", "uid-1");
+        let host_v2 = derive_hostname("v2", "default:chal-web");
         spec.tls = Some(CTFRouteSpecTLS {
             prefix: Some("v2".to_string()),
         });
@@ -424,10 +426,11 @@ mod tests {
             },
             tls: Some(CTFRouteSpecTLS {
                 prefix: Some("web".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };
-        let host = derive_hostname("web", "uid-sni");
+        let host = derive_hostname("web", "prod:chal-sni");
 
         store.insert(Arc::new(MetadataAndSpec {
             name: "chal-sni".into(),
@@ -483,7 +486,7 @@ mod tests {
             spec: spec.clone(),
         }));
 
-        let host = derive_hostname("web", "uid-none-to-some");
+        let host = derive_hostname("web", "default:chal-none-to-some");
         assert_eq!(store.get_hostname(&key), Some(host.clone()));
         assert!(store.get_tls_route(&host).is_some());
     }
@@ -566,9 +569,9 @@ mod tests {
 
     #[test]
     fn test_derive_hostname_prefix_and_default() {
-        let host1 = derive_hostname("my-chal", "uid-1");
-        let host2 = derive_hostname("web", "uid-1");
-        let host3 = derive_hostname("my-chal", "uid-2");
+        let host1 = derive_hostname("my-chal", "default:r1");
+        let host2 = derive_hostname("web", "default:r1");
+        let host3 = derive_hostname("my-chal", "default:r2");
 
         assert!(host1.starts_with("my-chal-"));
         assert!(host2.starts_with("web-"));
@@ -592,14 +595,14 @@ mod tests {
 
     #[test]
     fn test_derive_hostname_collision_prevention() {
-        let h1 = derive_hostname("web-chal1-service1-team1", "uid-a");
-        let h2 = derive_hostname("web-chal1-service2-team1", "uid-b");
+        let h1 = derive_hostname("web-chal1-service1-team1", "ns:a");
+        let h2 = derive_hostname("web-chal1-service2-team1", "ns:b");
         assert!(h1.starts_with("web-chal1-service1-team1-"));
         assert!(h2.starts_with("web-chal1-service2-team1-"));
         assert_ne!(h1, h2);
 
-        let h_metadata = derive_hostname("web", "uid-c");
-        let h_key = derive_hostname("chal-web", "uid-c");
+        let h_metadata = derive_hostname("web", "ns:c");
+        let h_key = derive_hostname("chal-web", "ns:c");
         assert_ne!(h_metadata, h_key);
     }
 

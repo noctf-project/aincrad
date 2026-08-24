@@ -74,17 +74,26 @@ impl CTFRouteBackend {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteSpec {
+    /// Flag string or template string for the challenge route.
     #[serde(default)]
     pub flag: Option<String>,
+    /// Optional UTC timestamp after which this route becomes active and accessible to players.
     pub available_at: Option<DateTime<Utc>>,
+    /// Cryptographic secret used for Proof-of-Work verification and AES flag encryption.
     pub secret: Option<String>,
+    /// When true, appends a unique Crockford Base32 hash ID to derived TLS hostnames.
     #[serde(default)]
     pub request_uid: bool,
+    /// Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
     pub pow: Option<CTFRouteSpecPOW>,
+    /// When true, enables logging of player TCP/TLS session traffic.
     #[serde(default)]
     pub logs: bool,
+    /// Target backend Kubernetes service name and port.
     pub backend: CTFRouteBackend,
+    /// Dedicated TCP port requested for raw TCP routing.
     pub port: Option<u16>,
+    /// Optional TLS SNI routing configuration.
     pub tls: Option<CTFRouteSpecTLS>,
 }
 
@@ -100,6 +109,7 @@ pub struct CTFRouteSpecPOW {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteSpecTLS {
+    /// Subdomain prefix for the derived TLS hostname (e.g. 'web' in 'web-xxxx.c.noctf.dev'). Defaults to the route metadata name if omitted.
     #[schemars(length(max = 48), regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"))]
     pub prefix: Option<String>,
 }
@@ -150,7 +160,7 @@ mod tests {
         assert_eq!(
             spec_full.tls,
             Some(CTFRouteSpecTLS {
-                prefix: Some("web".to_string())
+                prefix: Some("web".to_string()),
             })
         );
     }

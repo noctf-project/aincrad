@@ -17,6 +17,17 @@ pub struct CTFTemplateStatus {
     pub conditions: Vec<Condition>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CTFTemplateSpecParam {
+    pub name: String,
+    pub value: String,
+}
+
+impl KubeListKey for CTFTemplateSpecParam {
+    const KEY: &'static str = "name";
+}
+
 impl KubeListKey for CTFTemplateSpecPod {
     const KEY: &'static str = "name";
 }
@@ -43,13 +54,19 @@ impl KubeListKey for CTFTemplateSpecRoute {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct CTFTemplateSpec {
+    /// Optional UTC timestamp after which instances of this challenge template become active.
     pub available_at: Option<DateTime<Utc>>,
+    /// Key-value parameters passed to challenge pods as environment variables or configuration values.
+    #[serde(default)]
+    #[schemars(schema_with = "list_schema::<CTFTemplateSpecParam>")]
+    pub params: Vec<CTFTemplateSpecParam>,
+    /// List of pod specifications that make up a challenge instance.
     #[serde(default)]
     #[schemars(schema_with = "list_schema::<CTFTemplateSpecPod>")]
     pub pods: Vec<CTFTemplateSpecPod>,
-
-    #[schemars(schema_with = "list_schema::<CTFTemplateSpecRoute>")]
+    /// List of CTFRoute definitions that expose backend services.
     #[serde(default)]
+    #[schemars(schema_with = "list_schema::<CTFTemplateSpecRoute>")]
     pub routes: Vec<CTFTemplateSpecRoute>,
 }
 
