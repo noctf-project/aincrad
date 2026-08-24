@@ -252,7 +252,9 @@ mod tests {
         let json_bytes = serde_json::to_vec(&payload).unwrap();
         let json_str = String::from_utf8(json_bytes).unwrap();
 
-        assert!(json_str.contains("\"flush\":{\"table\":{\"family\":\"inet\",\"name\":\"fluct\"}}"));
+        assert!(
+            json_str.contains("\"flush\":{\"table\":{\"family\":\"inet\",\"name\":\"fluct\"}}")
+        );
         assert!(json_str.contains("\"tproxy\":{\"port\":32767}"));
         assert!(
             json_str.contains("\"mangle\":{\"key\":{\"meta\":{\"key\":\"mark\"}},\"value\":1}")

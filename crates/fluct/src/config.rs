@@ -108,8 +108,8 @@ struct RawServiceConfig {
     #[arg(long)]
     pub tls_key: PathBuf,
 
-    /// Optional Hostname Suffix
-    #[clap(long, default_value = "", value_parser = parse_hostname_suffix)]
+    /// Optional Hostname Suffix / Challenge Domain
+    #[clap(long, default_value = "", value_parser = parse_hostname_suffix, alias = "hostname-suffix")]
     pub challenge_domain: String,
 
     /// Kubernetes Cluster Domain

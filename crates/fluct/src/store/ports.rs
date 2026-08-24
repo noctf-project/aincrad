@@ -1,8 +1,8 @@
-use std::{collections::HashMap, iter::Cycle, ops::RangeInclusive, sync::RwLock};
+use std::{collections::HashMap, sync::RwLock};
 use thiserror::Error;
 use tracing::info;
 
-use crate::config::PortRange;
+use crate::{config::PortRange, util::port_finder::PortFinderFactory};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortAllocation<T> {
@@ -34,8 +34,8 @@ pub enum PortSyncResult {
 struct Table {
     bindings: Vec<Option<PortAllocation<String>>>,
     mappings: HashMap<String, PortAllocation<u16>>,
-    cycle: Cycle<RangeInclusive<u16>>,
     range_auto: PortRange,
+    finder: PortFinderFactory,
 }
 
 impl Table {
@@ -106,17 +106,15 @@ impl Table {
             _ => None,
         });
 
-        let count = (self.range_auto.0.end() - self.range_auto.0.start() + 1) as usize;
+        let cycle = self.finder.cycle(spec);
         let mut allocated_port = None;
 
-        for _ in 0..count {
-            let candidate = self.cycle.next().ok_or(PortError::Exhausted)?;
+        for candidate in cycle {
             if self.bindings[candidate as usize].is_none() {
                 allocated_port = Some(candidate);
                 break;
             }
         }
-
         let candidate = allocated_port.ok_or(PortError::Exhausted)?;
 
         self.bindings[candidate as usize] = Some(PortAllocation::Pending {
@@ -293,7 +291,6 @@ pub struct PortsStore {
 
 impl PortsStore {
     pub fn new(range_reserved: PortRange, range_auto: PortRange) -> Self {
-        let cycle = range_auto.clone().0.cycle();
         Self {
             range_reserved,
             range_auto: range_auto.clone(),
@@ -301,7 +298,7 @@ impl PortsStore {
                 bindings: vec![None; PORTS],
                 mappings: HashMap::new(),
                 range_auto: range_auto.clone(),
-                cycle,
+                finder: PortFinderFactory::new(&range_auto),
             }),
         }
     }
@@ -443,16 +440,17 @@ mod tests {
     fn test_auto_port_lifecycle() {
         let pm = make_pm();
         let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
-        assert_eq!(
-            alloc,
+        let next_port = match alloc {
             PortAllocation::Pending {
                 current: None,
-                next: 30000
-            }
-        );
+                next,
+            } => next,
+            _ => panic!("expected Pending with current: None"),
+        };
+        assert!(pm.range_auto.contains(next_port));
 
-        pm.insert("r1", Some(30000));
-        assert_eq!(pm.active_route(30000), Some("r1".to_string()));
+        pm.insert("r1", Some(next_port));
+        assert_eq!(pm.active_route(next_port), Some("r1".to_string()));
     }
 
     #[test]
@@ -510,14 +508,18 @@ mod tests {
     #[test]
     fn test_reassign_auto_to_fixed() {
         let pm = make_pm();
-        pm.reserve("r1", Some(0)).unwrap();
-        pm.insert("r1", Some(30000));
+        let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
+        let auto_port = match alloc {
+            PortAllocation::Pending { next, .. } => next,
+            _ => panic!("expected Pending"),
+        };
+        pm.insert("r1", Some(auto_port));
 
         pm.reserve("r1", Some(20001)).unwrap();
         pm.insert("r1", Some(20001));
 
         assert_eq!(pm.active_route(20001), Some("r1".to_string()));
-        assert_eq!(pm.active_route(30000), None);
+        assert_eq!(pm.active_route(auto_port), None);
     }
 
     #[test]
@@ -526,16 +528,17 @@ mod tests {
         pm.insert("r1", Some(20001));
 
         let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
-        assert_eq!(
-            alloc,
+        let next_port = match alloc {
             PortAllocation::Pending {
                 current: Some(20001),
-                next: 30000
-            }
-        );
-        pm.insert("r1", Some(30000));
+                next,
+            } => next,
+            _ => panic!("expected Pending with current: Some(20001)"),
+        };
+        assert!(pm.range_auto.contains(next_port));
+        pm.insert("r1", Some(next_port));
 
-        assert_eq!(pm.active_route(30000), Some("r1".to_string()));
+        assert_eq!(pm.active_route(next_port), Some("r1".to_string()));
         assert_eq!(pm.active_route(20001), None);
     }
 
@@ -560,12 +563,16 @@ mod tests {
     #[test]
     fn test_revert_uncommitted_to_active_auto() {
         let pm = make_pm();
-        pm.reserve("r1", Some(0)).unwrap();
-        pm.insert("r1", Some(30000));
+        let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
+        let auto_port = match alloc {
+            PortAllocation::Pending { next, .. } => next,
+            _ => panic!("expected Pending"),
+        };
+        pm.insert("r1", Some(auto_port));
 
         pm.reserve("r1", Some(20001)).unwrap();
         let reverted = pm.reserve("r1", Some(0)).unwrap().unwrap();
-        assert_eq!(reverted, PortAllocation::Intended(30000));
+        assert_eq!(reverted, PortAllocation::Intended(auto_port));
         assert_eq!(pm.get(20001), None);
     }
 
@@ -654,13 +661,15 @@ mod tests {
     fn test_port_zero_is_auto() {
         let pm = make_pm();
         let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
-        assert_eq!(
-            alloc,
+        match alloc {
             PortAllocation::Pending {
                 current: None,
-                next: 30000
+                next,
+            } => {
+                assert!(pm.range_auto.contains(next));
             }
-        );
+            _ => panic!("expected Pending with current: None"),
+        }
     }
 
     #[test]

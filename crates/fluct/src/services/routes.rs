@@ -202,13 +202,14 @@ impl RoutesService {
         &self,
         cancel: CancellationToken,
         mut receiver: mpsc::Receiver<Event<CTFRoute>>,
-        update_tx: mpsc::Sender<Arc<CTFRouteSpecPair>>,
+        updater: Option<mpsc::Sender<Arc<CTFRouteSpecPair>>>,
     ) {
         loop {
             select! {
               Some(event) = receiver.recv() => {
-                if let Some(status) = self.handle_route_event(event) {
-                    let _ = update_tx.send(status).await
+                if let Some(status) = self.handle_route_event(event)
+                    && let Some(ref updater) = updater {
+                    let _ = updater.send(status).await
                         .map_err(|err| warn!("error queueing status {:?}", err));
                 }
               },
@@ -313,7 +314,7 @@ impl RoutesService {
             ),
             log_job(
                 "kube CTFRoute processor",
-                self.run_watch_routes(cancel.clone(), route_rx, update_tx)
+                self.run_watch_routes(cancel.clone(), route_rx, Some(update_tx))
             ),
             self.run_updates(cancel.clone(), update_rx),
         )?;

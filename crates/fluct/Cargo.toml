@@ -30,6 +30,7 @@ schemars = { workspace = true, features = ["chrono04"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+siphasher = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { version = "0.26", features = ["ring"] }

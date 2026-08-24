@@ -462,7 +462,10 @@ mod tests {
             .split_once(':')
             .unwrap_or(("default", &route_fqdn.0));
         assert_eq!(
-            route_fqdn.1.backend.address(namespace_fqdn, "cluster.local"),
+            route_fqdn
+                .1
+                .backend
+                .address(namespace_fqdn, "cluster.local"),
             "example.com:443"
         );
     }
