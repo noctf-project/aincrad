@@ -1,3 +1,4 @@
+use k8s_common::crd::{CTFRouteSpec, CTFRouteStatus};
 use regex::Regex;
 use std::{
     collections::HashMap,
@@ -6,10 +7,7 @@ use std::{
 
 use tracing::info;
 
-use crate::{
-    crd::{CTFRouteSpec, CTFRouteStatus},
-    crypto::hash::derive_key,
-};
+use crate::crypto::hash::derive_key;
 
 const HOSTNAME_ID_LEN: usize = 14;
 pub type CTFRouteStatusPair = (String, CTFRouteStatus);
@@ -48,7 +46,7 @@ fn extract_sni_hostname(sni: &str) -> &str {
     sni.split('.').next().unwrap_or(sni)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MetadataAndSpec {
     pub name: String,
     pub namespace: String,
@@ -197,7 +195,7 @@ impl RoutesStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{CTFRouteBackend, CTFRouteSpec, CTFRouteSpecTLS};
+    use k8s_common::crd::{CTFRouteBackend, CTFRouteSpec, CTFRouteSpecTLS};
 
     #[test]
     fn test_routes_store_lifecycle() {
@@ -205,7 +203,7 @@ mod tests {
 
         let spec = CTFRouteSpec {
             backend: CTFRouteBackend {
-                host: "backend-service".into(),
+                service: "backend-service".into(),
                 port: 80,
             },
             tls: Some(CTFRouteSpecTLS {
@@ -256,7 +254,7 @@ mod tests {
 
         let mut spec = CTFRouteSpec {
             backend: CTFRouteBackend {
-                host: "service".into(),
+                service: "service".into(),
                 port: 80,
             },
             tls: Some(CTFRouteSpecTLS {
@@ -280,7 +278,7 @@ mod tests {
         assert_eq!(
             store.get_tls_route(&host_v1).unwrap().spec.backend,
             CTFRouteBackend {
-                host: "service".into(),
+                service: "service".into(),
                 port: 80,
             }
         );
@@ -288,7 +286,7 @@ mod tests {
 
         // Update with same tag (v1), backend changed
         spec.backend = CTFRouteBackend {
-            host: "service".into(),
+            service: "service".into(),
             port: 8080,
         };
         store.insert(Arc::new(MetadataAndSpec {
@@ -303,7 +301,7 @@ mod tests {
         assert_eq!(
             store.get_tls_route(&host_v1).unwrap().spec.backend,
             CTFRouteBackend {
-                host: "service".into(),
+                service: "service".into(),
                 port: 8080,
             }
         );
@@ -326,7 +324,7 @@ mod tests {
         assert_eq!(
             store.get_tls_route(&host_v2).unwrap().spec.backend,
             CTFRouteBackend {
-                host: "service".into(),
+                service: "service".into(),
                 port: 8080,
             }
         );
@@ -421,7 +419,7 @@ mod tests {
         let _key = "prod:chal-sni".to_string();
         let spec = CTFRouteSpec {
             backend: CTFRouteBackend {
-                host: "backend".into(),
+                service: "backend".into(),
                 port: 443,
             },
             tls: Some(CTFRouteSpecTLS {
@@ -456,7 +454,7 @@ mod tests {
         // Initial insert with NO TLS (prev_tls = None)
         let mut spec = CTFRouteSpec {
             backend: CTFRouteBackend {
-                host: "service".into(),
+                service: "service".into(),
                 port: 80,
             },
             tls: None,
@@ -525,7 +523,7 @@ mod tests {
 
         let mut spec = CTFRouteSpec {
             backend: CTFRouteBackend {
-                host: "service".into(),
+                service: "service".into(),
                 port: 80,
             },
             tls: Some(CTFRouteSpecTLS {
@@ -547,7 +545,7 @@ mod tests {
         // Clear log buffer and insert update with SAME TLS tag, updated backend
         buf.lock().unwrap().clear();
         spec.backend = CTFRouteBackend {
-            host: "service".into(),
+            service: "service".into(),
             port: 8080,
         };
         store.insert(Arc::new(MetadataAndSpec {

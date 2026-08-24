@@ -4,18 +4,19 @@ use std::{
     time::Duration,
 };
 
-use fluct::Error;
 use futures::{Stream, TryStreamExt};
 use k8s_openapi::NamespaceResourceScope;
 use kube::{
     Api, Client,
-    runtime::watcher::{Config, Event, watcher},
+    runtime::watcher::{Config, Event, watch_object, watcher},
 };
 use kube_lease_manager::{LeaseManager, LeaseManagerBuilder};
 use serde::de::DeserializeOwned;
 use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+
+use crate::error::Error;
 
 #[derive(Clone)]
 pub struct KubernetesClient {
@@ -54,6 +55,26 @@ impl KubernetesClient {
         let pp = PatchParams::default();
         let _ = api.patch_status(name, &pp, &Patch::Merge(&patch)).await?;
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub async fn watch_object<K>(
+        &self,
+        cancel: CancellationToken,
+        name: &str,
+        chan: mpsc::Sender<Option<K>>,
+    ) where
+        K: kube::core::Resource<Scope = NamespaceResourceScope>
+            + Clone
+            + DeserializeOwned
+            + Debug
+            + Send
+            + 'static,
+        <K as kube::Resource>::DynamicType: std::default::Default,
+    {
+        let api: Api<K> = Api::default_namespaced(self.client.clone());
+        let stream = pin!(watch_object(api, name));
+        self.do_watch(cancel, stream, chan).await;
     }
 
     pub async fn get_lease_manager(
@@ -118,7 +139,6 @@ impl KubernetesClient {
     }
 }
 
-#[cfg(test)]
 impl KubernetesClient {
     pub fn new_dummy_for_tests() -> Self {
         use axum::http::{Request, Response, Uri};

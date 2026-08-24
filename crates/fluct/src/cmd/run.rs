@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use fluct::Error;
+use k8s_common::KubernetesClient;
 use tokio::try_join;
 use tokio_rustls::rustls::crypto::ring;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    clients::KubernetesClient,
     config::{ServiceConfig, ServiceContext},
     services,
     services::routes::RoutesService,

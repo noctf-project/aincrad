@@ -2,17 +2,14 @@ use fluct::Error;
 
 use crate::cmd::cli;
 
-mod clients;
 mod cmd;
 mod config;
-mod crd;
 mod crypto;
 mod logger;
 mod proxy;
 mod services;
 mod store;
 mod util;
-
 
 fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();

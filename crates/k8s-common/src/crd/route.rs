@@ -1,18 +1,8 @@
-use chrono::{DateTime, FixedOffset};
-use kube::{CustomResource, CustomResourceExt};
+use chrono::{DateTime, Utc};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
+use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
-
-pub fn generate_crd(format: &str) -> Result<String, fluct::Error> {
-    let crd = CTFRoute::crd();
-    match format.to_lowercase().as_str() {
-        "json" => serde_json::to_string_pretty(&crd)
-            .map_err(|e| format!("failed to serialize CRD to JSON: {e}").into()),
-        "yaml" | "yml" => serde_yaml::to_string(&crd)
-            .map_err(|e| format!("failed to serialize CRD to YAML: {e}").into()),
-        other => Err(format!("unsupported CRD format '{other}', expected 'yaml' or 'json'").into()),
-    }
-}
 
 fn clamp_u64<'de, D>(d: D) -> Result<u64, D::Error>
 where
@@ -21,14 +11,14 @@ where
     i64::deserialize(d).map(|v| v.max(0) as u64)
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointTarget {
     pub host: String,
     pub port: u16,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteEndpoints {
     #[serde(default)]
@@ -36,8 +26,6 @@ pub struct CTFRouteEndpoints {
     #[serde(default)]
     pub tcp: Option<EndpointTarget>,
 }
-
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -50,10 +38,10 @@ pub struct CTFRouteStatus {
     pub conditions: Vec<Condition>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteBackend {
-    pub host: String,
+    pub service: String,
     pub port: u16,
 }
 
@@ -62,20 +50,18 @@ impl CTFRouteBackend {
     /// If `host` contains a dot or colon, namespace is ignored and `host:port` is returned.
     /// Otherwise, it formats as a local K8s service: `{host}.{namespace}.svc.{cluster_domain}:{port}`.
     pub fn address(&self, namespace: &str, cluster_domain: &str) -> String {
-        if self.host.contains('.') || self.host.contains(':') {
-            format!("{}:{}", self.host, self.port)
+        if self.service.contains('.') || self.service.contains(':') {
+            format!("{}:{}", self.service, self.port)
         } else {
             format!(
                 "{}.{}.svc.{}:{}",
-                self.host, namespace, cluster_domain, self.port
+                self.service, namespace, cluster_domain, self.port
             )
         }
     }
 }
 
-#[derive(
-    CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq,
-)]
+#[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[kube(
     group = "aincrad.noctf.dev",
     version = "v1",
@@ -87,7 +73,7 @@ impl CTFRouteBackend {
 pub struct CTFRouteSpec {
     #[serde(default)]
     pub flag: Option<String>,
-    pub available_at: Option<DateTime<FixedOffset>>,
+    pub available_at: Option<DateTime<Utc>>,
     pub secret: Option<String>,
     #[serde(default)]
     pub request_uid: bool,
@@ -95,11 +81,11 @@ pub struct CTFRouteSpec {
     #[serde(default)]
     pub logs: bool,
     pub backend: CTFRouteBackend,
-    pub target_port: Option<u16>,
+    pub port: Option<u16>,
     pub tls: Option<CTFRouteSpecTLS>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteSpecPOW {
     #[serde(deserialize_with = "clamp_u64")]
@@ -108,7 +94,7 @@ pub struct CTFRouteSpecPOW {
     pub enable_admin_bypass: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteSpecTLS {
     #[schemars(length(max = 48), regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"))]
@@ -123,20 +109,20 @@ mod tests {
     fn test_challenge_spec_deserialization() {
         let json_omitted = serde_json::json!({
             "backend": {
-                "host": "127.0.0.1",
+                "service": "127.0.0.1",
                 "port": 8080
             }
         });
         let spec_omitted: CTFRouteSpec = serde_json::from_value(json_omitted).unwrap();
-        assert_eq!(spec_omitted.backend.host, "127.0.0.1");
+        assert_eq!(spec_omitted.backend.service, "127.0.0.1");
         assert_eq!(spec_omitted.backend.port, 8080);
         assert_eq!(spec_omitted.flag, None);
         assert_eq!(spec_omitted.tls, None);
-        assert_eq!(spec_omitted.target_port, None);
+        assert_eq!(spec_omitted.port, None);
 
         let json_empty_tag = serde_json::json!({
             "backend": {
-                "host": "127.0.0.1",
+                "service": "127.0.0.1",
                 "port": 8080
             },
             "tls": {},
@@ -146,18 +132,18 @@ mod tests {
 
         let json_full = serde_json::json!({
             "backend": {
-                "host": "127.0.0.1",
+                "service": "127.0.0.1",
                 "port": 8080
             },
             "flag": "my_flag",
-            "targetPort": 20001,
+            "port": 20001,
             "tls": {
                 "prefix": "web"
             },
         });
         let spec_full: CTFRouteSpec = serde_json::from_value(json_full).unwrap();
         assert_eq!(spec_full.flag, Some("my_flag".to_string()));
-        assert_eq!(spec_full.target_port, Some(20001));
+        assert_eq!(spec_full.port, Some(20001));
         assert_eq!(
             spec_full.tls,
             Some(CTFRouteSpecTLS {
@@ -169,7 +155,7 @@ mod tests {
     #[test]
     fn test_backend_address() {
         let b1 = CTFRouteBackend {
-            host: "web-service".to_string(),
+            service: "web-service".to_string(),
             port: 80,
         };
         assert_eq!(
@@ -182,19 +168,19 @@ mod tests {
         );
 
         let b2 = CTFRouteBackend {
-            host: "127.0.0.1".to_string(),
+            service: "127.0.0.1".to_string(),
             port: 8080,
         };
         assert_eq!(b2.address("default", "cluster.local"), "127.0.0.1:8080");
 
         let b3 = CTFRouteBackend {
-            host: "example.com".to_string(),
+            service: "example.com".to_string(),
             port: 443,
         };
         assert_eq!(b3.address("custom-ns", "cluster.local"), "example.com:443");
 
         let b4 = CTFRouteBackend {
-            host: "svc.other-ns.svc.cluster.local".to_string(),
+            service: "svc.other-ns.svc.cluster.local".to_string(),
             port: 8080,
         };
         assert_eq!(
@@ -203,22 +189,9 @@ mod tests {
         );
 
         let b5 = CTFRouteBackend {
-            host: "::1".to_string(),
+            service: "::1".to_string(),
             port: 80,
         };
         assert_eq!(b5.address("custom-ns", "cluster.local"), "::1:80");
     }
-
-    #[test]
-    fn test_generate_crd() {
-        let yaml = generate_crd("yaml").unwrap();
-        assert!(yaml.contains("kind: CustomResourceDefinition"));
-        assert!(yaml.contains("name: ctfroutes.aincrad.noctf.dev"));
-
-        let json = generate_crd("json").unwrap();
-        assert!(json.contains("\"kind\": \"CustomResourceDefinition\""));
-
-        assert!(generate_crd("invalid").is_err());
-    }
 }
-

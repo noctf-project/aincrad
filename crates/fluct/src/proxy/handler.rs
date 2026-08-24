@@ -241,11 +241,13 @@ impl Handler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::KubernetesClient;
     use crate::config::{PortRange, ServiceConfig};
-    use crate::crd::{CTFRouteBackend, CTFRouteSpec, CTFRouteSpecPOW};
     use crate::services::routes::RoutesService;
     use chrono::{Duration as ChronoDuration, Utc};
+    use k8s_common::{
+        KubernetesClient,
+        crd::{CTFRouteBackend, CTFRouteSpec, CTFRouteSpecPOW},
+    };
     use std::net::{IpAddr, Ipv4Addr};
     use tokio::io::AsyncReadExt;
 
@@ -283,7 +285,7 @@ mod tests {
         let spec = CTFRouteSpec {
             flag: Some("test_flag".into()),
             backend: CTFRouteBackend {
-                host: "127.0.0.1".into(),
+                service: "127.0.0.1".into(),
                 port: 8080,
             },
             ..Default::default()
@@ -434,7 +436,7 @@ mod tests {
     fn test_route_backend_address_resolution() {
         let spec_simple = CTFRouteSpec {
             backend: CTFRouteBackend {
-                host: "web-svc".to_string(),
+                service: "web-svc".to_string(),
                 port: 80,
             },
             ..Default::default()
@@ -453,7 +455,7 @@ mod tests {
 
         let spec_fqdn = CTFRouteSpec {
             backend: CTFRouteBackend {
-                host: "example.com".to_string(),
+                service: "example.com".to_string(),
                 port: 443,
             },
             ..Default::default()
