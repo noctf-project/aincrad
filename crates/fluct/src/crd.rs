@@ -100,6 +100,7 @@ pub struct CTFRouteSpecPOW {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteSpecTLS {
+    #[schemars(length(max = 48), regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"))]
     pub prefix: Option<String>,
 }
 

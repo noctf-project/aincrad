@@ -56,11 +56,6 @@ impl Handler {
         }
     }
 
-    pub async fn handle_socket(&mut self, mut socket: TcpStream) -> Result<(), Error> {
-        let (c_rx, c_tx) = socket.split();
-        self.handle(c_rx, c_tx).await
-    }
-
     pub async fn handle<R, W>(&mut self, c_rx: R, mut c_tx: W) -> Result<(), Error>
     where
         R: AsyncRead + Unpin,

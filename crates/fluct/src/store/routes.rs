@@ -1,6 +1,7 @@
+use regex::Regex;
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, LazyLock, RwLock},
 };
 
 use tracing::info;
@@ -13,12 +14,35 @@ use crate::{
 const HOSTNAME_ID_LEN: usize = 14;
 pub type CTFRouteStatusPair = (String, CTFRouteStatus);
 
+fn sanitize_prefix(input: &str) -> String {
+    static RE_INVALID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9-]+").unwrap());
+    const MAX_PREFIX_LEN: usize = 63 - HOSTNAME_ID_LEN - 1; // 48
+
+    let lowered = input.to_lowercase();
+    let replaced = RE_INVALID.replace_all(&lowered, "-");
+
+    let truncated = if replaced.len() > MAX_PREFIX_LEN {
+        &replaced[..MAX_PREFIX_LEN]
+    } else {
+        &replaced
+    };
+
+    let trimmed = truncated.trim_matches('-');
+
+    if trimmed.is_empty() {
+        "chal".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn derive_hostname(prefix: &str, uid: &str) -> String {
+    let clean_prefix = sanitize_prefix(prefix);
     let input = format!("aincrad:route:tls:{}", uid);
     let hash = sha256(input.as_bytes());
     let mut id = base32::encode(base32::Alphabet::Crockford, &hash).to_lowercase();
     id.truncate(HOSTNAME_ID_LEN);
-    format!("{}-{}", prefix, id)
+    format!("{}-{}", clean_prefix, id)
 }
 
 fn extract_sni_hostname(sni: &str) -> &str {
@@ -580,5 +604,24 @@ mod tests {
         let h_metadata = derive_hostname("web", "uid-c");
         let h_key = derive_hostname("chal-web", "uid-c");
         assert_ne!(h_metadata, h_key);
+    }
+
+    #[test]
+    fn test_sanitize_prefix() {
+        assert_eq!(sanitize_prefix("web"), "web");
+        assert_eq!(sanitize_prefix("Web_Chal_1.2"), "web-chal-1-2");
+        assert_eq!(sanitize_prefix("---foo---bar---"), "foo---bar");
+        assert_eq!(sanitize_prefix(""), "chal");
+        assert_eq!(sanitize_prefix("___"), "chal");
+
+        // Truncation at 48 characters (63 - 14 - 1)
+        let long_input = "a".repeat(100);
+        let sanitized = sanitize_prefix(&long_input);
+        assert_eq!(sanitized.len(), 48);
+        assert_eq!(sanitized, "a".repeat(48));
+
+        // Truncating trailing hyphens after truncation
+        let trailing_dash = format!("{}-something", "a".repeat(48));
+        assert_eq!(sanitize_prefix(&trailing_dash), "a".repeat(48));
     }
 }

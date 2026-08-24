@@ -539,12 +539,7 @@ mod tests {
         assert_eq!(observed_gen, Some(42));
 
         store.handle_route_event(Event::Delete(chal));
-        assert!(
-            store
-                .routes
-                .get_route("default:status-chal")
-                .is_none()
-        );
+        assert!(store.routes.get_route("default:status-chal").is_none());
     }
 
     #[tokio::test]

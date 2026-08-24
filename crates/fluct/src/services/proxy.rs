@@ -47,9 +47,10 @@ fn accept_connection(
         pair.namespaced_name()
     );
     let mut handler = Handler::new(service, pair, addr);
+    let (rx, tx) = tokio::io::split(socket);
     tracker.spawn(async move {
-        if let Err(err) = handler.handle_socket(socket).await {
-            debug!("Error while processing connection {} due to: {}", addr, err);
+        if let Err(err) = handler.handle(rx, tx).await {
+            warn!("TCP connection error for {}: {}", addr, err);
         }
         trace!("Closing connection {}", addr);
     });

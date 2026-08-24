@@ -876,6 +876,7 @@ dependencies = [
  "kube-lease-manager",
  "libc",
  "rand",
+ "regex",
  "rustls-pemfile",
  "schemars",
  "serde",

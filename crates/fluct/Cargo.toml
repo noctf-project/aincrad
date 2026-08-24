@@ -25,6 +25,7 @@ kube = { workspace = true, features = ["runtime", "derive"] }
 kube-lease-manager = { workspace = true }
 libc = "0.2"
 rand = { workspace = true }
+regex = { workspace = true }
 rustls-pemfile = "2"
 schemars = { workspace = true, features = ["chrono04"] }
 serde = { workspace = true, features = ["derive"] }

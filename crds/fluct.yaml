@@ -59,6 +59,8 @@ spec:
                     properties:
                       prefix:
                         type: string
+                        pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                        maxLength: 48
                 required: [backend]
               status:
                 type: object
