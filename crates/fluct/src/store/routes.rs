@@ -13,13 +13,12 @@ use crate::{
 const HOSTNAME_ID_LEN: usize = 14;
 pub type CTFRouteStatusPair = (String, CTFRouteStatus);
 
-fn derive_hostname(name: &str, namespace: &str, prefix: Option<&str>) -> String {
-    let p = prefix.filter(|s| !s.is_empty()).unwrap_or(name);
-    let input = format!("aincrad:hostname:{}:{}", namespace, name);
+fn derive_hostname(prefix: &str, uid: &str) -> String {
+    let input = format!("aincrad:route:tls:{}", uid);
     let hash = sha256(input.as_bytes());
     let mut id = base32::encode(base32::Alphabet::Crockford, &hash).to_lowercase();
     id.truncate(HOSTNAME_ID_LEN);
-    format!("{}-{}", p, id)
+    format!("{}-{}", prefix, id)
 }
 
 fn extract_sni_hostname(sni: &str) -> &str {
@@ -35,6 +34,7 @@ fn parse_namespaced_name(key: &str) -> (&str, &str) {
 
 #[derive(Clone, Debug)]
 pub struct MetadataAndSpec {
+    pub uid: String,
     pub generation: Option<i64>,
     pub observed_generation: Option<i64>,
     pub spec: Arc<CTFRouteSpecPair>,
@@ -49,7 +49,7 @@ struct StoreInner {
 impl StoreInner {
     fn insert(&mut self, entry: MetadataAndSpec) -> Option<MetadataAndSpec> {
         let key = entry.spec.0.clone();
-        let (namespace, name) = parse_namespaced_name(&key);
+        let (_namespace, name) = parse_namespaced_name(&key);
 
         let prev = self.routes.insert(key.clone(), entry.clone());
 
@@ -58,14 +58,25 @@ impl StoreInner {
 
         if let Some(old_tls) = prev_tls
             && prev_tls != new_tls
+            && let Some(prev_entry) = &prev
         {
-            let old_host = derive_hostname(name, namespace, old_tls.prefix.as_deref());
+            let old_prefix = old_tls
+                .prefix
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(name);
+            let old_host = derive_hostname(old_prefix, &prev_entry.uid);
             info!("Deregistering route {key} hostname: {old_host}");
             self.tls.remove(&old_host);
         }
 
         if let Some(tls) = new_tls {
-            let host = derive_hostname(name, namespace, tls.prefix.as_deref());
+            let prefix = tls
+                .prefix
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(name);
+            let host = derive_hostname(prefix, &entry.uid);
             info!("Registering route {key} hostname: {host}");
             self.tls.insert(host, entry.spec.clone());
         }
@@ -74,13 +85,18 @@ impl StoreInner {
     }
 
     fn remove(&mut self, key: &str) -> Option<MetadataAndSpec> {
-        let (namespace, name) = parse_namespaced_name(key);
+        let (_namespace, name) = parse_namespaced_name(key);
 
         let prev = self.routes.remove(key);
         if let Some(ref prev_entry) = prev
             && let Some(tls) = &prev_entry.spec.1.tls
         {
-            let host = derive_hostname(name, namespace, tls.prefix.as_deref());
+            let prefix = tls
+                .prefix
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(name);
+            let host = derive_hostname(prefix, &prev_entry.uid);
             info!("Deregistering route {key} hostname: {host}");
             self.tls.remove(&host);
         }
@@ -148,8 +164,13 @@ impl RoutesStore {
         let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
         let route = inner.get_route(key)?;
         let tls = route.spec.1.tls.as_ref()?;
-        let (namespace, name) = parse_namespaced_name(key);
-        Some(derive_hostname(name, namespace, tls.prefix.as_deref()))
+        let (_namespace, name) = parse_namespaced_name(key);
+        let prefix = tls
+            .prefix
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(name);
+        Some(derive_hostname(prefix, &route.uid))
     }
 }
 
@@ -176,6 +197,7 @@ mod tests {
         let pair = Arc::new((namespaced_name.clone(), spec));
 
         let entry = MetadataAndSpec {
+            uid: "uid-test".into(),
             generation: Some(1),
             observed_generation: None,
             spec: pair.clone(),
@@ -185,7 +207,7 @@ mod tests {
         let prev = store.insert(entry);
         assert!(prev.is_none());
 
-        let host = derive_hostname("test-chal", "default", Some("web"));
+        let host = derive_hostname("web", "uid-test");
         let tls_found = store.get_tls_route(&host);
         assert!(tls_found.is_some());
         assert_eq!(tls_found.unwrap().0, namespaced_name);
@@ -222,10 +244,11 @@ mod tests {
             ..Default::default()
         };
 
-        let host_v1 = derive_hostname("chal-web", "default", Some("v1"));
+        let host_v1 = derive_hostname("v1", "uid-1");
 
         // Initial insert with tag "v1"
         store.insert(MetadataAndSpec {
+            uid: "uid-1".into(),
             generation: Some(1),
             observed_generation: None,
             spec: Arc::new((key.clone(), spec.clone())),
@@ -246,6 +269,7 @@ mod tests {
             port: 8080,
         };
         store.insert(MetadataAndSpec {
+            uid: "uid-1".into(),
             generation: Some(2),
             observed_generation: Some(1),
             spec: Arc::new((key.clone(), spec.clone())),
@@ -260,11 +284,12 @@ mod tests {
         );
 
         // Update with new tag "v2" -> host_v1 should be deregistered, host_v2 registered
-        let host_v2 = derive_hostname("chal-web", "default", Some("v2"));
+        let host_v2 = derive_hostname("v2", "uid-1");
         spec.tls = Some(CTFRouteSpecTLS {
             prefix: Some("v2".to_string()),
         });
         store.insert(MetadataAndSpec {
+            uid: "uid-1".into(),
             generation: Some(3),
             observed_generation: Some(2),
             spec: Arc::new((key.clone(), spec.clone())),
@@ -283,6 +308,7 @@ mod tests {
         // Update with TLS disabled (tls = None) -> host_v2 should be deregistered
         spec.tls = None;
         store.insert(MetadataAndSpec {
+            uid: "uid-1".into(),
             generation: Some(4),
             observed_generation: Some(3),
             spec: Arc::new((key.clone(), spec.clone())),
@@ -299,6 +325,7 @@ mod tests {
         // Edge Case: None vs None -> not unsynced
         let key1 = "default:r1".to_string();
         store.insert(MetadataAndSpec {
+            uid: "uid-r1".into(),
             generation: None,
             observed_generation: None,
             spec: Arc::new((key1.clone(), CTFRouteSpec::default())),
@@ -307,6 +334,7 @@ mod tests {
         // Edge Case: Some(1) vs None -> unsynced (Some(1) > None in Rust)
         let key2 = "default:r2".to_string();
         store.insert(MetadataAndSpec {
+            uid: "uid-r2".into(),
             generation: Some(1),
             observed_generation: None,
             spec: Arc::new((key2.clone(), CTFRouteSpec::default())),
@@ -315,6 +343,7 @@ mod tests {
         // Edge Case: Some(2) vs Some(1) -> unsynced (generation > observed_generation)
         let key3 = "default:r3".to_string();
         store.insert(MetadataAndSpec {
+            uid: "uid-r3".into(),
             generation: Some(2),
             observed_generation: Some(1),
             spec: Arc::new((key3.clone(), CTFRouteSpec::default())),
@@ -323,6 +352,7 @@ mod tests {
         // Edge Case: Some(3) vs Some(3) -> synced (generation == observed_generation)
         let key4 = "default:r4".to_string();
         store.insert(MetadataAndSpec {
+            uid: "uid-r4".into(),
             generation: Some(3),
             observed_generation: Some(3),
             spec: Arc::new((key4.clone(), CTFRouteSpec::default())),
@@ -331,6 +361,7 @@ mod tests {
         // Edge Case: None vs Some(1) -> not unsynced (None > Some(1) is false)
         let key5 = "default:r5".to_string();
         store.insert(MetadataAndSpec {
+            uid: "uid-r5".into(),
             generation: None,
             observed_generation: Some(1),
             spec: Arc::new((key5.clone(), CTFRouteSpec::default())),
@@ -345,6 +376,7 @@ mod tests {
 
         // Advance observed_generation for r3 to match generation -> r3 becomes synced
         store.insert(MetadataAndSpec {
+            uid: "uid-r3".into(),
             generation: Some(2),
             observed_generation: Some(2),
             spec: Arc::new((key3.clone(), CTFRouteSpec::default())),
@@ -377,9 +409,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        let host = derive_hostname("chal-sni", "prod", Some("web"));
+        let host = derive_hostname("web", "uid-sni");
 
         store.insert(MetadataAndSpec {
+            uid: "uid-sni".into(),
             generation: Some(1),
             observed_generation: None,
             spec: Arc::new((key.clone(), spec)),
@@ -408,6 +441,7 @@ mod tests {
             ..Default::default()
         };
         store.insert(MetadataAndSpec {
+            uid: "uid-none-to-some".into(),
             generation: Some(1),
             observed_generation: None,
             spec: Arc::new((key.clone(), spec.clone())),
@@ -419,12 +453,13 @@ mod tests {
             prefix: Some("web".to_string()),
         });
         store.insert(MetadataAndSpec {
+            uid: "uid-none-to-some".into(),
             generation: Some(2),
             observed_generation: Some(1),
             spec: Arc::new((key.clone(), spec.clone())),
         });
 
-        let host = derive_hostname("chal-none-to-some", "default", Some("web"));
+        let host = derive_hostname("web", "uid-none-to-some");
         assert_eq!(store.get_hostname(&key), Some(host.clone()));
         assert!(store.get_tls_route(&host).is_some());
     }
@@ -475,6 +510,7 @@ mod tests {
 
         // Initial insert
         store.insert(MetadataAndSpec {
+            uid: "uid-relog".into(),
             generation: Some(1),
             observed_generation: None,
             spec: Arc::new((key.clone(), spec.clone())),
@@ -487,6 +523,7 @@ mod tests {
             port: 8080,
         };
         store.insert(MetadataAndSpec {
+            uid: "uid-relog".into(),
             generation: Some(2),
             observed_generation: Some(1),
             spec: Arc::new((key.clone(), spec.clone())),
@@ -501,21 +538,16 @@ mod tests {
 
     #[test]
     fn test_derive_hostname_prefix_and_default() {
-        let host1 = derive_hostname("my-chal", "default", Some(""));
-        let host2 = derive_hostname("my-chal", "default", Some("web"));
-        let host3 = derive_hostname("my-chal", "other-ns", Some(""));
-        let host4 = derive_hostname("my-chal", "other-ns", None);
-        let host5 = derive_hostname("chal", "other-ns", None);
+        let host1 = derive_hostname("my-chal", "uid-1");
+        let host2 = derive_hostname("web", "uid-1");
+        let host3 = derive_hostname("my-chal", "uid-2");
 
         assert!(host1.starts_with("my-chal-"));
         assert!(host2.starts_with("web-"));
         assert!(host3.starts_with("my-chal-"));
-        assert!(host4.starts_with("my-chal-"));
-        assert!(host5.starts_with("chal-"));
 
         assert_ne!(host1, host2);
         assert_ne!(host1, host3);
-        assert_ne!(host1, host4); // Different namespace -> different hash ID
         assert_eq!(host1.len(), "my-chal-".len() + HOSTNAME_ID_LEN);
         assert_eq!(host2.len(), "web-".len() + HOSTNAME_ID_LEN);
     }
@@ -532,14 +564,14 @@ mod tests {
 
     #[test]
     fn test_derive_hostname_collision_prevention() {
-        let h1 = derive_hostname("web-chal1-service1-team1", "default", None);
-        let h2 = derive_hostname("web-chal1-service2-team1", "default", None);
+        let h1 = derive_hostname("web-chal1-service1-team1", "uid-a");
+        let h2 = derive_hostname("web-chal1-service2-team1", "uid-b");
         assert!(h1.starts_with("web-chal1-service1-team1-"));
         assert!(h2.starts_with("web-chal1-service2-team1-"));
         assert_ne!(h1, h2);
 
-        let h_metadata = derive_hostname("chal", "default", Some("web"));
-        let h_key = derive_hostname("chal-web", "default", None);
+        let h_metadata = derive_hostname("web", "uid-c");
+        let h_key = derive_hostname("chal-web", "uid-c");
         assert_ne!(h_metadata, h_key);
     }
 }

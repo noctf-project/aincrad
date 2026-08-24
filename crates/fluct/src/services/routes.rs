@@ -158,11 +158,19 @@ impl RoutesService {
         match event {
             Event::Apply(data) | Event::InitApply(data) => {
                 let name = data.metadata.name?;
+                let uid = match data.metadata.uid {
+                    Some(uid) => uid,
+                    None => {
+                        warn!("Dropping CTFRoute {name}: missing metadata.uid");
+                        return None;
+                    }
+                };
                 let namespace = data.metadata.namespace.as_deref().unwrap_or("default");
                 let namespaced_name = format!("{}:{}", namespace, name);
 
                 let spec = Arc::new((namespaced_name.clone(), data.spec));
                 let prev = self.routes.insert(MetadataAndSpec {
+                    uid,
                     generation: data.metadata.generation,
                     observed_generation: data.status.as_ref().and_then(|x| x.observed_generation),
                     spec: spec.clone(),
@@ -362,6 +370,7 @@ mod tests {
             ..Default::default()
         };
         store.routes.insert(MetadataAndSpec {
+            uid: "uid-port-lookup".into(),
             generation: None,
             observed_generation: None,
             spec: Arc::new(("default:my-chal".to_string(), spec)),
@@ -385,6 +394,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("test-chal".into()),
                 namespace: Some("default".into()),
+                uid: Some("uid-lifecycle".into()),
                 ..Default::default()
             },
             spec: CTFRouteSpec {
@@ -426,6 +436,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("test-chal".into()),
                 namespace: Some("default".into()),
+                uid: Some("uid-update-tag".into()),
                 generation: Some(1),
                 ..Default::default()
             },
@@ -497,6 +508,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("status-chal".into()),
                 namespace: Some("default".into()),
+                uid: Some("uid-observed-gen".into()),
                 ..Default::default()
             },
             spec: CTFRouteSpec {
@@ -541,6 +553,7 @@ mod tests {
         };
         let pair = ("prod:my-challenge".to_string(), spec);
         store.routes.insert(MetadataAndSpec {
+            uid: "uid-desired-status".into(),
             generation: Some(5),
             observed_generation: None,
             spec: Arc::new((pair.0.clone(), pair.1.clone())),
@@ -624,6 +637,7 @@ mod tests {
         };
         let pair = ("default:test-web-route".to_string(), spec);
         store.routes.insert(MetadataAndSpec {
+            uid: "uid-suffix-fmt".into(),
             generation: Some(1),
             observed_generation: None,
             spec: Arc::new((pair.0.clone(), pair.1.clone())),
@@ -652,6 +666,7 @@ mod tests {
         };
         let pair = ("default:test-web-route".to_string(), spec);
         store.routes.insert(MetadataAndSpec {
+            uid: "uid-empty-suffix".into(),
             generation: Some(1),
             observed_generation: None,
             spec: Arc::new((pair.0.clone(), pair.1.clone())),

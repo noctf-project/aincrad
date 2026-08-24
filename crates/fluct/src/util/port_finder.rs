@@ -26,7 +26,7 @@ impl PortFinderFactory {
         let key1: u64 = rand::random();
         let key2: u64 = rand::random();
         let hasher = SipHasher24::new_with_keys(key1, key2);
-        
+
         let start = *range.0.start();
         let end = *range.0.end();
         let n = if end >= start {
