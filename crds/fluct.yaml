@@ -4,102 +4,156 @@ metadata:
   name: ctfroutes.aincrad.noctf.dev
 spec:
   group: aincrad.noctf.dev
-  scope: Namespaced
   names:
+    kind: CTFRoute
     plural: ctfroutes
     singular: ctfroute
-    kind: CTFRoute
-    shortNames:
-      - ctfroute
+  scope: Namespaced
   versions:
-    - name: v1
-      served: true
-      storage: true
-      subresources:
-        status: {}
-      schema:
-        openAPIV3Schema:
-            type: object
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for CTFRouteSpec via `CustomResource`
+        properties:
+          spec:
             properties:
-              spec:
-                type: object
+              availableAt:
+                format: date-time
+                nullable: true
+                type: string
+              backend:
                 properties:
-                  flag:
+                  port:
+                    format: uint16
+                    maximum: 65535.0
+                    minimum: 0.0
+                    type: integer
+                  service:
                     type: string
-                    minLength: 1
-                  availableAt:
-                    type: string
-                    format: date-time
-                  secret:
-                    type: string
-                  requestUid:
+                required:
+                - port
+                - service
+                type: object
+              flag:
+                nullable: true
+                type: string
+              logs:
+                default: false
+                type: boolean
+              port:
+                format: uint16
+                maximum: 65535.0
+                minimum: 0.0
+                nullable: true
+                type: integer
+              pow:
+                nullable: true
+                properties:
+                  difficulty:
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  enableAdminBypass:
+                    default: false
                     type: boolean
-                  pow:
-                    type: object
-                    properties:
-                      difficulty:
-                        type: integer
-                      enableAdminBypass:
-                        type: boolean
-                    required: [difficulty]
-                  backend:
-                    type: object
+                required:
+                - difficulty
+                type: object
+              requestUid:
+                default: false
+                type: boolean
+              secret:
+                nullable: true
+                type: string
+              tls:
+                nullable: true
+                properties:
+                  prefix:
+                    maxLength: 48
+                    nullable: true
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                type: object
+            required:
+            - backend
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              endpoints:
+                nullable: true
+                properties:
+                  tcp:
+                    nullable: true
                     properties:
                       host:
                         type: string
                       port:
+                        format: uint16
+                        maximum: 65535.0
+                        minimum: 0.0
                         type: integer
-                    required: [host, port]
-                  targetPort:
-                    type: integer
-                  logs:
-                    type: boolean
+                    required:
+                    - host
+                    - port
+                    type: object
                   tls:
-                    type: object
+                    nullable: true
                     properties:
-                      prefix:
+                      host:
                         type: string
-                        pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
-                        maxLength: 48
-                required: [backend]
-              status:
-                type: object
-                properties:
-                  observedGeneration:
-                    type: integer
-                  endpoints:
+                      port:
+                        format: uint16
+                        maximum: 65535.0
+                        minimum: 0.0
+                        type: integer
+                    required:
+                    - host
+                    - port
                     type: object
-                    properties:
-                      tls:
-                        type: object
-                        properties:
-                          host:
-                            type: string
-                          port:
-                            type: integer
-                      tcp:
-                        type: object
-                        properties:
-                          host:
-                            type: string
-                          port:
-                            type: integer
-                  conditions:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        type:
-                          type: string
-                        status:
-                          type: string
-                        reason:
-                          type: string
-                        message:
-                          type: string
-                        lastTransitionTime:
-                          type: string
-                          format: date-time
-                        observedGeneration:
-                          type: integer
-                      required: [type, status, reason, message, lastTransitionTime]
+                type: object
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: CTFRoute
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

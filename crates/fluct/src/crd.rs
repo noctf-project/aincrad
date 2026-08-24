@@ -1,7 +1,18 @@
 use chrono::{DateTime, FixedOffset};
-use kube::CustomResource;
+use kube::{CustomResource, CustomResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
+
+pub fn generate_crd(format: &str) -> Result<String, fluct::Error> {
+    let crd = CTFRoute::crd();
+    match format.to_lowercase().as_str() {
+        "json" => serde_json::to_string_pretty(&crd)
+            .map_err(|e| format!("failed to serialize CRD to JSON: {e}").into()),
+        "yaml" | "yml" => serde_yaml::to_string(&crd)
+            .map_err(|e| format!("failed to serialize CRD to YAML: {e}").into()),
+        other => Err(format!("unsupported CRD format '{other}', expected 'yaml' or 'json'").into()),
+    }
+}
 
 fn clamp_u64<'de, D>(d: D) -> Result<u64, D::Error>
 where
@@ -197,4 +208,17 @@ mod tests {
         };
         assert_eq!(b5.address("custom-ns", "cluster.local"), "::1:80");
     }
+
+    #[test]
+    fn test_generate_crd() {
+        let yaml = generate_crd("yaml").unwrap();
+        assert!(yaml.contains("kind: CustomResourceDefinition"));
+        assert!(yaml.contains("name: ctfroutes.aincrad.noctf.dev"));
+
+        let json = generate_crd("json").unwrap();
+        assert!(json.contains("\"kind\": \"CustomResourceDefinition\""));
+
+        assert!(generate_crd("invalid").is_err());
+    }
 }
+
