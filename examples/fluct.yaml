@@ -5,11 +5,12 @@ metadata:
   name: test-web-route
   namespace: kubectf-challenges
 spec:
-  availableAt: 2010-12-31T00:00:00.000Z
+  backend:
+    host: example.com
+    port: 80
   secret: testing
   tls:
     key: any-entropy2
-  backend: example.com:80
 ---
 # TCP Route with auto-allocated port
 apiVersion: aincrad.noctf.dev/v1
@@ -18,7 +19,9 @@ metadata:
   name: test-pwn-auto-port
   namespace: kubectf-challenges
 spec:
-  backend: example.com:80
+  backend:
+    host: example.com
+    port: 80
   port: 0
 ---
 # TCP Route with fixed port
@@ -28,5 +31,7 @@ metadata:
   name: test-pwn-fixed-port
   namespace: kubectf-challenges
 spec:
-  backend: example.com:80
-  port: 10000
+  backend:
+    host: example.com
+    port: 80
+  port: 20000

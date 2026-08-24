@@ -110,7 +110,11 @@ struct RawServiceConfig {
 
     /// Optional Hostname Suffix
     #[clap(long, default_value = "", value_parser = parse_hostname_suffix)]
-    pub hostname_suffix: String,
+    pub challenge_domain: String,
+
+    /// Kubernetes Cluster Domain
+    #[clap(long, default_value = "cluster.local")]
+    pub cluster_domain: String,
 
     /// CTF flag prefix
     #[clap(long, default_value = "CTF")]
@@ -133,7 +137,8 @@ impl RawServiceConfig {
             tproxy_port: self.tproxy_port,
             tls_cert: self.tls_cert,
             tls_key: self.tls_key,
-            hostname_suffix: self.hostname_suffix,
+            challenge_domain: self.challenge_domain,
+            cluster_domain: self.cluster_domain,
             flag_prefix: self.flag_prefix,
             logs_dir: self.logs_dir,
         };
@@ -154,7 +159,8 @@ pub struct ServiceConfig {
     pub tproxy_port: Option<u16>,
     pub tls_cert: PathBuf,
     pub tls_key: PathBuf,
-    pub hostname_suffix: String,
+    pub challenge_domain: String,
+    pub cluster_domain: String,
     pub flag_prefix: String,
     pub logs_dir: String,
 }
@@ -238,7 +244,8 @@ mod tests {
         let cfg = parse_config_from(args).unwrap();
         assert_eq!(cfg.tls_cert, PathBuf::from("cert.pem"));
         assert_eq!(cfg.tls_key, PathBuf::from("key.pem"));
-        assert_eq!(cfg.hostname_suffix, "example.com".to_string());
+        assert_eq!(cfg.challenge_domain, "example.com".to_string());
+        assert_eq!(cfg.cluster_domain, "cluster.local".to_string());
         assert_eq!(cfg.http_port, 9000);
         assert_eq!(cfg.flag_prefix, "CTF");
         assert_eq!(cfg.reserved_ports, PortRange(10000..=19999));

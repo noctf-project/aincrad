@@ -69,7 +69,7 @@ impl RoutesService {
         spec: &CTFRouteSpecPair,
     ) -> CTFRouteStatusPair {
         let mut conditions = Vec::new();
-        let tcp_reserve = self.ports.reserve(&spec.0, spec.1.port);
+        let tcp_reserve = self.ports.reserve(&spec.0, spec.1.target_port);
 
         let tcp_endpoint = match tcp_reserve {
             Ok(Some(r)) => {
@@ -334,7 +334,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{CTFRouteSpec, CTFRouteSpecTLS, CTFRouteStatus};
+    use crate::crd::{CTFRouteBackend, CTFRouteSpec, CTFRouteSpecTLS, CTFRouteStatus};
     use kube::core::ObjectMeta;
 
     fn make_store(suffix: &str) -> RoutesService {
@@ -352,9 +352,12 @@ mod tests {
         let store = make_store("");
 
         let spec = CTFRouteSpec {
-            port: Some(20001),
+            target_port: Some(20001),
             flag: Some("test_flag".into()),
-            backend: "127.0.0.1:1337".into(),
+            backend: CTFRouteBackend {
+                host: "127.0.0.1".into(),
+                port: 1337,
+            },
             ..Default::default()
         };
         store.routes.insert(MetadataAndSpec {
@@ -384,7 +387,10 @@ mod tests {
                 ..Default::default()
             },
             spec: CTFRouteSpec {
-                backend: "backend-service:80".into(),
+                backend: CTFRouteBackend {
+                    host: "backend-service".into(),
+                    port: 80,
+                },
                 tls: Some(CTFRouteSpecTLS {
                     key: Some("web".to_string()),
                 }),
@@ -401,7 +407,10 @@ mod tests {
         assert_eq!(fetched_chal.as_ref().unwrap().0, "default:test-chal");
         assert_eq!(
             fetched_chal.as_ref().unwrap().1.backend,
-            "backend-service:80"
+            CTFRouteBackend {
+                host: "backend-service".into(),
+                port: 80,
+            }
         );
 
         // Delete event
@@ -420,7 +429,10 @@ mod tests {
                 ..Default::default()
             },
             spec: CTFRouteSpec {
-                backend: "backend-service:80".into(),
+                backend: CTFRouteBackend {
+                    host: "backend-service".into(),
+                    port: 80,
+                },
                 tls: Some(CTFRouteSpecTLS {
                     key: Some("web".to_string()),
                 }),
@@ -433,16 +445,25 @@ mod tests {
         let host_v1 = store.format_tls_host("default:test-chal").unwrap();
         assert_eq!(
             store.get_tls_route(&host_v1).unwrap().1.backend,
-            "backend-service:80"
+            CTFRouteBackend {
+                host: "backend-service".into(),
+                port: 80,
+            }
         );
 
         // Apply update with SAME tag (should not deregister)
         chal.metadata.generation = Some(2);
-        chal.spec.backend = "backend-service:8080".into();
+        chal.spec.backend = CTFRouteBackend {
+            host: "backend-service".into(),
+            port: 8080,
+        };
         store.handle_route_event(Event::Apply(chal.clone()));
         assert_eq!(
             store.get_tls_route(&host_v1).unwrap().1.backend,
-            "backend-service:8080"
+            CTFRouteBackend {
+                host: "backend-service".into(),
+                port: 8080,
+            }
         );
 
         // Apply update with NEW tag (should register new first, then deregister old)
@@ -454,7 +475,10 @@ mod tests {
         let host_v2 = store.format_tls_host("default:test-chal").unwrap();
         assert_eq!(
             store.get_tls_route(&host_v2).unwrap().1.backend,
-            "backend-service:8080"
+            CTFRouteBackend {
+                host: "backend-service".into(),
+                port: 8080,
+            }
         );
         assert!(store.get_tls_route(&host_v1).is_none());
 
@@ -475,7 +499,10 @@ mod tests {
                 ..Default::default()
             },
             spec: CTFRouteSpec {
-                backend: "backend-service:80".into(),
+                backend: CTFRouteBackend {
+                    host: "backend-service".into(),
+                    port: 80,
+                },
                 ..Default::default()
             },
             status: Some(CTFRouteStatus {
@@ -501,8 +528,11 @@ mod tests {
     async fn test_prepare_desired_status() {
         let store = make_store(".example.com");
         let spec = CTFRouteSpec {
-            port: Some(20001),
-            backend: "backend:80".into(),
+            target_port: Some(20001),
+            backend: CTFRouteBackend {
+                host: "backend".into(),
+                port: 80,
+            },
             tls: Some(CTFRouteSpecTLS {
                 key: Some("web".to_string()),
             }),
@@ -536,8 +566,11 @@ mod tests {
         store.ports.reserve("prod:r1", Some(20001)).unwrap();
 
         let spec = CTFRouteSpec {
-            port: Some(20001),
-            backend: "backend:80".into(),
+            target_port: Some(20001),
+            backend: CTFRouteBackend {
+                host: "backend".into(),
+                port: 80,
+            },
             ..Default::default()
         };
         let pair = ("prod:r2".to_string(), spec);
@@ -557,8 +590,11 @@ mod tests {
         let store = make_store("example.com");
 
         let spec = CTFRouteSpec {
-            port: Some(10000),
-            backend: "backend:80".into(),
+            target_port: Some(10000),
+            backend: CTFRouteBackend {
+                host: "backend".into(),
+                port: 80,
+            },
             ..Default::default()
         };
         let pair = ("prod:r1".to_string(), spec);
@@ -576,7 +612,10 @@ mod tests {
     async fn test_desired_status_hostname_suffix_formatting() {
         let store = make_store("c.noctf.dev");
         let spec = CTFRouteSpec {
-            backend: "backend:80".into(),
+            backend: CTFRouteBackend {
+                host: "backend".into(),
+                port: 80,
+            },
             tls: Some(CTFRouteSpecTLS {
                 key: Some("web".to_string()),
             }),
@@ -601,7 +640,10 @@ mod tests {
     async fn test_desired_status_empty_hostname_suffix() {
         let store = make_store("");
         let spec = CTFRouteSpec {
-            backend: "backend:80".into(),
+            backend: CTFRouteBackend {
+                host: "backend".into(),
+                port: 80,
+            },
             tls: Some(CTFRouteSpecTLS {
                 key: Some("web".to_string()),
             }),

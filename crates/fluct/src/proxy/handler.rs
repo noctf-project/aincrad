@@ -149,8 +149,16 @@ impl Handler {
             );
         }
 
-        debug!("Connecting to backend {}", spec.backend);
-        let mut socket = TcpStream::connect(&spec.backend).await?;
+        let (namespace, _) = self
+            .route
+            .0
+            .split_once(':')
+            .unwrap_or(("default", &self.route.0));
+        let backend_addr = spec
+            .backend
+            .address(namespace, &self.service.config.cluster_domain);
+        debug!("Connecting to backend {}", backend_addr);
+        let mut socket = TcpStream::connect(&backend_addr).await?;
         let (b_rx, mut b_tx) = socket.split();
         let mut b_rx = BufReader::with_capacity(BUF_SIZE, b_rx);
         if spec.flag.is_some() {
@@ -258,7 +266,7 @@ mod tests {
     use super::*;
     use crate::clients::KubernetesClient;
     use crate::config::{PortRange, ServiceConfig};
-    use crate::crd::{CTFRouteSpec, CTFRouteSpecPOW};
+    use crate::crd::{CTFRouteBackend, CTFRouteSpec, CTFRouteSpecPOW};
     use crate::services::routes::RoutesService;
     use crate::store::secrets::SecretsStore;
     use chrono::{Duration as ChronoDuration, Utc};
@@ -275,7 +283,8 @@ mod tests {
                 tls_port: 4433,
                 tls_cert: "cert.pem".into(),
                 tls_key: "key.pem".into(),
-                hostname_suffix: "".into(),
+                challenge_domain: "".into(),
+                cluster_domain: "cluster.local".into(),
                 flag_prefix: "CTF".into(),
                 logs_dir: "./data/".into(),
                 reserved_ports: PortRange(20000..=20999),
@@ -299,7 +308,10 @@ mod tests {
         let ctx = create_test_service_context();
         let spec = CTFRouteSpec {
             flag: Some("test_flag".into()),
-            backend: "127.0.0.1:8080".into(),
+            backend: CTFRouteBackend {
+                host: "127.0.0.1".into(),
+                port: 8080,
+            },
             ..Default::default()
         };
         let challenge = Arc::new(("my-chal".to_string(), spec));
@@ -414,5 +426,44 @@ mod tests {
         client_tx.write_all(b"invalid_token\n").await.unwrap();
 
         assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[test]
+    fn test_route_backend_address_resolution() {
+        let spec_simple = CTFRouteSpec {
+            backend: CTFRouteBackend {
+                host: "web-svc".to_string(),
+                port: 80,
+            },
+            ..Default::default()
+        };
+        let route_pair = ("kubectf-challenges:web-target".to_string(), spec_simple);
+
+        let (namespace, _) = route_pair
+            .0
+            .split_once(':')
+            .unwrap_or(("default", &route_pair.0));
+        assert_eq!(namespace, "kubectf-challenges");
+        assert_eq!(
+            route_pair.1.backend.address(namespace, "cluster.local"),
+            "web-svc.kubectf-challenges.svc.cluster.local:80"
+        );
+
+        let spec_fqdn = CTFRouteSpec {
+            backend: CTFRouteBackend {
+                host: "example.com".to_string(),
+                port: 443,
+            },
+            ..Default::default()
+        };
+        let route_fqdn = ("kubectf-challenges:web-fqdn".to_string(), spec_fqdn);
+        let (namespace_fqdn, _) = route_fqdn
+            .0
+            .split_once(':')
+            .unwrap_or(("default", &route_fqdn.0));
+        assert_eq!(
+            route_fqdn.1.backend.address(namespace_fqdn, "cluster.local"),
+            "example.com:443"
+        );
     }
 }

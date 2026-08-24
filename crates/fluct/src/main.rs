@@ -31,7 +31,7 @@ async fn main() -> Result<(), Error> {
 
     let routes_service = RoutesService::new(
         kubernetes_client.clone(),
-        &config.hostname_suffix,
+        &config.challenge_domain,
         config.tls_port,
         config.reserved_ports.clone(),
         config.auto_ports.clone(),

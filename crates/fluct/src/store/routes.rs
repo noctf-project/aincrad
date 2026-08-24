@@ -166,14 +166,17 @@ impl RoutesStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{CTFRouteSpec, CTFRouteSpecTLS};
+    use crate::crd::{CTFRouteBackend, CTFRouteSpec, CTFRouteSpecTLS};
 
     #[test]
     fn test_routes_store_lifecycle() {
         let store = RoutesStore::new();
 
         let spec = CTFRouteSpec {
-            backend: "backend-service:80".into(),
+            backend: CTFRouteBackend {
+                host: "backend-service".into(),
+                port: 80,
+            },
             tls: Some(CTFRouteSpecTLS {
                 key: Some("web".to_string()),
             }),
@@ -219,7 +222,10 @@ mod tests {
         let key = "default:chal-web".to_string();
 
         let mut spec = CTFRouteSpec {
-            backend: "service:80".into(),
+            backend: CTFRouteBackend {
+                host: "service".into(),
+                port: 80,
+            },
             tls: Some(CTFRouteSpecTLS {
                 key: Some("v1".to_string()),
             }),
@@ -237,12 +243,18 @@ mod tests {
 
         assert_eq!(
             store.get_tls_route(&host_v1).unwrap().1.backend,
-            "service:80"
+            CTFRouteBackend {
+                host: "service".into(),
+                port: 80,
+            }
         );
         assert_eq!(store.get_hostname(&key), Some(host_v1.clone()));
 
         // Update with same tag (v1), backend changed
-        spec.backend = "service:8080".into();
+        spec.backend = CTFRouteBackend {
+            host: "service".into(),
+            port: 8080,
+        };
         store.insert(MetadataAndSpec {
             generation: Some(2),
             observed_generation: Some(1),
@@ -251,7 +263,10 @@ mod tests {
 
         assert_eq!(
             store.get_tls_route(&host_v1).unwrap().1.backend,
-            "service:8080"
+            CTFRouteBackend {
+                host: "service".into(),
+                port: 8080,
+            }
         );
 
         // Update with new tag "v2" -> host_v1 should be deregistered, host_v2 registered
@@ -268,7 +283,10 @@ mod tests {
         assert!(store.get_tls_route(&host_v1).is_none());
         assert_eq!(
             store.get_tls_route(&host_v2).unwrap().1.backend,
-            "service:8080"
+            CTFRouteBackend {
+                host: "service".into(),
+                port: 8080,
+            }
         );
         assert_eq!(store.get_hostname(&key), Some(host_v2.clone()));
 
@@ -360,7 +378,10 @@ mod tests {
         // Insert route with TLS
         let key = "prod:chal-sni".to_string();
         let spec = CTFRouteSpec {
-            backend: "backend:443".into(),
+            backend: CTFRouteBackend {
+                host: "backend".into(),
+                port: 443,
+            },
             tls: Some(CTFRouteSpecTLS {
                 key: Some("web".to_string()),
             }),
@@ -389,7 +410,10 @@ mod tests {
 
         // Initial insert with NO TLS (prev_tls = None)
         let mut spec = CTFRouteSpec {
-            backend: "service:80".into(),
+            backend: CTFRouteBackend {
+                host: "service".into(),
+                port: 80,
+            },
             tls: None,
             ..Default::default()
         };
@@ -449,7 +473,10 @@ mod tests {
         let key = "default:chal-relog".to_string();
 
         let mut spec = CTFRouteSpec {
-            backend: "service:80".into(),
+            backend: CTFRouteBackend {
+                host: "service".into(),
+                port: 80,
+            },
             tls: Some(CTFRouteSpecTLS {
                 key: Some("web".to_string()),
             }),
@@ -465,7 +492,10 @@ mod tests {
 
         // Clear log buffer and insert update with SAME TLS tag, updated backend
         buf.lock().unwrap().clear();
-        spec.backend = "service:8080".into();
+        spec.backend = CTFRouteBackend {
+            host: "service".into(),
+            port: 8080,
+        };
         store.insert(MetadataAndSpec {
             generation: Some(2),
             observed_generation: Some(1),
