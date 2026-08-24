@@ -7,7 +7,7 @@ use tokio::try_join;
 use tokio_rustls::rustls::crypto::ring;
 use tokio_util::sync::CancellationToken;
 
-use crate::{services::routes::RoutesService, store::secrets::SecretsStore};
+use crate::services::routes::RoutesService;
 mod clients;
 mod config;
 mod crd;
@@ -36,7 +36,6 @@ async fn main() -> Result<(), Error> {
         config.reserved_ports.clone(),
         config.auto_ports.clone(),
     );
-    let secrets_store = SecretsStore::new(kubernetes_client.clone(), &config.secret_root);
 
     let (tls_tx, tls_rx) = if let Some(port) = config.tproxy_port {
         util::netfilter::configure_netfilter(
@@ -58,7 +57,6 @@ async fn main() -> Result<(), Error> {
     let service_context = Arc::new(ServiceContext {
         config,
         routes_service,
-        secrets_store,
         shutdown: shutdown.clone(),
     });
 
@@ -82,10 +80,6 @@ async fn main() -> Result<(), Error> {
         wrap_err(
             "challenges_store.run",
             service_context.routes_service.run(service_context.clone())
-        ),
-        wrap_err(
-            "secrets_store.run",
-            service_context.secrets_store.run(shutdown.clone())
         ),
     )?;
     Ok(())

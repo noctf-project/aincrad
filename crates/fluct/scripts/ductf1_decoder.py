@@ -56,4 +56,4 @@ if __name__ == '__main__':
   uid = input('Team ID: ')
   secret = input('Secret: ')
   flag = input('Flag: ')
-  print(decode(uid, base64.b64decode(secret), flag))
+  print(decode(uid, secret.encode('utf-8'), flag))

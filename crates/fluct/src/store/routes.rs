@@ -8,7 +8,7 @@ use tracing::info;
 
 use crate::{
     crd::{CTFRouteSpec, CTFRouteStatus},
-    crypto::hash::sha256,
+    crypto::hash::derive_key,
 };
 
 const HOSTNAME_ID_LEN: usize = 14;
@@ -38,8 +38,7 @@ fn sanitize_prefix(input: &str) -> String {
 
 fn derive_hostname(prefix: &str, uid: &str) -> String {
     let clean_prefix = sanitize_prefix(prefix);
-    let input = format!("aincrad:route:tls:{}", uid);
-    let hash = sha256(input.as_bytes());
+    let hash = derive_key(uid, "route:tls");
     let mut id = base32::encode(base32::Alphabet::Crockford, &hash).to_lowercase();
     id.truncate(HOSTNAME_ID_LEN);
     format!("{}-{}", clean_prefix, id)

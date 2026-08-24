@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use fluct::Error;
 
-use crate::{services::routes::RoutesService, store::secrets::SecretsStore};
+use crate::services::routes::RoutesService;
 
 pub fn parse_config() -> Result<ServiceConfig, Error> {
     let raw = RawServiceConfig::parse();
@@ -28,7 +28,6 @@ where
 pub struct ServiceContext {
     pub config: ServiceConfig,
     pub routes_service: RoutesService,
-    pub secrets_store: SecretsStore,
     pub shutdown: CancellationToken,
 }
 
@@ -74,10 +73,6 @@ struct RawServiceConfig {
     /// Host to listen on
     #[clap(long, default_value = "[::]")]
     pub host: String,
-
-    /// Root secret name
-    #[clap(long, default_value = "aincrad-roots")]
-    pub secret_root: String,
 
     /// HTTP listening port for Kubernetes webhooks and stats
     #[clap(long, default_value = "32600")]
@@ -129,7 +124,6 @@ impl RawServiceConfig {
     fn into_validated(self) -> Result<ServiceConfig, Error> {
         let config = ServiceConfig {
             host: self.host,
-            secret_root: self.secret_root,
             http_port: self.http_port,
             tls_port: self.tls_port,
             reserved_ports: self.reserved_ports,
@@ -151,7 +145,6 @@ impl RawServiceConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceConfig {
     pub host: String,
-    pub secret_root: String,
     pub http_port: u16,
     pub tls_port: u16,
     pub reserved_ports: PortRange,

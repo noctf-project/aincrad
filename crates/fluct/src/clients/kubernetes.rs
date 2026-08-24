@@ -9,7 +9,7 @@ use futures::{Stream, TryStreamExt};
 use k8s_openapi::NamespaceResourceScope;
 use kube::{
     Api, Client,
-    runtime::watcher::{Config, Event, watch_object, watcher},
+    runtime::watcher::{Config, Event, watcher},
 };
 use kube_lease_manager::{LeaseManager, LeaseManagerBuilder};
 use serde::de::DeserializeOwned;
@@ -54,25 +54,6 @@ impl KubernetesClient {
         let pp = PatchParams::default();
         let _ = api.patch_status(name, &pp, &Patch::Merge(&patch)).await?;
         Ok(())
-    }
-
-    pub async fn watch_object<K>(
-        &self,
-        cancel: CancellationToken,
-        name: &str,
-        chan: mpsc::Sender<Option<K>>,
-    ) where
-        K: kube::core::Resource<Scope = NamespaceResourceScope>
-            + Clone
-            + DeserializeOwned
-            + Debug
-            + Send
-            + 'static,
-        <K as kube::Resource>::DynamicType: std::default::Default,
-    {
-        let api: Api<K> = Api::default_namespaced(self.client.clone());
-        let stream = pin!(watch_object(api, name));
-        self.do_watch(cancel, stream, chan).await;
     }
 
     pub async fn get_lease_manager(

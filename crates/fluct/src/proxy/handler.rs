@@ -15,6 +15,7 @@ use tracing::{debug, trace};
 
 use crate::{
     config::ServiceContext,
+    crypto::hash::derive_key,
     logger::FileLogger,
     proxy::{
         challenge::{Challenge, ChallengeSolveState},
@@ -31,7 +32,6 @@ pub struct Handler {
     flag: String,
 }
 
-const DEFAULT_SECRET: &[u8] = b"notsecret";
 const BUF_SIZE: usize = 16 * 1024;
 const MAX_UID_SIZE: usize = 64;
 const MAX_INPUT_TIME_UID: Duration = Duration::from_secs(30);
@@ -62,13 +62,9 @@ impl Handler {
         W: AsyncWrite + Unpin,
     {
         let mut c_rx = BufReader::with_capacity(BUF_SIZE, c_rx);
-        let name = self.route.namespaced_name();
         let spec = &self.route.spec;
 
-        let secret_name = match &spec.secret {
-            Some(secret) => secret,
-            None => "default",
-        };
+        let secret = spec.secret.as_deref().unwrap_or("notsecret");
 
         let mut request_pow: Option<ChallengeSolveState> = None;
         let pow = spec.pow.as_ref();
@@ -94,12 +90,7 @@ impl Handler {
         }
 
         if let Some(request_challenge) = request_pow {
-            let secret = self
-                .service
-                .secrets_store
-                .derive_key(secret_name, &name, "challenge")
-                .await
-                .unwrap_or_else(|| DEFAULT_SECRET.to_vec());
+            let secret = derive_key(secret, "challenge");
 
             match Challenge::solve(
                 pow.map(|x| x.difficulty).unwrap_or(0),
@@ -128,12 +119,7 @@ impl Handler {
             self.session.uid = get_line(&mut c_rx, MAX_UID_SIZE, MAX_INPUT_TIME_UID).await?;
         }
 
-        let secret = self
-            .service
-            .secrets_store
-            .derive_key(secret_name, &name, "flag")
-            .await
-            .unwrap_or_else(|| DEFAULT_SECRET.to_vec());
+        let secret = derive_key(secret, "flag");
 
         if let Some(ref flag_prefix) = spec.flag {
             self.flag = V1FlagGenerator::generate(
@@ -259,7 +245,6 @@ mod tests {
     use crate::config::{PortRange, ServiceConfig};
     use crate::crd::{CTFRouteBackend, CTFRouteSpec, CTFRouteSpecPOW};
     use crate::services::routes::RoutesService;
-    use crate::store::secrets::SecretsStore;
     use chrono::{Duration as ChronoDuration, Utc};
     use std::net::{IpAddr, Ipv4Addr};
     use tokio::io::AsyncReadExt;
@@ -269,7 +254,6 @@ mod tests {
         Arc::new(ServiceContext {
             config: ServiceConfig {
                 host: "[::]".into(),
-                secret_root: "root".into(),
                 http_port: 8000,
                 tls_port: 4433,
                 tls_cert: "cert.pem".into(),
@@ -289,7 +273,6 @@ mod tests {
                 PortRange(20000..=20999),
                 PortRange(30000..=30999),
             ),
-            secrets_store: SecretsStore::new(client, "root"),
             shutdown: CancellationToken::new(),
         })
     }
