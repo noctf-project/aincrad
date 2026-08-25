@@ -25,15 +25,15 @@ pub struct CTFTemplateSpecParam {
 }
 
 impl KubeListKey for CTFTemplateSpecParam {
-    const KEY: &'static str = "name";
+    const KEYS: &'static [&'static str] = &["name"];
 }
 
 impl KubeListKey for CTFTemplateSpecPod {
-    const KEY: &'static str = "name";
+    const KEYS: &'static [&'static str] = &["name"];
 }
 
 impl KubeListKey for CTFTemplateSpecRoute {
-    const KEY: &'static str = "name";
+    const KEYS: &'static [&'static str] = &["name"];
 }
 
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]

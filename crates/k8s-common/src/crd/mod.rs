@@ -2,12 +2,17 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomRe
 
 use crate::Error;
 
+pub mod instance;
 pub mod route;
 pub mod template;
+
 mod util;
 
+pub use aincrad_macros::Patch;
+pub use instance::*;
 pub use route::*;
 pub use template::*;
+pub use util::Patch;
 
 pub fn generate_crd(format: &str, crd: CustomResourceDefinition) -> Result<String, Error> {
     match format.to_lowercase().as_str() {

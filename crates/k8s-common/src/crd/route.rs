@@ -106,7 +106,9 @@ pub struct CTFRouteSpecPOW {
     pub enable_admin_bypass: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
+use aincrad_macros::Patch;
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Patch)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteSpecTLS {
     /// Subdomain prefix for the derived TLS hostname (e.g. 'web' in 'web-xxxx.c.noctf.dev'). Defaults to the route metadata name if omitted.

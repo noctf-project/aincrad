@@ -31,15 +31,17 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(current) = self.iter.next() {
             if let Some(next) = self.iter.peek()
-                && current.should_dedup(next) {
-                    continue; // Skip earlier duplicates to reach the latest
-                }
+                && current.should_dedup(next)
+            {
+                continue; // Skip earlier duplicates to reach the latest
+            }
             return Some(current);
         }
         None
     }
 }
 
+#[allow(dead_code)]
 pub struct DedupFirst<I>
 where
     I: Iterator,
@@ -72,6 +74,7 @@ where
 
 pub trait DedupExt: Iterator + Sized {
     /// Keeps the first element in each consecutive duplicate run.
+    #[allow(dead_code)]
     fn dedup_first(self) -> DedupFirst<Self>
     where
         Self::Item: Dedupable,

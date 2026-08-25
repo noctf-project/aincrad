@@ -52,6 +52,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aincrad-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1470,6 +1479,7 @@ dependencies = [
 name = "k8s-common"
 version = "0.1.0"
 dependencies = [
+ "aincrad-macros",
  "axum",
  "chrono",
  "futures",
