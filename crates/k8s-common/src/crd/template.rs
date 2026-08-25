@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crd::{
     CTFRouteSpec,
-    util::{KubeListKey, default_val, embedded_resource_schema, list_schema},
+    util::{KubeListKey, default_val, embedded_resource_schema, json_patch_schema, list_schema},
 };
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
@@ -20,6 +20,10 @@ pub struct CTFTemplateStatus {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFTemplateSpecParam {
+    #[schemars(
+        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
+        length(min = 1, max = 24)
+    )]
     pub name: String,
     pub value: String,
 }
@@ -82,6 +86,9 @@ pub struct CTFTemplateSpecPod {
     pub allow_internet: bool,
     #[serde(default = "default_val::<1>")]
     pub replicas: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "json_patch_schema")]
+    pub patch: Option<json_patch::Patch>,
     #[schemars(schema_with = "embedded_resource_schema::<PodSpec>")]
     pub spec: PodSpec,
 }

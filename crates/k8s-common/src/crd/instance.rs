@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crd::{
     CTFRouteSpecTLSPatch, EndpointTarget,
-    util::{KubeListKey, Patch, immutable_property_schema, list_schema},
+    util::{KubeListKey, PatchValue, immutable_property_schema, list_schema},
 };
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
@@ -41,9 +41,16 @@ pub struct CTFInstanceStatus {
 #[serde(rename_all = "camelCase")]
 pub struct CTFInstanceSpecParam {
     /// Name of the parameter to set or override.
+    #[schemars(
+        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
+        length(min = 1, max = 24)
+    )]
     pub name: String,
-    /// Parameter value.
-    pub value: String,
+    /// Parameter value override:
+    /// - `PatchValue::Value("val")`: Set parameter value.
+    /// - `PatchValue::Null` (`value: null`): Remove parameter.
+    #[serde(default)]
+    pub value: PatchValue<String>,
 }
 
 impl KubeListKey for CTFInstanceSpecParam {
@@ -71,17 +78,17 @@ pub struct CTFInstanceSpecRouteOverride {
     #[schemars(length(min = 1, max = 20))]
     pub name: String,
     /// Dedicated TCP port override for this route:
-    /// - `Patch::Unset` (omitted): Inherit port from CTFTemplate.
-    /// - `Patch::Null` (`port: null`): Disable TCP.
-    /// - `Patch::Value(port)` (`port: 20001`): Force a specific fixed TCP port.
+    /// - `PatchValue::Unset` (omitted): Inherit port from CTFTemplate.
+    /// - `PatchValue::Null` (`port: null`): Disable TCP.
+    /// - `PatchValue::Value(port)` (`port: 20001`): Force a specific fixed TCP port.
     #[serde(default)]
-    pub port: Patch<u16>,
+    pub port: PatchValue<u16>,
     /// TLS configuration override for this route:
-    /// - `Patch::Unset` (omitted): Inherit TLS configuration from CTFTemplate.
-    /// - `Patch::Null` (`tls: null`): Disable TLS.
-    /// - `Patch::Value(tls)`: Enable TLS.
+    /// - `PatchValue::Unset` (omitted): Inherit TLS configuration from CTFTemplate.
+    /// - `PatchValue::Null` (`tls: null`): Disable TLS.
+    /// - `PatchValue::Value(tls)`: Enable TLS.
     #[serde(default)]
-    pub tls: Patch<CTFRouteSpecTLSPatch>,
+    pub tls: PatchValue<CTFRouteSpecTLSPatch>,
 }
 
 impl KubeListKey for CTFInstanceSpecRouteOverride {
@@ -129,22 +136,22 @@ mod tests {
         let json_unset = r#"{"name": "pwn-tcp"}"#;
         let override_unset: CTFInstanceSpecRouteOverride =
             serde_json::from_str(json_unset).unwrap();
-        assert_eq!(override_unset.port, Patch::Unset);
-        assert_eq!(override_unset.tls, Patch::Unset);
+        assert_eq!(override_unset.port, PatchValue::Unset);
+        assert_eq!(override_unset.tls, PatchValue::Unset);
 
         let json_null = r#"{"name": "pwn-tcp", "port": null, "tls": null}"#;
         let override_null: CTFInstanceSpecRouteOverride = serde_json::from_str(json_null).unwrap();
-        assert_eq!(override_null.port, Patch::Null);
-        assert_eq!(override_null.tls, Patch::Null);
+        assert_eq!(override_null.port, PatchValue::Null);
+        assert_eq!(override_null.tls, PatchValue::Null);
 
         let json_value = r#"{"name": "pwn-tcp", "port": 20001, "tls": {"prefix": null}}"#;
         let override_value: CTFInstanceSpecRouteOverride =
             serde_json::from_str(json_value).unwrap();
-        assert_eq!(override_value.port, Patch::Value(20001));
+        assert_eq!(override_value.port, PatchValue::Value(20001));
         assert_eq!(
             override_value.tls,
-            Patch::Value(CTFRouteSpecTLSPatch {
-                prefix: Patch::Null
+            PatchValue::Value(CTFRouteSpecTLSPatch {
+                prefix: PatchValue::Null
             })
         );
     }

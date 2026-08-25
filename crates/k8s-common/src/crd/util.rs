@@ -60,9 +60,23 @@ pub fn immutable_property_schema(r: &mut SchemaGenerator) -> Schema {
     schema
 }
 
+pub fn json_patch_schema(_r: &mut SchemaGenerator) -> Schema {
+    let mut schema = Schema::default();
+    let obj = schema.ensure_object();
+    obj.insert("type".to_string(), serde_json::json!("array"));
+    obj.insert(
+        "items".to_string(),
+        serde_json::json!({
+            "type": "object",
+            "x-kubernetes-preserve-unknown-fields": true
+        }),
+    );
+    schema
+}
+
 /// 3-state Nullable enum for JSON Merge Patch / override semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum Patch<T> {
+pub enum PatchValue<T> {
     /// Key omitted in JSON (no change / inherit from template).
     #[default]
     Unset,
@@ -72,32 +86,32 @@ pub enum Patch<T> {
     Value(T),
 }
 
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for PatchValue<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         Option::<Option<T>>::deserialize(deserializer).map(|opt| match opt {
-            None | Some(None) => Patch::Null,
-            Some(Some(v)) => Patch::Value(v),
+            None | Some(None) => PatchValue::Null,
+            Some(Some(v)) => PatchValue::Value(v),
         })
     }
 }
 
-impl<T: Serialize> Serialize for Patch<T> {
+impl<T: Serialize> Serialize for PatchValue<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         match self {
-            Patch::Unset => serializer.serialize_none(),
-            Patch::Null => serializer.serialize_none(),
-            Patch::Value(v) => v.serialize(serializer),
+            PatchValue::Unset => serializer.serialize_none(),
+            PatchValue::Null => serializer.serialize_none(),
+            PatchValue::Value(v) => v.serialize(serializer),
         }
     }
 }
 
-impl<T: JsonSchema> JsonSchema for Patch<T> {
+impl<T: JsonSchema> JsonSchema for PatchValue<T> {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         format!("Nullable_{}", T::schema_name()).into()
     }

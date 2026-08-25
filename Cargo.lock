@@ -335,6 +335,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -379,6 +389,12 @@ dependencies = [
 name = "cardinal"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "base32",
+ "chrono",
+ "futures",
+ "globset",
+ "json-patch",
  "k8s-common",
  "k8s-openapi",
  "kube",
@@ -386,6 +402,13 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1075,6 +1098,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "globset"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07c34a9410465b45bd9787443bc7370f37735bad04b0f0cd57ff1a3186c98988"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "gloo-timers"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1484,6 +1520,8 @@ dependencies = [
  "axum",
  "chrono",
  "futures",
+ "globset",
+ "json-patch",
  "k8s-openapi",
  "kube",
  "kube-lease-manager",
@@ -1496,6 +1534,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+ "upon",
 ]
 
 [[package]]
@@ -2718,6 +2757,17 @@ name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
+
+[[package]]
+name = "upon"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9c46fa694fd01d98377a882557a909f14258a0b2d453eb311cb471e32728ba8"
+dependencies = [
+ "serde",
+ "unicode-ident",
+ "unicode-width",
+]
 
 [[package]]
 name = "utf8parse"

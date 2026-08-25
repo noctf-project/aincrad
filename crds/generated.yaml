@@ -69,7 +69,7 @@ spec:
                 type: object
               requestUid:
                 default: false
-                description: When true, appends a unique Crockford Base32 hash ID to derived TLS hostnames.
+                description: Request the team's id in the TCP tunnel.
                 type: boolean
               secret:
                 description: Cryptographic secret used for Proof-of-Work verification and AES flag encryption.
@@ -203,6 +203,9 @@ spec:
                 items:
                   properties:
                     name:
+                      maxLength: 24
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     value:
                       type: string
@@ -227,6 +230,11 @@ spec:
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
+                    patch:
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      type: array
                     replicas:
                       default: 1
                       format: int32
@@ -307,7 +315,7 @@ spec:
                           type: object
                         requestUid:
                           default: false
-                          description: When true, appends a unique Crockford Base32 hash ID to derived TLS hostnames.
+                          description: Request the team's id in the TCP tunnel.
                           type: boolean
                         secret:
                           description: Cryptographic secret used for Proof-of-Work verification and AES flag encryption.
@@ -421,13 +429,19 @@ spec:
                   properties:
                     name:
                       description: Name of the parameter to set or override.
+                      maxLength: 24
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     value:
-                      description: Parameter value.
+                      description: |-
+                        Parameter value override:
+                        - `PatchValue::Value("val")`: Set parameter value.
+                        - `PatchValue::Null` (`value: null`): Remove parameter.
+                      nullable: true
                       type: string
                   required:
                   - name
-                  - value
                   type: object
                 type: array
                 x-kubernetes-list-map-keys:
@@ -468,9 +482,9 @@ spec:
                     port:
                       description: |-
                         Dedicated TCP port override for this route:
-                        - `Patch::Unset` (omitted): Inherit port from CTFTemplate.
-                        - `Patch::Null` (`port: null`): Disable TCP.
-                        - `Patch::Value(port)` (`port: 20001`): Force a specific fixed TCP port.
+                        - `PatchValue::Unset` (omitted): Inherit port from CTFTemplate.
+                        - `PatchValue::Null` (`port: null`): Disable TCP.
+                        - `PatchValue::Value(port)` (`port: 20001`): Force a specific fixed TCP port.
                       format: uint16
                       maximum: 65535.0
                       minimum: 0.0
@@ -479,9 +493,9 @@ spec:
                     tls:
                       description: |-
                         TLS configuration override for this route:
-                        - `Patch::Unset` (omitted): Inherit TLS configuration from CTFTemplate.
-                        - `Patch::Null` (`tls: null`): Disable TLS.
-                        - `Patch::Value(tls)`: Enable TLS.
+                        - `PatchValue::Unset` (omitted): Inherit TLS configuration from CTFTemplate.
+                        - `PatchValue::Null` (`tls: null`): Disable TLS.
+                        - `PatchValue::Value(tls)`: Enable TLS.
                       nullable: true
                       properties:
                         prefix:

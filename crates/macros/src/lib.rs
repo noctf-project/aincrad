@@ -15,7 +15,7 @@ fn unwrap_option_type(ty: &Type) -> &Type {
     ty
 }
 
-#[proc_macro_derive(Patch)]
+#[proc_macro_derive(PatchValue)]
 pub fn derive_patch(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
@@ -27,14 +27,14 @@ pub fn derive_patch(input: TokenStream) -> TokenStream {
             _ => {
                 return syn::Error::new_spanned(
                     name,
-                    "Patch derive only supports structs with named fields",
+                    "PatchValue derive only supports structs with named fields",
                 )
                 .to_compile_error()
                 .into();
             }
         },
         _ => {
-            return syn::Error::new_spanned(name, "Patch derive only supports structs")
+            return syn::Error::new_spanned(name, "PatchValue derive only supports structs")
                 .to_compile_error()
                 .into();
         }
@@ -49,7 +49,7 @@ pub fn derive_patch(input: TokenStream) -> TokenStream {
         quote! {
             #(#attrs)*
             #[serde(default)]
-            #vis #field_name: crate::crd::Patch<#inner_ty>
+            #vis #field_name: crate::crd::PatchValue<#inner_ty>
         }
     });
 

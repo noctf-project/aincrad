@@ -6,13 +6,13 @@ pub mod instance;
 pub mod route;
 pub mod template;
 
-mod util;
+pub mod util;
 
-pub use aincrad_macros::Patch;
+pub use aincrad_macros::PatchValue;
 pub use instance::*;
 pub use route::*;
 pub use template::*;
-pub use util::Patch;
+pub use util::PatchValue;
 
 pub fn generate_crd(format: &str, crd: CustomResourceDefinition) -> Result<String, Error> {
     match format.to_lowercase().as_str() {

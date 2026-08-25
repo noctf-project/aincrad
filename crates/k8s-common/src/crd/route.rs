@@ -82,7 +82,7 @@ pub struct CTFRouteSpec {
     pub available_at: Option<DateTime<Utc>>,
     /// Cryptographic secret used for Proof-of-Work verification and AES flag encryption.
     pub secret: Option<String>,
-    /// When true, appends a unique Crockford Base32 hash ID to derived TLS hostnames.
+    /// Request the team's id in the TCP tunnel.
     #[serde(default)]
     pub request_uid: bool,
     /// Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
@@ -107,9 +107,9 @@ pub struct CTFRouteSpecPOW {
     pub enable_admin_bypass: bool,
 }
 
-use aincrad_macros::Patch;
+use aincrad_macros::PatchValue;
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Patch)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, PatchValue)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteSpecTLS {
     /// Subdomain prefix for the derived TLS hostname (e.g. 'web' in 'web-xxxx.c.noctf.dev'). Defaults to the route metadata name if omitted.
