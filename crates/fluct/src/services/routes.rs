@@ -6,8 +6,10 @@ use crate::{
         ports::{self, PortAllocation, PortsStore},
         routes::{CTFRouteStatusPair, MetadataAndSpec, RoutesStore},
     },
+    util::slice::*,
 };
 use fluct::Error;
+use futures::StreamExt;
 use k8s_common::{
     KubernetesClient,
     crd::{CTFRoute, CTFRouteEndpoints, CTFRouteStatus, EndpointTarget},
@@ -24,6 +26,10 @@ pub struct RoutesService {
     routes: RoutesStore,
     ports: PortsStore,
 }
+
+const ROUTE_BUF_SIZE: usize = 32;
+const STATUS_UPDATE_CONCURRENCY: usize = 8;
+const RESYNC_INTERVAL: Duration = Duration::from_secs(15);
 
 impl RoutesService {
     pub fn new(
@@ -147,6 +153,11 @@ impl RoutesService {
 
     fn handle_route_event(&self, event: Event<CTFRoute>) -> Option<Arc<MetadataAndSpec>> {
         match event {
+            Event::Init => {
+                self.routes.clear();
+                self.ports.clear();
+                None
+            }
             Event::Apply(data) | Event::InitApply(data) => {
                 let name = data.metadata.name?;
                 let uid = match data.metadata.uid {
@@ -212,13 +223,16 @@ impl RoutesService {
         mut receiver: mpsc::Receiver<Event<CTFRoute>>,
         updater: Option<mpsc::Sender<Arc<MetadataAndSpec>>>,
     ) {
+        let mut buffer = Vec::with_capacity(ROUTE_BUF_SIZE);
         loop {
             select! {
-              Some(event) = receiver.recv() => {
-                if let Some(status) = self.handle_route_event(event)
-                    && let Some(ref updater) = updater {
-                    let _ = updater.send(status).await
-                        .map_err(|err| warn!("error queueing status {:?}", err));
+              _ = receiver.recv_many(&mut buffer, ROUTE_BUF_SIZE) => {
+                for event in buffer.drain(..).dedup_last() {
+                    if let Some(status) = self.handle_route_event(event)
+                        && let Some(ref updater) = updater {
+                        let _ = updater.send(status).await
+                            .map_err(|err| warn!("error queueing status {:?}", err));
+                    }
                 }
               },
               _ = cancel.cancelled() => {
@@ -238,6 +252,27 @@ impl RoutesService {
         Ok(())
     }
 
+    async fn ship_unsynced(&self) {
+        let unsynced = self.routes.unsynced_routes();
+        if unsynced.is_empty() {
+            return;
+        }
+        info!("Shipping {} unsynced route status updates", unsynced.len());
+        let resync_updates = unsynced.into_iter().map(|route| {
+            let (full, status) = self.desired_status(route.generation, &route);
+            async move {
+                self.update_status(&full, status)
+                    .await
+                    .inspect(|_| info!("successfully updated status for {}", full))
+                    .unwrap_or_else(|e| error!("failed to update status: {}", e));
+            }
+        });
+        futures::stream::iter(resync_updates)
+            .buffer_unordered(STATUS_UPDATE_CONCURRENCY)
+            .count()
+            .await;
+    }
+
     async fn run_updates(
         &self,
         cancel: CancellationToken,
@@ -252,6 +287,10 @@ impl RoutesService {
 
         let (mut channel, task) = manager.watch().await;
         let mut locked = false;
+        let mut buffer = Vec::with_capacity(ROUTE_BUF_SIZE);
+        let mut resync_interval = tokio::time::interval(RESYNC_INTERVAL);
+        resync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             select! {
                 _ = channel.changed() => {
@@ -264,28 +303,37 @@ impl RoutesService {
                         locked = true;
                         info!("Gained route status leader");
                         self.ports.clear_pending();
-                        for route in self.routes.unsynced_routes() {
-                            let (full, status) = self.desired_status(route.generation, &route);
-                            self.update_status(&full, status).await
-                                .inspect(|_| info!("successfully updated status for {}", full))
-                                .unwrap_or_else(|e| error!("failed to update status: {}", e));
-                        }
+                        self.ship_unsynced().await;
                     } else {
                         info!("Lost route status leader");
                         locked = false;
                     }
                 }
-                Some(arc) = rx.recv() => {
+                _ = resync_interval.tick() => {
+                    if locked {
+                        self.ship_unsynced().await;
+                    }
+                }
+                _ = rx.recv_many(&mut buffer, ROUTE_BUF_SIZE) => {
                     // discard if not locked
                     if !locked {
+                        buffer.clear();
                         continue;
                     }
-                    if let Some(metadata) = self.routes.get_route(&arc.namespaced_name()) {
+                    let status_updates = buffer.drain(..).dedup_last().filter_map(|arc| {
+                        let metadata = self.routes.get_route(&arc.namespaced_name())?;
                         let (full, status) = self.desired_status(metadata.generation, &metadata);
-                        self.update_status(&full, status).await
-                            .inspect(|_| info!("successfully updated status for {}", full))
-                            .unwrap_or_else(|e| error!("failed to update status: {}", e));
-                    }
+                        Some(async move {
+                            self.update_status(&full, status)
+                                .await
+                                .inspect(|_| info!("successfully updated status for {}", full))
+                                .unwrap_or_else(|e| error!("failed to update status: {}", e));
+                        })
+                    });
+                    futures::stream::iter(status_updates)
+                        .buffer_unordered(STATUS_UPDATE_CONCURRENCY)
+                        .count()
+                        .await;
                 },
                 _ = cancel.cancelled() => {
                     break;

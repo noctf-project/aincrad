@@ -133,12 +133,17 @@ impl StoreInner {
         self.routes.get(key).cloned()
     }
 
-    pub fn unsynced_routes(&self) -> Vec<Arc<MetadataAndSpec>> {
+    fn unsynced_routes(&self) -> Vec<Arc<MetadataAndSpec>> {
         self.routes
             .values()
             .filter(|v| v.observed_generation.is_none_or(|obs| v.generation > obs))
             .cloned()
             .collect()
+    }
+
+    fn clear(&mut self) {
+        self.routes.clear();
+        self.tls.clear();
     }
 }
 
@@ -190,6 +195,11 @@ impl RoutesStore {
             .filter(|s| !s.is_empty())
             .unwrap_or(&route.name);
         Some(derive_hostname(prefix, &route.namespaced_name()))
+    }
+
+    pub fn clear(&self) {
+        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        inner.clear();
     }
 }
 

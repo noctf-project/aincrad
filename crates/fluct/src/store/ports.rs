@@ -31,14 +31,14 @@ pub enum PortSyncResult {
     Removed(u16),
 }
 
-struct Table {
+struct Inner {
     bindings: Vec<Option<PortAllocation<String>>>,
     mappings: HashMap<String, PortAllocation<u16>>,
     range_auto: PortRange,
     finder: PortFinderFactory,
 }
 
-impl Table {
+impl Inner {
     fn reserve(&mut self, spec: &str, port: u16) -> Result<Option<PortAllocation<u16>>, PortError> {
         // Allocate fixed
         if port != 0 {
@@ -234,7 +234,7 @@ impl Table {
     }
 
     fn clear_pending(&mut self) {
-        let Table {
+        let Inner {
             bindings, mappings, ..
         } = self;
         mappings.retain(|spec, allocation| match allocation {
@@ -251,6 +251,11 @@ impl Table {
                 }
             }
         });
+    }
+
+    pub fn clear(&mut self) {
+        self.bindings.fill(None);
+        self.mappings.clear();
     }
 
     fn get(&self, port: u16) -> Option<PortAllocation<String>> {
@@ -286,7 +291,7 @@ impl Table {
 pub struct PortsStore {
     range_reserved: PortRange,
     range_auto: PortRange,
-    table: RwLock<Table>,
+    inner: RwLock<Inner>,
 }
 
 impl PortsStore {
@@ -294,7 +299,7 @@ impl PortsStore {
         Self {
             range_reserved,
             range_auto: range_auto.clone(),
-            table: RwLock::new(Table {
+            inner: RwLock::new(Inner {
                 bindings: vec![None; PORTS],
                 mappings: HashMap::new(),
                 range_auto: range_auto.clone(),
@@ -312,7 +317,7 @@ impl PortsStore {
         let port = match port {
             Some(p) => p,
             None => {
-                let mut table = self.table.write().expect(LOCK_POISONED_ERROR);
+                let mut table = self.inner.write().expect(LOCK_POISONED_ERROR);
                 table.remove_pending(spec);
                 return Ok(None);
             }
@@ -323,14 +328,14 @@ impl PortsStore {
             return Err(PortError::OutOfRange(port));
         }
 
-        let mut table = self.table.write().expect(LOCK_POISONED_ERROR);
+        let mut table = self.inner.write().expect(LOCK_POISONED_ERROR);
         table.reserve(spec, port)
     }
 
     /// Commits a port from an authoritative source into the tracking array.
     /// This will overwrite the existing allocation and should be called authoritatively.
     pub fn insert(&self, spec: &str, port: Option<u16>) -> PortSyncResult {
-        let mut table = self.table.write().expect(LOCK_POISONED_ERROR);
+        let mut table = self.inner.write().expect(LOCK_POISONED_ERROR);
         let result = table.insert(spec, port);
         match &result {
             PortSyncResult::Added(p) => {
@@ -350,14 +355,20 @@ impl PortsStore {
     /// Removes a pending port from the table and return it.
     #[cfg(test)]
     fn remove_pending(&self, spec: &str) -> bool {
-        let mut table = self.table.write().expect(LOCK_POISONED_ERROR);
+        let mut table = self.inner.write().expect(LOCK_POISONED_ERROR);
         table.remove_pending(spec)
     }
 
     /// Clears pending ports
     pub fn clear_pending(&self) {
-        let mut table = self.table.write().expect(LOCK_POISONED_ERROR);
+        let mut table = self.inner.write().expect(LOCK_POISONED_ERROR);
         table.clear_pending();
+    }
+
+    /// Clear all ports
+    pub fn clear(&self) {
+        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        inner.clear();
     }
 
     /// Gets the allocation (Active or Pending) if it exists.
@@ -366,12 +377,12 @@ impl PortsStore {
         if !self.range_reserved.contains(port) && !self.range_auto.contains(port) {
             return None;
         }
-        self.table.read().expect(LOCK_POISONED_ERROR).get(port)
+        self.inner.read().expect(LOCK_POISONED_ERROR).get(port)
     }
 
     #[allow(dead_code)]
     pub fn get_route(&self, spec: &str) -> Option<PortAllocation<u16>> {
-        self.table
+        self.inner
             .read()
             .expect(LOCK_POISONED_ERROR)
             .get_route(spec)
@@ -382,7 +393,7 @@ impl PortsStore {
         if !self.range_reserved.contains(port) && !self.range_auto.contains(port) {
             return None;
         }
-        self.table
+        self.inner
             .read()
             .expect(LOCK_POISONED_ERROR)
             .active_route(port)
@@ -390,7 +401,7 @@ impl PortsStore {
 
     /// Get active ports to listen on
     pub fn active_ports(&self) -> Vec<u16> {
-        self.table.read().expect(LOCK_POISONED_ERROR).active_ports()
+        self.inner.read().expect(LOCK_POISONED_ERROR).active_ports()
     }
 }
 
