@@ -52,6 +52,19 @@ impl KubeListKey for CTFInstanceSpecParam {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct CTFInstanceSpecPodOverride {
+    /// Name of the template pod specification to override replicas for.
+    pub name: String,
+    /// Replica count override for this pod.
+    pub replicas: i32,
+}
+
+impl KubeListKey for CTFInstanceSpecPodOverride {
+    const KEYS: &'static [&'static str] = &["name"];
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CTFInstanceSpecRouteOverride {
     /// Name of the template route to override.
     pub name: String,
@@ -94,6 +107,10 @@ pub struct CTFInstanceSpec {
     #[serde(default)]
     #[schemars(schema_with = "list_schema::<CTFInstanceSpecParam>")]
     pub params: Vec<CTFInstanceSpecParam>,
+    /// Pod replica count overrides for this specific challenge instance.
+    #[serde(default)]
+    #[schemars(schema_with = "list_schema::<CTFInstanceSpecPodOverride>")]
+    pub pods: Vec<CTFInstanceSpecPodOverride>,
     /// Route port and TLS overrides for this specific challenge instance.
     #[serde(default)]
     #[schemars(schema_with = "list_schema::<CTFInstanceSpecRouteOverride>")]

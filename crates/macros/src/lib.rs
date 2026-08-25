@@ -43,7 +43,7 @@ pub fn derive_patch(input: TokenStream) -> TokenStream {
     let patch_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
         let vis = &f.vis;
-        let attrs = &f.attrs;
+        let attrs = f.attrs.iter().filter(|attr| !attr.path().is_ident("serde"));
         let inner_ty = unwrap_option_type(&f.ty);
 
         quote! {
