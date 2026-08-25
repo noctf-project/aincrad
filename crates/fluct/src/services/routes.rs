@@ -281,7 +281,7 @@ impl RoutesService {
         info!("started route status updater");
         let manager = self
             .client
-            .get_lease_manager("fluct-routes", Duration::from_secs(15))
+            .get_lease_manager("fluct-leader", Duration::from_secs(15))
             .await
             .inspect_err(|e| error!("error setting lease manager: {:?}", e))?;
 

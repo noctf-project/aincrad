@@ -78,6 +78,8 @@ pub struct CTFTemplateSpecPod {
         length(min = 1, max = 63)
     )]
     pub name: String,
+    #[serde(default)]
+    pub allow_internet: bool,
     #[serde(default = "default_val::<1>")]
     pub replicas: i32,
     #[schemars(schema_with = "embedded_resource_schema::<PodSpec>")]

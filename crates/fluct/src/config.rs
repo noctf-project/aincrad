@@ -56,7 +56,6 @@ fn parse_port_range(s: &str) -> Result<PortRange, String> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceConfig {
     pub host: String,
-    pub http_port: u16,
     pub tls_port: u16,
     pub reserved_ports: PortRange,
     pub auto_ports: PortRange,
@@ -76,10 +75,6 @@ pub struct RawServiceConfig {
     /// Host to listen on
     #[clap(long, default_value = "[::]")]
     pub host: String,
-
-    /// HTTP listening port for Kubernetes webhooks and stats
-    #[clap(long, default_value = "32600")]
-    pub http_port: u16,
 
     /// Listening port for TLS challenges
     #[clap(long, default_value = "4433")]
@@ -129,7 +124,6 @@ impl TryFrom<RawServiceConfig> for ServiceConfig {
     fn try_from(raw: RawServiceConfig) -> Result<Self, Self::Error> {
         let config = ServiceConfig {
             host: raw.host,
-            http_port: raw.http_port,
             tls_port: raw.tls_port,
             reserved_ports: raw.reserved_ports,
             auto_ports: raw.auto_ports,
@@ -171,7 +165,7 @@ fn parse_hostname_suffix(s: &str) -> Result<String, String> {
 
 impl ServiceConfig {
     fn validate(&self) -> Result<(), String> {
-        let mut single_ports = vec![("http-port", self.http_port), ("tls-port", self.tls_port)];
+        let mut single_ports = vec![("tls-port", self.tls_port)];
         if let Some(port) = self.tproxy_port {
             single_ports.push(("dnat-port", port));
         }
@@ -230,8 +224,6 @@ mod tests {
             "key.pem",
             "--hostname-suffix",
             "example.com",
-            "--http-port",
-            "9000",
             "--reserved-ports",
             "10000-19999",
             "--auto-ports",
@@ -242,7 +234,6 @@ mod tests {
         assert_eq!(cfg.tls_key, PathBuf::from("key.pem"));
         assert_eq!(cfg.challenge_domain, "example.com".to_string());
         assert_eq!(cfg.cluster_domain, "cluster.local".to_string());
-        assert_eq!(cfg.http_port, 9000);
         assert_eq!(cfg.flag_prefix, "CTF");
         assert_eq!(cfg.reserved_ports, PortRange(10000..=19999));
         assert_eq!(cfg.auto_ports, PortRange(20000..=29999));

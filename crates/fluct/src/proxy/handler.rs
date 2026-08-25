@@ -256,7 +256,6 @@ mod tests {
         Arc::new(ServiceContext {
             config: ServiceConfig {
                 host: "[::]".into(),
-                http_port: 8000,
                 tls_port: 4433,
                 tls_cert: "cert.pem".into(),
                 tls_key: "key.pem".into(),

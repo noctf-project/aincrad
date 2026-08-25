@@ -76,10 +76,6 @@ pub async fn run(config: ServiceConfig) -> Result<(), Error> {
             services::proxy::run(service_context.clone(), tls_tx)
         ),
         wrap_err(
-            "services::api::run",
-            services::api::run(service_context.clone())
-        ),
-        wrap_err(
             "services::tlsproxy::run",
             services::tlsproxy::run(service_context.clone(), tls_rx)
         ),

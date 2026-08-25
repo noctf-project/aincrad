@@ -380,6 +380,7 @@ name = "cardinal"
 version = "0.1.0"
 dependencies = [
  "k8s-common",
+ "k8s-openapi",
  "kube",
  "schemars",
  "serde",
