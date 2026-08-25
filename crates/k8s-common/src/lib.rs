@@ -5,4 +5,4 @@ pub mod patcher;
 
 pub use client::KubernetesClient;
 pub use error::Error;
-pub use patcher::SpecPatcher;
+pub use patcher::{SpecPatcher, params_to_map};

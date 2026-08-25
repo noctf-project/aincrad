@@ -35,6 +35,14 @@ impl std::fmt::Debug for SpecPatcher {
     }
 }
 
+/// Standalone helper function converting a slice of `CTFTemplateSpecParam` into a `BTreeMap<String, String>`.
+pub fn params_to_map(params: &[CTFTemplateSpecParam]) -> BTreeMap<String, String> {
+    params
+        .iter()
+        .map(|p| (p.name.clone(), p.value.clone()))
+        .collect()
+}
+
 impl SpecPatcher {
     /// Creates a new `SpecPatcher`:
     /// - Checks all patch operations (paths and source paths) against `blacklist`.
@@ -98,16 +106,12 @@ impl SpecPatcher {
         })
     }
 
-    /// Evaluates compiled string templates with `params` and applies the patch to `spec`.
-    pub fn apply<T>(&self, spec: &T, params: &[CTFTemplateSpecParam]) -> Result<T, String>
+    /// Evaluates compiled string templates with `params` map and applies the patch to `spec`.
+    pub fn apply<T, V>(&self, spec: &T, params: &BTreeMap<String, V>) -> Result<T, String>
     where
         T: Serialize + DeserializeOwned,
+        V: Serialize,
     {
-        let param_map: BTreeMap<&str, &str> = params
-            .iter()
-            .map(|p| (p.name.as_str(), p.value.as_str()))
-            .collect();
-
         let mut evaluated_patch = self.patch.clone();
 
         // Render each compiled template and substitute back into the patch operation value
@@ -115,7 +119,7 @@ impl SpecPatcher {
             let rendered_str = self
                 .engine
                 .template(&binding.template_id)
-                .render(&param_map)
+                .render(params)
                 .to_string()
                 .map_err(|e| format!("failed to render template: {e}"))?;
 
@@ -252,7 +256,7 @@ mod tests {
                 "op": "add",
                 "path": "/containers/0/env",
                 "value": [
-                    { "name": "SERVICE_URL", "value": "http://{{ instance }}-c-web:8080" }
+                    { "name": "SERVICE_URL", "value": "http://{{ params.instance }}-c-web:8080" }
                 ]
             }
         ]);
@@ -272,8 +276,10 @@ mod tests {
             name: "instance".into(),
             value: "team-alpha".into(),
         }];
+        let mut context_map = BTreeMap::new();
+        context_map.insert("params".to_string(), params_to_map(&params));
 
-        let patched: PodSpec = patcher.apply(&base_spec, &params).unwrap();
+        let patched: PodSpec = patcher.apply(&base_spec, &context_map).unwrap();
         let envs = patched.containers[0].env.as_ref().unwrap();
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].name, "SERVICE_URL");
@@ -305,7 +311,7 @@ mod tests {
             {
                 "op": "add",
                 "path": "/activeDeadlineSeconds",
-                "value": "{{ ttl }}"
+                "value": "{{ params.ttl }}"
             }
         ]);
         let patch: Patch = serde_json::from_value(patch_json).unwrap();
@@ -316,8 +322,10 @@ mod tests {
             name: "ttl".into(),
             value: "3600".into(),
         }];
+        let mut context_map = BTreeMap::new();
+        context_map.insert("params".to_string(), params_to_map(&params));
 
-        let patched: PodSpec = patcher.apply(&base_spec, &params).unwrap();
+        let patched: PodSpec = patcher.apply(&base_spec, &context_map).unwrap();
         assert_eq!(patched.active_deadline_seconds, Some(3600));
     }
 }

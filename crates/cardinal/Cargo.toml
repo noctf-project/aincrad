@@ -5,9 +5,24 @@ edition = "2024"
 
 [dependencies]
 k8s-common = { path = "../k8s-common" }
+globset = { workspace = true }
+json-patch = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+thiserror = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+base32 = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tower = { workspace = true }

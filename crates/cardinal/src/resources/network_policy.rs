@@ -1,11 +1,13 @@
-use std::collections::BTreeMap;
-
-use cardinal::btreemap;
+use crate::btreemap;
+use crate::utils::labels::{INSTANCE_LABEL, POD_LABEL};
 use k8s_openapi::{
     api::networking::v1::{
         IPBlock, NetworkPolicyEgressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec,
     },
-    apimachinery::pkg::{apis::meta::v1::LabelSelector, util::intstr::IntOrString},
+    apimachinery::pkg::{
+        apis::meta::v1::{LabelSelector, LabelSelectorRequirement},
+        util::intstr::IntOrString,
+    },
 };
 
 const BLOCKED_IPS: &[&str] = &[
@@ -26,7 +28,10 @@ const BLOCKED_IPS: &[&str] = &[
     "240.0.0.0/4",
 ];
 
-pub fn get_networkpolicy_spec(instance: &str, allow_internet: bool) -> NetworkPolicySpec {
+pub fn get_networkpolicy_spec(
+    instance: &str,
+    allowed_internet_pods: &[String],
+) -> NetworkPolicySpec {
     let mut egress_rules = vec![
         NetworkPolicyEgressRule {
             to: Some(vec![
@@ -64,7 +69,7 @@ pub fn get_networkpolicy_spec(instance: &str, allow_internet: bool) -> NetworkPo
             to: Some(vec![NetworkPolicyPeer {
                 pod_selector: Some(LabelSelector {
                     match_labels: Some(btreemap! {
-                        "aincrad.noctf.dev/instance" => instance,
+                        INSTANCE_LABEL => instance,
                     }),
                     ..Default::default()
                 }),
@@ -74,13 +79,23 @@ pub fn get_networkpolicy_spec(instance: &str, allow_internet: bool) -> NetworkPo
         },
     ];
 
-    if allow_internet {
+    if !allowed_internet_pods.is_empty() {
         egress_rules.push(NetworkPolicyEgressRule {
             to: Some(vec![
                 NetworkPolicyPeer {
                     ip_block: Some(IPBlock {
                         cidr: "0.0.0.0/0".into(),
                         except: Some(BLOCKED_IPS.iter().map(|&s| s.into()).collect()),
+                    }),
+                    pod_selector: Some(LabelSelector {
+                        match_labels: Some(btreemap! {
+                            INSTANCE_LABEL => instance,
+                        }),
+                        match_expressions: Some(vec![LabelSelectorRequirement {
+                            key: POD_LABEL.into(),
+                            operator: "In".into(),
+                            values: Some(allowed_internet_pods.to_vec()),
+                        }]),
                     }),
                     ..Default::default()
                 },
@@ -150,5 +165,64 @@ pub fn get_networkpolicy_spec(instance: &str, allow_internet: bool) -> NetworkPo
         ingress: None,
         pod_selector: Some(LabelSelector::default()),
         policy_types: Some(vec!["Egress".into()]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_networkpolicy_spec_no_internet_egress() {
+        let spec = get_networkpolicy_spec("team-alpha", &[]);
+        let egress = spec.egress.expect("Egress rules must be present");
+
+        // DNS rule and inter-pod rule
+        assert_eq!(egress.len(), 2);
+
+        // Inter-pod rule check
+        let inter_pod_peer = &egress[1].to.as_ref().unwrap()[0];
+        let pod_selector = inter_pod_peer.pod_selector.as_ref().unwrap();
+        assert_eq!(
+            pod_selector
+                .match_labels
+                .as_ref()
+                .unwrap()
+                .get(INSTANCE_LABEL),
+            Some(&"team-alpha".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_networkpolicy_spec_allowed_internet_pods_match_expressions() {
+        let spec = get_networkpolicy_spec("team-alpha", &["web".to_string(), "api".to_string()]);
+        let egress = spec.egress.expect("Egress rules must be present");
+
+        // DNS + Inter-pod + Internet 0.0.0.0/0 + Traefik loopback
+        assert_eq!(egress.len(), 4);
+
+        // Internet egress rule check
+        let internet_rule = &egress[2];
+        let peers = internet_rule.to.as_ref().unwrap();
+        let internet_peer = &peers[0];
+
+        let pod_selector = internet_peer.pod_selector.as_ref().unwrap();
+        assert_eq!(
+            pod_selector
+                .match_labels
+                .as_ref()
+                .unwrap()
+                .get(INSTANCE_LABEL),
+            Some(&"team-alpha".to_string())
+        );
+
+        let match_exprs = pod_selector.match_expressions.as_ref().unwrap();
+        assert_eq!(match_exprs.len(), 1);
+        assert_eq!(match_exprs[0].key, POD_LABEL);
+        assert_eq!(match_exprs[0].operator, "In");
+        assert_eq!(
+            match_exprs[0].values,
+            Some(vec!["web".into(), "api".into()])
+        );
     }
 }
