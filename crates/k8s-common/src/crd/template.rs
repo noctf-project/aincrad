@@ -75,7 +75,7 @@ pub struct CTFTemplateSpec {
 pub struct CTFTemplateSpecPod {
     #[schemars(
         regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
-        length(min = 1, max = 63)
+        length(min = 1, max = 20)
     )]
     pub name: String,
     #[serde(default)]
@@ -99,7 +99,7 @@ pub struct CTFTemplateSpecPod {
 pub struct CTFTemplateSpecRoute {
     #[schemars(
         regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
-        length(min = 1, max = 63)
+        length(min = 1, max = 20)
     )]
     pub name: String,
     pub spec: CTFRouteSpec,

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crd::{
     CTFRouteSpecTLSPatch, EndpointTarget,
-    util::{KubeListKey, Patch, list_schema},
+    util::{KubeListKey, Patch, immutable_property_schema, list_schema},
 };
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
@@ -54,6 +54,7 @@ impl KubeListKey for CTFInstanceSpecParam {
 #[serde(rename_all = "camelCase")]
 pub struct CTFInstanceSpecPodOverride {
     /// Name of the template pod specification to override replicas for.
+    #[schemars(length(min = 1, max = 20))]
     pub name: String,
     /// Replica count override for this pod.
     pub replicas: i32,
@@ -67,6 +68,7 @@ impl KubeListKey for CTFInstanceSpecPodOverride {
 #[serde(rename_all = "camelCase")]
 pub struct CTFInstanceSpecRouteOverride {
     /// Name of the template route to override.
+    #[schemars(length(min = 1, max = 20))]
     pub name: String,
     /// Dedicated TCP port override for this route:
     /// - `Patch::Unset` (omitted): Inherit port from CTFTemplate.
@@ -97,6 +99,7 @@ impl KubeListKey for CTFInstanceSpecRouteOverride {
 #[serde(rename_all = "camelCase")]
 pub struct CTFInstanceSpec {
     /// Name of the CTFTemplate resource to instantiate.
+    #[schemars(schema_with = "immutable_property_schema")]
     pub template: String,
     /// Optional UTC timestamp when this ephemeral player sandbox expires.
     pub expires_at: Option<DateTime<Utc>>,

@@ -45,6 +45,21 @@ pub fn embedded_resource_schema<T>(_r: &mut SchemaGenerator) -> Schema {
     schema
 }
 
+pub fn immutable_property_schema(r: &mut SchemaGenerator) -> Schema {
+    let mut schema = String::json_schema(r);
+    let obj = schema.ensure_object();
+    obj.insert(
+        "x-kubernetes-validations".to_string(),
+        serde_json::json!([
+            {
+                "rule": "self == oldSelf",
+                "message": "property is immutable and cannot be changed after creation"
+            }
+        ]),
+    );
+    schema
+}
+
 /// 3-state Nullable enum for JSON Merge Patch / override semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Patch<T> {

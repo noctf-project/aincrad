@@ -31,6 +31,8 @@ spec:
                     minimum: 0.0
                     type: integer
                   service:
+                    maxLength: 20
+                    minLength: 1
                     type: string
                 required:
                 - port
@@ -217,8 +219,11 @@ spec:
                 description: List of pod specifications that make up a challenge instance.
                 items:
                   properties:
+                    allowInternet:
+                      default: false
+                      type: boolean
                     name:
-                      maxLength: 63
+                      maxLength: 20
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
@@ -244,7 +249,7 @@ spec:
                 items:
                   properties:
                     name:
-                      maxLength: 63
+                      maxLength: 20
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
@@ -264,6 +269,8 @@ spec:
                               minimum: 0.0
                               type: integer
                             service:
+                              maxLength: 20
+                              minLength: 1
                               type: string
                           required:
                           - port
@@ -426,6 +433,28 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              pods:
+                default: []
+                description: Pod replica count overrides for this specific challenge instance.
+                items:
+                  properties:
+                    name:
+                      description: Name of the template pod specification to override replicas for.
+                      maxLength: 20
+                      minLength: 1
+                      type: string
+                    replicas:
+                      description: Replica count override for this pod.
+                      format: int32
+                      type: integer
+                  required:
+                  - name
+                  - replicas
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               routes:
                 default: []
                 description: Route port and TLS overrides for this specific challenge instance.
@@ -433,6 +462,8 @@ spec:
                   properties:
                     name:
                       description: Name of the template route to override.
+                      maxLength: 20
+                      minLength: 1
                       type: string
                     port:
                       description: |-
@@ -474,6 +505,9 @@ spec:
               template:
                 description: Name of the CTFTemplate resource to instantiate.
                 type: string
+                x-kubernetes-validations:
+                - message: property is immutable and cannot be changed after creation
+                  rule: self == oldSelf
             required:
             - template
             type: object
