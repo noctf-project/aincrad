@@ -14,9 +14,7 @@ use kube::{
 };
 use tracing::{error, info, instrument};
 
-use crate::{
-    Context, Error, reconcilers, utils::ttl::calculate_remaining_ttl,
-};
+use crate::{Context, Error, reconcilers, utils::ttl::calculate_remaining_ttl};
 
 /// Reconciles a single `CTFInstance` resource state.
 #[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
@@ -153,11 +151,19 @@ pub fn handle_template_watcher_event(
 ) {
     match event {
         Ok(Event::Apply(t)) | Ok(Event::Delete(t)) | Ok(Event::InitApply(t)) => {
-            let name = t.metadata.name.as_deref().unwrap_or_default();
-            let ns = t.metadata.namespace.as_deref().unwrap_or("default");
-            let cache_key = format!("{ns}/{name}");
+            let name = t.metadata.name.as_deref().unwrap_or_default().to_string();
+            let ns = t
+                .metadata
+                .namespace
+                .as_deref()
+                .unwrap_or("default")
+                .to_string();
+            let cache_key = crate::cache::TemplateKey {
+                namespace: ns,
+                name,
+            };
             cache.remove(&cache_key);
-            info!(cache_key = %cache_key, "Evicted updated/deleted CTFTemplate from patcher cache");
+            info!("Evicted updated/deleted CTFTemplate from patcher cache");
         }
         Ok(Event::Init) => {
             cache.clear();
@@ -281,6 +287,7 @@ pub async fn run(client: Client) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::InstanceCache;
     use crate::test_utils::tests::dummy_kube_client;
     use crate::utils::labels::TEMPLATE_GEN_ANNOTATION;
     use chrono::{Duration as ChronoDuration, Utc};
@@ -554,18 +561,19 @@ mod tests {
             k8s_common::crd::CTFTemplateSpec::default(),
         );
 
+        let key = crate::cache::TemplateKey {
+            namespace: "default".into(),
+            name: "whoami-template".into(),
+        };
+
         // Populate cache
-        cache
-            .get_or_compile("default/whoami-template", 1, &[])
-            .unwrap();
+        cache.get_or_compile(&key, 1, &[]).unwrap();
 
         // Test Apply event evicts entry
         handle_template_watcher_event(Ok(Event::Apply(tmpl.clone())), &cache);
 
         // Test Init event clears cache
-        cache
-            .get_or_compile("default/whoami-template", 1, &[])
-            .unwrap();
+        cache.get_or_compile(&key, 1, &[]).unwrap();
         handle_template_watcher_event(Ok(Event::Init), &cache);
     }
 }

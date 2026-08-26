@@ -4,12 +4,17 @@ use std::sync::{Arc, Mutex};
 use k8s_common::crd::{CTFInstance, CTFTemplate};
 use kube::runtime::reflector::{ObjectRef, Store};
 
-/// Encapsulates `Store<CTFInstance>` alongside an in-memory `BTreeMap` index
-/// mapping key `"{namespace}:{template_name}:{instance_name}"` to `ObjectRef<CTFInstance>`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InstanceKey {
+    pub namespace: String,
+    pub template: String,
+    pub instance: String,
+}
+
 #[derive(Clone)]
 pub struct InstanceCache {
     store: Store<CTFInstance>,
-    index: Arc<Mutex<BTreeMap<String, ObjectRef<CTFInstance>>>>,
+    index: Arc<Mutex<BTreeMap<InstanceKey, ObjectRef<CTFInstance>>>>,
 }
 
 impl InstanceCache {
@@ -24,19 +29,14 @@ impl InstanceCache {
         &self.store
     }
 
-    pub fn make_key(namespace: &str, template: &str, instance: &str) -> String {
-        format!("{namespace}:{template}:{instance}")
-    }
-
-    pub fn make_prefix(namespace: &str, template: &str) -> String {
-        format!("{namespace}:{template}:")
-    }
-
-    /// Updates the instance index for a CTFInstance applied/created event.
     pub fn update(&self, instance: &CTFInstance) {
         let name = instance.metadata.name.as_deref().unwrap_or_default();
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
-        let key = Self::make_key(ns, &instance.spec.template, name);
+        let key = InstanceKey {
+            namespace: ns.to_string(),
+            template: instance.spec.template.clone(),
+            instance: name.to_string(),
+        };
 
         let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
         if instance.spec.sync && instance.metadata.deletion_timestamp.is_none() {
@@ -46,32 +46,36 @@ impl InstanceCache {
         }
     }
 
-    /// Removes an instance from the index on deletion event.
     pub fn remove(&self, instance: &CTFInstance) {
         let name = instance.metadata.name.as_deref().unwrap_or_default();
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
-        let key = Self::make_key(ns, &instance.spec.template, name);
+        let key = InstanceKey {
+            namespace: ns.to_string(),
+            template: instance.spec.template.clone(),
+            instance: name.to_string(),
+        };
 
         let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
         lock.remove(&key);
     }
 
-    /// Clears all entries from the index (e.g. on watcher Init event).
     pub fn clear(&self) {
         let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
         lock.clear();
     }
 
-    /// Maps a `CTFTemplate` update event to a vector of `ObjectRef<CTFInstance>` for all instances
-    /// in the same namespace referencing the template that have `spec.sync == true` using prefix lookup.
     pub fn find_synced_instances(&self, template: &CTFTemplate) -> Vec<ObjectRef<CTFInstance>> {
         let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
         let tmpl_ns = template.metadata.namespace.as_deref().unwrap_or("default");
-        let prefix = Self::make_prefix(tmpl_ns, tmpl_name);
+        let start_key = InstanceKey {
+            namespace: tmpl_ns.to_string(),
+            template: tmpl_name.to_string(),
+            instance: String::new(),
+        };
 
         let lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
-        lock.range(prefix.clone()..)
-            .take_while(|(k, _)| k.starts_with(&prefix))
+        lock.range(start_key..)
+            .take_while(|(k, _)| k.namespace == tmpl_ns && k.template == tmpl_name)
             .map(|(_, val)| val.clone())
             .collect()
     }

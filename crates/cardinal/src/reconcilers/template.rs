@@ -66,7 +66,10 @@ pub async fn reconcile(instance: &CTFInstance, ctx: &Context) -> Result<Resolved
     };
 
     let generation = template.metadata.generation.unwrap_or(1);
-    let cache_key = format!("{ns}/{template_name}");
+    let cache_key = crate::cache::TemplateKey {
+        namespace: ns.to_string(),
+        name: template_name.clone(),
+    };
 
     let pod_patchers = ctx
         .template_cache
@@ -237,29 +240,35 @@ mod tests {
     #[test]
     fn test_template_cache_eviction() {
         let cache = TemplateCache::new();
-        let key = "default/web-template";
+        let key = crate::cache::TemplateKey {
+            namespace: "default".into(),
+            name: "web-template".into(),
+        };
         let pod_tmpl = CTFTemplateSpecPod {
             name: "web".into(),
             ..Default::default()
         };
 
-        let patchers1 = cache.get_or_compile(key, 1, &[pod_tmpl.clone()]).unwrap();
-        let patchers2 = cache.get_or_compile(key, 1, &[pod_tmpl.clone()]).unwrap();
+        let patchers1 = cache.get_or_compile(&key, 1, &[pod_tmpl.clone()]).unwrap();
+        let patchers2 = cache.get_or_compile(&key, 1, &[pod_tmpl.clone()]).unwrap();
 
         // Must reuse cached Arc
         assert!(Arc::ptr_eq(&patchers1, &patchers2));
 
         // Evict key from cache
-        cache.remove(key);
+        cache.remove(&key);
 
-        let patchers3 = cache.get_or_compile(key, 1, &[pod_tmpl]).unwrap();
+        let patchers3 = cache.get_or_compile(&key, 1, &[pod_tmpl]).unwrap();
         assert!(!Arc::ptr_eq(&patchers1, &patchers3));
     }
 
     #[test]
     fn test_template_cache_failed_compile_caching() {
         let cache = TemplateCache::new();
-        let key = "default/blacklisted-template";
+        let key = crate::cache::TemplateKey {
+            namespace: "default".into(),
+            name: "blacklisted-template".into(),
+        };
         let patch_json = json!([
             {
                 "op": "add",
@@ -275,12 +284,12 @@ mod tests {
         };
 
         // First call fails and caches the Err
-        let res1 = cache.get_or_compile(key, 1, &[pod_tmpl.clone()]);
+        let res1 = cache.get_or_compile(&key, 1, &[pod_tmpl.clone()]);
         assert!(res1.is_err());
         assert!(res1.as_ref().unwrap_err().contains("blacklisted"));
 
         // Second call for same generation returns cached Err instantly
-        let res2 = cache.get_or_compile(key, 1, &[pod_tmpl]);
+        let res2 = cache.get_or_compile(&key, 1, &[pod_tmpl]);
         assert_eq!(res1.unwrap_err(), res2.unwrap_err());
     }
 }
