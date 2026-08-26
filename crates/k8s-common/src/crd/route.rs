@@ -44,7 +44,6 @@ pub struct CTFRouteStatus {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFRouteBackend {
-    #[schemars(length(min = 1, max = 20))]
     pub service: String,
     pub port: u16,
 }

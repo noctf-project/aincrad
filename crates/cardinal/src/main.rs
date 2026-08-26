@@ -3,10 +3,12 @@ use std::time::Duration;
 use cardinal::Error;
 use k8s_common::KubernetesClient;
 use kube::Client;
+use tokio_rustls::rustls;
 use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt::init();
 
     let k8s_client = KubernetesClient::new().await?;

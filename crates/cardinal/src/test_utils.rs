@@ -1,9 +1,9 @@
 #[cfg(test)]
 pub mod tests {
-    use std::sync::Arc;
     use k8s_common::crd::{CTFInstance, CTFInstanceSpec, CTFTemplateSpec, CTFTemplateSpecPod};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::Client;
+    use std::sync::Arc;
 
     use crate::{reconcilers::template::ResolvedTemplate, utils::labels::TEMPLATE_GEN_ANNOTATION};
 

@@ -35,4 +35,5 @@ ENTRYPOINT ["/usr/local/bin/fluct"]
 
 FROM alpine:3 AS cardinal
 COPY --from=builder /build/target/release/cardinal /usr/local/bin/cardinal
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/cardinal"]

@@ -116,6 +116,7 @@ fn set_gen_annotation_and_owner<K: Resource>(
     target_gen: &str,
 ) {
     let meta = resource.meta_mut();
+    meta.managed_fields = None;
     let annotations = meta.annotations.get_or_insert_with(Default::default);
     annotations.insert(TEMPLATE_GEN_ANNOTATION.to_string(), target_gen.to_string());
 
@@ -127,8 +128,8 @@ fn set_gen_annotation_and_owner<K: Resource>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::api::apps::v1::ReplicaSet;
     use crate::test_utils::tests::{dummy_instance, dummy_kube_client};
+    use k8s_openapi::api::apps::v1::ReplicaSet;
 
     #[tokio::test]
     async fn test_reconcile_child_resource_missing_synced() {

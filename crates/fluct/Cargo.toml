@@ -35,7 +35,7 @@ sha2 = { workspace = true }
 siphasher = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-rustls = { version = "0.26", features = ["ring"] }
+tokio-rustls = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"

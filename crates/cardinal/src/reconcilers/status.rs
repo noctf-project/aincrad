@@ -29,6 +29,7 @@ pub async fn reconcile(
             target_gen, "Stamping template-generation annotation on CTFInstance"
         );
         let mut patch = instance.clone();
+        patch.metadata.managed_fields = None;
         let annotations = patch
             .metadata
             .annotations
@@ -45,7 +46,12 @@ pub async fn reconcile(
     let ready_condition = Condition {
         type_: "Ready".to_string(),
         status: if is_ready { "True" } else { "False" }.to_string(),
-        reason: if is_ready { "Reconciled" } else { "Progressing" }.to_string(),
+        reason: if is_ready {
+            "Reconciled"
+        } else {
+            "Progressing"
+        }
+        .to_string(),
         message: if is_ready {
             "CTFInstance reconciled successfully".to_string()
         } else {
@@ -58,7 +64,12 @@ pub async fn reconcile(
     let synced_condition = Condition {
         type_: "Synced".to_string(),
         status: if is_ready { "True" } else { "False" }.to_string(),
-        reason: if is_ready { "Reconciled" } else { "TemplateGenShifted" }.to_string(),
+        reason: if is_ready {
+            "Reconciled"
+        } else {
+            "TemplateGenShifted"
+        }
+        .to_string(),
         message: if is_ready {
             "Resource synced with template generation".to_string()
         } else {
@@ -76,9 +87,12 @@ pub async fn reconcile(
         }
     });
 
-    let patch_params = kube::api::PatchParams::apply("cardinal");
     instances
-        .patch_status(name, &patch_params, &kube::api::Patch::Merge(status_patch))
+        .patch_status(
+            name,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(status_patch),
+        )
         .await?;
 
     Ok(())

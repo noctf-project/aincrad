@@ -39,24 +39,17 @@ pub async fn reconcile(
         INSTANCE_LABEL => instance_name,
     };
 
-    reconcile_child_resource(
-        &netpols,
-        &target_name,
-        instance,
-        &target_gen,
-        sync,
-        || {
-            let mut np = NetworkPolicy::default();
-            np.metadata.name = Some(target_name.clone());
-            np.metadata.namespace = Some(ns.to_string());
-            np.metadata.labels = Some(labels.clone());
-            np.spec = Some(get_networkpolicy_spec(
-                instance_name,
-                &allowed_internet_pods,
-            ));
-            np
-        },
-    )
+    reconcile_child_resource(&netpols, &target_name, instance, &target_gen, sync, || {
+        let mut np = NetworkPolicy::default();
+        np.metadata.name = Some(target_name.clone());
+        np.metadata.namespace = Some(ns.to_string());
+        np.metadata.labels = Some(labels.clone());
+        np.spec = Some(get_networkpolicy_spec(
+            instance_name,
+            &allowed_internet_pods,
+        ));
+        np
+    })
     .await?;
 
     Ok(())

@@ -40,7 +40,7 @@ pub async fn reconcile(
             .iter()
             .find(|r| r.name == route_tmpl.name);
 
-        let merged_spec = build_ctfroute_spec(&route_tmpl.spec, route_override);
+        let merged_spec = build_ctfroute_spec(instance_name, &route_tmpl.spec, route_override);
 
         let labels = btreemap! {
             MANAGED_BY_LABEL => MANAGED_BY_VALUE,
@@ -73,16 +73,19 @@ mod tests {
         let ctx = Context::new(client);
         let instance = dummy_instance("chal-1", Some("1"));
         let mut template = dummy_resolved_template(1);
-        template.spec.routes.push(k8s_common::crd::CTFTemplateSpecRoute {
-            name: "web".to_string(),
-            spec: k8s_common::crd::CTFRouteSpec {
-                backend: k8s_common::crd::CTFRouteBackend {
-                    service: "web".to_string(),
-                    port: 80,
+        template
+            .spec
+            .routes
+            .push(k8s_common::crd::CTFTemplateSpecRoute {
+                name: "web".to_string(),
+                spec: k8s_common::crd::CTFRouteSpec {
+                    backend: k8s_common::crd::CTFRouteBackend {
+                        service: "web".to_string(),
+                        port: 80,
+                    },
+                    ..Default::default()
                 },
-                ..Default::default()
-            },
-        });
+            });
 
         let res = reconcile(&instance, &template, &ctx).await;
         assert!(res.is_ok());
@@ -94,16 +97,19 @@ mod tests {
         let ctx = Context::new(client);
         let instance = dummy_instance("chal-1", Some("1"));
         let mut template = dummy_resolved_template(2);
-        template.spec.routes.push(k8s_common::crd::CTFTemplateSpecRoute {
-            name: "web".to_string(),
-            spec: k8s_common::crd::CTFRouteSpec {
-                backend: k8s_common::crd::CTFRouteBackend {
-                    service: "web".to_string(),
-                    port: 80,
+        template
+            .spec
+            .routes
+            .push(k8s_common::crd::CTFTemplateSpecRoute {
+                name: "web".to_string(),
+                spec: k8s_common::crd::CTFRouteSpec {
+                    backend: k8s_common::crd::CTFRouteBackend {
+                        service: "web".to_string(),
+                        port: 80,
+                    },
+                    ..Default::default()
                 },
-                ..Default::default()
-            },
-        });
+            });
 
         let res = reconcile(&instance, &template, &ctx).await;
         assert!(matches!(res, Err(Error::TemplateGenShifted { .. })));

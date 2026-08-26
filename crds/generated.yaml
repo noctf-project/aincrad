@@ -31,8 +31,6 @@ spec:
                     minimum: 0.0
                     type: integer
                   service:
-                    maxLength: 20
-                    minLength: 1
                     type: string
                 required:
                 - port
@@ -123,6 +121,7 @@ spec:
                   - status
                   - type
                   type: object
+                maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
                 - type
@@ -213,6 +212,7 @@ spec:
                   - name
                   - value
                   type: object
+                maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -241,12 +241,12 @@ spec:
                       type: integer
                     spec:
                       type: object
-                      x-kubernetes-embedded-resource: true
                       x-kubernetes-preserve-unknown-fields: true
                   required:
                   - name
                   - spec
                   type: object
+                maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -277,8 +277,6 @@ spec:
                               minimum: 0.0
                               type: integer
                             service:
-                              maxLength: 20
-                              minLength: 1
                               type: string
                           required:
                           - port
@@ -342,6 +340,7 @@ spec:
                   x-kubernetes-validations:
                   - message: Explicit external ports cannot be set; port must be omitted or set to 0
                     rule: '!has(self.spec.port) || self.spec.port == 0'
+                maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -349,7 +348,7 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: Each route backend service must match a valid pod name defined in 'spec.pods'
-              rule: self.routes.all(r, self.pods.exists(p, p.name == r.backend.service))
+              rule: self.routes.all(r, self.pods.exists(p, p.name == r.spec.backend.service))
           status:
             nullable: true
             properties:
@@ -384,6 +383,7 @@ spec:
                   - status
                   - type
                   type: object
+                maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
                 - type
@@ -443,6 +443,7 @@ spec:
                   required:
                   - name
                   type: object
+                maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -465,6 +466,7 @@ spec:
                   - name
                   - replicas
                   type: object
+                maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -508,6 +510,7 @@ spec:
                   required:
                   - name
                   type: object
+                maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -559,6 +562,7 @@ spec:
                   - status
                   - type
                   type: object
+                maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
                 - type
@@ -591,6 +595,7 @@ spec:
                   - target
                   - type
                   type: object
+                maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
                 - name

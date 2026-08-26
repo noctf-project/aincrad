@@ -115,31 +115,24 @@ pub async fn reconcile(
 
         let instance_restarted_at_clone = instance_restarted_at.clone();
 
-        reconcile_child_resource(
-            &replica_sets,
-            &rs_name,
-            instance,
-            &target_gen,
-            sync,
-            || {
-                let mut rs = ReplicaSet::default();
-                rs.metadata.name = Some(rs_name.clone());
-                rs.metadata.namespace = Some(ns.to_string());
-                rs.metadata.labels = Some(labels.clone());
-                let annotations = rs.metadata.annotations.get_or_insert_with(Default::default);
-                annotations.insert(
-                    RESTARTED_AT_ANNOTATION.to_string(),
-                    instance_restarted_at_clone.clone(),
-                );
-                rs.spec = Some(build_replicaset_spec(
-                    instance_name,
-                    pod_tmpl,
-                    patched_pod_spec.clone(),
-                    replicas,
-                ));
-                rs
-            },
-        )
+        reconcile_child_resource(&replica_sets, &rs_name, instance, &target_gen, sync, || {
+            let mut rs = ReplicaSet::default();
+            rs.metadata.name = Some(rs_name.clone());
+            rs.metadata.namespace = Some(ns.to_string());
+            rs.metadata.labels = Some(labels.clone());
+            let annotations = rs.metadata.annotations.get_or_insert_with(Default::default);
+            annotations.insert(
+                RESTARTED_AT_ANNOTATION.to_string(),
+                instance_restarted_at_clone.clone(),
+            );
+            rs.spec = Some(build_replicaset_spec(
+                instance_name,
+                pod_tmpl,
+                patched_pod_spec.clone(),
+                replicas,
+            ));
+            rs
+        })
         .await?;
     }
 

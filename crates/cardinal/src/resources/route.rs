@@ -1,11 +1,14 @@
+use crate::utils::naming::resource_name;
 use k8s_common::crd::{CTFInstanceSpecRouteOverride, CTFRouteSpec, PatchValue};
 
 /// Builds a merged `CTFRouteSpec` from a base template specification and optional instance overrides.
 pub fn build_ctfroute_spec(
+    instance_name: &str,
     base: &CTFRouteSpec,
     override_spec: Option<&CTFInstanceSpecRouteOverride>,
 ) -> CTFRouteSpec {
     let mut merged = base.clone();
+    merged.backend.service = resource_name(instance_name, &merged.backend.service);
 
     if let Some(ov) = override_spec {
         match ov.port {
@@ -69,8 +72,9 @@ mod tests {
             }),
         };
 
-        let merged = build_ctfroute_spec(&base_spec, Some(&override_spec));
+        let merged = build_ctfroute_spec("chal-1", &base_spec, Some(&override_spec));
 
+        assert_eq!(merged.backend.service, resource_name("chal-1", "web"));
         assert_eq!(merged.port, Some(8443));
         assert_eq!(
             merged.tls,
@@ -100,8 +104,9 @@ mod tests {
             tls: PatchValue::Null,
         };
 
-        let merged = build_ctfroute_spec(&base_spec, Some(&override_spec));
+        let merged = build_ctfroute_spec("chal-1", &base_spec, Some(&override_spec));
 
+        assert_eq!(merged.backend.service, resource_name("chal-1", "web"));
         assert_eq!(merged.port, Some(443));
         assert_eq!(merged.tls, None);
     }
@@ -120,8 +125,9 @@ mod tests {
             ..Default::default()
         };
 
-        let merged = build_ctfroute_spec(&base_spec, None);
+        let merged = build_ctfroute_spec("chal-1", &base_spec, None);
 
+        assert_eq!(merged.backend.service, resource_name("chal-1", "web"));
         assert_eq!(merged.port, Some(443));
         assert_eq!(
             merged.tls,

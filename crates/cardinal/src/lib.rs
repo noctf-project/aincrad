@@ -3,9 +3,9 @@ pub mod controller;
 pub mod error;
 pub mod reconcilers;
 pub mod resources;
-pub mod utils;
 #[cfg(test)]
 pub mod test_utils;
+pub mod utils;
 
 pub use context::Context;
 pub use error::Error;

@@ -51,7 +51,7 @@ impl KubeListKey for CTFTemplateSpecRoute {
 #[schemars(
     extend("x-kubernetes-validations" = [
         {
-            "rule": "self.routes.all(r, self.pods.exists(p, p.name == r.backend.service))",
+            "rule": "self.routes.all(r, self.pods.exists(p, p.name == r.spec.backend.service))",
             "message": "Each route backend service must match a valid pod name defined in 'spec.pods'"
         },
     ])

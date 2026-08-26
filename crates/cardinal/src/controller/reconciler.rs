@@ -26,7 +26,10 @@ pub async fn reconcile(instance: Arc<CTFInstance>, ctx: Arc<Context>) -> Result<
 
     // Skip reconciliation if instance is marked for deletion
     if instance.metadata.deletion_timestamp.is_some() {
-        info!(name, ns, "CTFInstance marked for deletion, skipping reconciliation");
+        info!(
+            name,
+            ns, "CTFInstance marked for deletion, skipping reconciliation"
+        );
         return Ok(Action::await_change());
     }
 

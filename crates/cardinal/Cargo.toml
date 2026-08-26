@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
 base32 = { workspace = true }
+tokio-rustls = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

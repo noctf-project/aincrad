@@ -26,6 +26,7 @@ pub fn list_schema<T: JsonSchema + KubeListKey>(r: &mut SchemaGenerator) -> Sche
         "x-kubernetes-list-map-keys".to_string(),
         serde_json::json!(T::KEYS),
     );
+    obj.insert("maxItems".to_string(), serde_json::json!(32));
     schema
 }
 
@@ -34,10 +35,6 @@ pub fn embedded_resource_schema<T>(_r: &mut SchemaGenerator) -> Schema {
     let mut schema = Schema::default();
     let obj = schema.ensure_object();
     obj.insert("type".to_string(), serde_json::json!("object"));
-    obj.insert(
-        "x-kubernetes-embedded-resource".to_string(),
-        serde_json::json!(true),
-    );
     obj.insert(
         "x-kubernetes-preserve-unknown-fields".to_string(),
         serde_json::json!(true),

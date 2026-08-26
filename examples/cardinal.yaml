@@ -1,0 +1,41 @@
+# CTFTemplate defining the challenge workloads and routing rules
+apiVersion: aincrad.noctf.dev/v1
+kind: CTFTemplate
+metadata:
+  name: whoami-template
+  namespace: kubectf-challenges
+spec:
+  pods:
+    - name: backend
+      replicas: 1
+      allowInternet: false
+      spec:
+        containers:
+          - name: whoami
+            image: traefik/whoami:v1.10.1
+            ports:
+              - containerPort: 80
+            resources:
+              limits:
+                cpu: "100m"
+                memory: "64Mi"
+              requests:
+                cpu: "10m"
+                memory: "16Mi"
+  routes:
+    - name: backend
+      spec:
+        backend:
+          service: backend
+          port: 80
+        tls:
+          prefix: whoami
+---
+# apiVersion: aincrad.noctf.dev/v1
+# kind: CTFInstance
+# metadata:
+#   name: whoami-instance
+#   namespace: kubectf-challenges
+# spec:
+#   template: whoami-template
+#   expiresAt: "2026-08-27T02:30:00Z"
