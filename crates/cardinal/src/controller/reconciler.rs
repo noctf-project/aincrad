@@ -12,7 +12,7 @@ use kube::{
         watcher::{Config, Event, watcher},
     },
 };
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 
 use crate::{Context, Error, reconcilers, utils::ttl::calculate_remaining_ttl};
 
@@ -277,7 +277,7 @@ pub async fn run(client: Client) {
                     info!(name = %object.name, "Successfully reconciled CTFInstance");
                 }
                 Err(err) => {
-                    error!(%err, "Controller error occurred");
+                    warn!(%err, "Controller error occurred");
                 }
             }
         })

@@ -6,7 +6,7 @@ metadata:
   namespace: kubectf-challenges
 spec:
   pods:
-    - name: backend
+    - name: chal
       replicas: 1
       allowInternet: false
       spec:
@@ -23,19 +23,20 @@ spec:
                 cpu: "10m"
                 memory: "16Mi"
   routes:
-    - name: backend
+    - name: chal
       spec:
         backend:
-          service: backend
+          service: chal
           port: 80
         tls:
           prefix: whoami
 ---
-# apiVersion: aincrad.noctf.dev/v1
-# kind: CTFInstance
-# metadata:
-#   name: whoami-instance
-#   namespace: kubectf-challenges
-# spec:
-#   template: whoami-template
-#   expiresAt: "2026-08-27T02:30:00Z"
+apiVersion: aincrad.noctf.dev/v1
+kind: CTFInstance
+metadata:
+  name: whoami-instance
+  namespace: kubectf-challenges
+spec:
+  template: whoami-template
+  expiresAt: "2026-08-27T00:50:00Z"
+  sync: true

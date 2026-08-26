@@ -163,7 +163,12 @@ pub fn get_networkpolicy_spec(
     NetworkPolicySpec {
         egress: Some(egress_rules),
         ingress: None,
-        pod_selector: Some(LabelSelector::default()),
+        pod_selector: Some(LabelSelector {
+            match_labels: Some(btreemap! {
+                INSTANCE_LABEL => instance.to_string(),
+            }),
+            ..Default::default()
+        }),
         policy_types: Some(vec!["Egress".into()]),
     }
 }

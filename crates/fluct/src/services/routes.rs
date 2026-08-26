@@ -68,7 +68,6 @@ impl RoutesService {
     fn desired_status(&self, generation: i64, route: &Arc<MetadataAndSpec>) -> CTFRouteStatusPair {
         let mut conditions = Vec::new();
         let key = route.route_key();
-        let namespaced_name = key.to_string();
         let tcp_reserve = self.ports.reserve(&key, route.spec.port);
 
         let tcp_endpoint = match tcp_reserve {
@@ -136,7 +135,7 @@ impl RoutesService {
             }
         };
         (
-            namespaced_name,
+            key.clone(),
             CTFRouteStatus {
                 observed_generation: Some(generation),
                 endpoints: Some(CTFRouteEndpoints {
@@ -245,12 +244,9 @@ impl RoutesService {
         }
     }
 
-    async fn update_status(&self, full: &str, status: CTFRouteStatus) -> Result<(), Error> {
-        let mut parts = full.split(":");
-        let namespace = parts.next().unwrap_or("default");
-        let name = parts.next().unwrap_or("");
+    async fn update_status(&self, key: &RouteKey, status: CTFRouteStatus) -> Result<(), Error> {
         self.client
-            .update_object_status::<CTFRoute, _>(name, namespace, status)
+            .update_object_status::<CTFRoute, _>(&key.name, &key.namespace, status)
             .await?;
         Ok(())
     }
@@ -262,11 +258,11 @@ impl RoutesService {
         }
         info!("Shipping {} unsynced route status updates", unsynced.len());
         let resync_updates = unsynced.into_iter().map(|route| {
-            let (full, status) = self.desired_status(route.generation, &route);
+            let (key, status) = self.desired_status(route.generation, &route);
             async move {
-                self.update_status(&full, status)
+                self.update_status(&key, status)
                     .await
-                    .inspect(|_| info!("successfully updated status for {}", full))
+                    .inspect(|_| info!("successfully updated status for {}", key))
                     .unwrap_or_else(|e| error!("failed to update status: {}", e));
             }
         });
@@ -325,11 +321,11 @@ impl RoutesService {
                     }
                     let status_updates = buffer.drain(..).dedup_last().filter_map(|arc| {
                         let metadata = self.routes.get_route(&arc.route_key_ref())?;
-                        let (full, status) = self.desired_status(metadata.generation, &metadata);
+                        let (key, status) = self.desired_status(metadata.generation, &metadata);
                         Some(async move {
-                            self.update_status(&full, status)
+                            self.update_status(&key, status)
                                 .await
-                                .inspect(|_| info!("successfully updated status for {}", full))
+                                .inspect(|_| info!("successfully updated status for {}", key))
                                 .unwrap_or_else(|e| error!("failed to update status: {}", e));
                         })
                     });
@@ -642,8 +638,8 @@ mod tests {
             name: "my-challenge".into(),
         };
 
-        let (full, status) = store.desired_status(5, &route);
-        assert_eq!(full, "prod/my-challenge");
+        let (key_out, status) = store.desired_status(5, &route);
+        assert_eq!(key_out, key);
         assert_eq!(status.observed_generation, Some(5));
 
         let expected_hostname = store.format_tls_host(&key).unwrap();

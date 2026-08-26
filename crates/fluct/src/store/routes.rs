@@ -8,7 +8,7 @@ use crate::crypto::hash::derive_key;
 use crate::store::{RouteKey, RouteKeyRef};
 
 const HOSTNAME_ID_LEN: usize = 14;
-pub type CTFRouteStatusPair = (String, CTFRouteStatus);
+pub type CTFRouteStatusPair = (RouteKey, CTFRouteStatus);
 
 fn sanitize_prefix(input: &str) -> String {
     static RE_INVALID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9-]+").unwrap());
