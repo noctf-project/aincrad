@@ -109,7 +109,7 @@ impl ResolvedTemplate {
         if let Some(Some(patcher)) = self.pod_patchers.get(&pod_tmpl.name) {
             patcher
                 .apply(&pod_tmpl.spec, context_map)
-                .map_err(Error::PatchEvaluationFailed)
+                .map_err(Error::TemplateBuildError)
         } else {
             Ok(pod_tmpl.spec.clone())
         }
@@ -148,7 +148,7 @@ pub async fn reconcile(instance: &CTFInstance, ctx: &Context) -> Result<Resolved
     let pod_patchers = ctx
         .template_cache
         .get_or_compile(&cache_key, generation, &template.spec.pods)
-        .map_err(Error::InvalidPatch)?;
+        .map_err(Error::TemplateBuildError)?;
 
     let params_map = resolve_template_params(&template.spec, instance);
 

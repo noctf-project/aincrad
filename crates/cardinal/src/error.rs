@@ -9,11 +9,8 @@ pub enum Error {
     #[error("Template resolution error: {0}")]
     TemplateNotFound(String),
 
-    #[error("Invalid patch: {0}")]
-    InvalidPatch(String),
-
-    #[error("Patch evaluation failed: {0}")]
-    PatchEvaluationFailed(String),
+    #[error("Template build error: {0}")]
+    TemplateBuildError(String),
 
     #[error("Template generation shifted for instance {instance_name}: target_gen {target_gen}")]
     TemplateGenShifted {

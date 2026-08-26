@@ -14,10 +14,7 @@ use kube::{
 };
 use tracing::{error, info, instrument};
 
-use crate::{
-    Context, Error, reconcilers, utils::labels::TEMPLATE_GEN_ANNOTATION,
-    utils::ttl::calculate_remaining_ttl,
-};
+use crate::{Context, Error, reconcilers, utils::ttl::calculate_remaining_ttl};
 
 /// Reconciles a single `CTFInstance` resource state.
 #[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
@@ -27,32 +24,44 @@ pub async fn reconcile(instance: Arc<CTFInstance>, ctx: Arc<Context>) -> Result<
 
     info!(name, ns, "Reconciling CTFInstance");
 
+    // Skip reconciliation if instance is marked for deletion
+    if instance.metadata.deletion_timestamp.is_some() {
+        info!(name, ns, "CTFInstance marked for deletion, skipping reconciliation");
+        return Ok(Action::await_change());
+    }
+
+    // Check if instance has expired
+    if crate::utils::ttl::is_expired(instance.spec.expires_at) {
+        info!(name, ns, "CTFInstance has expired, deleting resource...");
+        let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
+        instances.delete(name, &Default::default()).await?;
+        return Ok(Action::await_change());
+    }
+
     // Resolve CTFTemplate referenced by `instance.spec.template`.
     let template = reconcilers::template::reconcile(&instance, &ctx).await?;
 
     let target_gen = template.metadata.generation.unwrap_or(1).to_string();
-    let instance_gen = instance
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(TEMPLATE_GEN_ANNOTATION))
-        .map(String::as_str);
 
-    let res = reconcile_children(&instance, &template, &ctx, instance_gen, &target_gen).await;
+    let res = reconcile_children(&instance, &template, &ctx).await;
     if let Err(Error::TemplateGenShifted { .. }) = res {
         info!(
             name,
             target_gen,
             "Template generation shifted, updating CTFInstance template-generation annotation"
         );
-        reconcilers::status::reconcile(&instance, &ctx, &target_gen).await?;
+        reconcilers::status::reconcile(&instance, &ctx, &target_gen, false).await?;
         return Ok(Action::await_change());
     }
 
     res?;
 
+    // Success! Update status conditions (Ready = True, Synced = True) & observedGeneration
+    reconcilers::status::reconcile(&instance, &ctx, &target_gen, true).await?;
+
     if let Some(remaining) = calculate_remaining_ttl(instance.spec.expires_at) {
-        return Ok(Action::requeue(remaining));
+        // We want to make sure the object really expires to save requeuing
+        return Ok(Action::requeue(remaining + Duration::from_secs(10)));
     }
 
     Ok(Action::await_change())
@@ -63,14 +72,11 @@ async fn reconcile_children(
     instance: &CTFInstance,
     template: &reconcilers::template::ResolvedTemplate,
     ctx: &Context,
-    instance_gen: Option<&str>,
-    target_gen: &str,
 ) -> Result<(), Error> {
-    reconcilers::replicaset::reconcile(instance, template, ctx, instance_gen, target_gen).await?;
-    reconcilers::network_policy::reconcile(instance, template, ctx, instance_gen, target_gen)
-        .await?;
-    reconcilers::service::reconcile(instance, template, ctx, instance_gen, target_gen).await?;
-    reconcilers::route::reconcile(instance, template, ctx, instance_gen, target_gen).await?;
+    reconcilers::replicaset::reconcile(instance, template, ctx).await?;
+    reconcilers::network_policy::reconcile(instance, template, ctx).await?;
+    reconcilers::service::reconcile(instance, template, ctx).await?;
+    reconcilers::route::reconcile(instance, template, ctx).await?;
     Ok(())
 }
 
@@ -79,7 +85,13 @@ pub fn error_policy(instance: Arc<CTFInstance>, error: &Error, _ctx: Arc<Context
     let name = instance.metadata.name.as_deref().unwrap_or("unknown");
     error!(name, %error, "Reconciliation failed");
 
-    Action::requeue(Duration::from_secs(10))
+    let backoff_secs = match error {
+        Error::TemplateBuildError(_) => 120,
+        Error::TemplateNotFound(_) => 120,
+        _ => 15,
+    };
+
+    Action::requeue(Duration::from_secs(backoff_secs))
 }
 
 /// Spawns and runs the `CTFInstance` controller loop.
@@ -182,141 +194,11 @@ pub async fn run(client: Client) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::tests::dummy_kube_client;
+    use crate::utils::labels::TEMPLATE_GEN_ANNOTATION;
     use chrono::{Duration as ChronoDuration, Utc};
     use k8s_common::crd::CTFInstanceSpec;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-
-    fn dummy_kube_client() -> Client {
-        use axum::http::{Request, Response, Uri};
-        use kube::Config;
-        use tower::Service;
-
-        let config = Config::new(Uri::from_static("http://localhost:8080"));
-        struct DummyService;
-        type BoxFuture = std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<Response<axum::body::Body>, std::convert::Infallible>,
-                    > + Send,
-            >,
-        >;
-        impl<B> Service<Request<B>> for DummyService {
-            type Response = Response<axum::body::Body>;
-            type Error = std::convert::Infallible;
-            type Future = BoxFuture;
-
-            fn poll_ready(
-                &mut self,
-                _: &mut std::task::Context<'_>,
-            ) -> std::task::Poll<Result<(), std::convert::Infallible>> {
-                std::task::Poll::Ready(Ok(()))
-            }
-
-            fn call(&mut self, req: Request<B>) -> BoxFuture {
-                let path = req.uri().path().to_string();
-                let query_str = req.uri().query().unwrap_or_default().to_string();
-                let is_get = req.method() == axum::http::Method::GET;
-                Box::pin(async move {
-                    if is_get {
-                        if path.contains("ctftemplates") {
-                            let tmpl = serde_json::json!({
-                                "apiVersion": "aincrad.noctf.dev/v1",
-                                "kind": "CTFTemplate",
-                                "metadata": {
-                                    "name": "whoami-template",
-                                    "namespace": "default",
-                                    "generation": 1
-                                },
-                                "spec": {
-                                    "params": [],
-                                    "pods": [
-                                        {
-                                            "name": "web",
-                                            "replicas": 1,
-                                            "spec": {
-                                                "containers": [
-                                                    { "name": "web", "image": "nginx" }
-                                                ]
-                                            }
-                                        }
-                                    ],
-                                    "routes": []
-                                }
-                            });
-                            let body_str = serde_json::to_string(&tmpl).unwrap();
-                            return Ok(axum::http::Response::builder()
-                                .status(axum::http::StatusCode::OK)
-                                .header("content-type", "application/json")
-                                .body(axum::body::Body::from(body_str))
-                                .unwrap());
-                        }
-
-                        if query_str.contains("labelSelector") {
-                            let list = serde_json::json!({
-                                "apiVersion": "v1",
-                                "kind": "List",
-                                "metadata": {},
-                                "items": []
-                            });
-                            let body_str = serde_json::to_string(&list).unwrap();
-                            return Ok(axum::http::Response::builder()
-                                .status(axum::http::StatusCode::OK)
-                                .header("content-type", "application/json")
-                                .body(axum::body::Body::from(body_str))
-                                .unwrap());
-                        }
-
-                        let status = serde_json::json!({
-                            "kind": "Status",
-                            "apiVersion": "v1",
-                            "status": "Failure",
-                            "message": "not found",
-                            "reason": "NotFound",
-                            "code": 404
-                        });
-                        let body_str = serde_json::to_string(&status).unwrap();
-                        Ok(axum::http::Response::builder()
-                            .status(axum::http::StatusCode::NOT_FOUND)
-                            .header("content-type", "application/json")
-                            .body(axum::body::Body::from(body_str))
-                            .unwrap())
-                    } else {
-                        let (api_version, kind) = if path.contains("networkpolicies") {
-                            ("networking.k8s.io/v1", "NetworkPolicy")
-                        } else if path.contains("replicasets") {
-                            ("apps/v1", "ReplicaSet")
-                        } else if path.contains("ctfroutes") {
-                            ("aincrad.noctf.dev/v1", "CTFRoute")
-                        } else if path.contains("ctfinstances") {
-                            ("aincrad.noctf.dev/v1", "CTFInstance")
-                        } else {
-                            ("v1", "Service")
-                        };
-
-                        let mut body = serde_json::json!({
-                            "apiVersion": api_version,
-                            "kind": kind,
-                            "metadata": {
-                                "name": "dummy",
-                                "namespace": "default"
-                            }
-                        });
-                        if kind == "CTFInstance" {
-                            body["spec"] = serde_json::json!({ "template": "whoami-template" });
-                        }
-                        let body_str = serde_json::to_string(&body).unwrap();
-                        Ok(axum::http::Response::builder()
-                            .status(axum::http::StatusCode::CREATED)
-                            .header("content-type", "application/json")
-                            .body(axum::body::Body::from(body_str))
-                            .unwrap())
-                    }
-                })
-            }
-        }
-
-        Client::new(DummyService, config.default_namespace)
-    }
 
     #[tokio::test]
     async fn test_reconcile_no_expiration() {
@@ -368,6 +250,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reconcile_past_expiration() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let past_time = Utc::now() - ChronoDuration::seconds(60);
+
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                expires_at: Some(past_time),
+                ..Default::default()
+            },
+            status: None,
+        });
+
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_deletion_timestamp() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let now = Utc::now();
+
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                deletion_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    k8s_openapi::jiff::Timestamp::from_second(now.timestamp()).unwrap(),
+                )),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                ..Default::default()
+            },
+            status: None,
+        });
+
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_template_gen_shifted() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        // Instance annotation is at gen "2", but mock template is at gen 1
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                annotations: Some(crate::btreemap! {
+                    TEMPLATE_GEN_ANNOTATION.to_string() => "2".to_string()
+                }),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                ..Default::default()
+            },
+            status: None,
+        });
+
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
     async fn test_error_policy() {
         let client = dummy_kube_client();
         let ctx = Arc::new(Context::new(client));
@@ -384,9 +341,12 @@ mod tests {
             status: None,
         });
 
-        let err = Error::Custom("failed to connect".into());
-        let action = error_policy(instance, &err, ctx);
+        let err_build = Error::TemplateBuildError("invalid json patch".into());
+        let action_build = error_policy(instance.clone(), &err_build, ctx.clone());
+        assert_eq!(action_build, Action::requeue(Duration::from_secs(120)));
 
-        assert_eq!(action, Action::requeue(Duration::from_secs(10)));
+        let err_transient = Error::Custom("failed to connect".into());
+        let action_transient = error_policy(instance, &err_transient, ctx);
+        assert_eq!(action_transient, Action::requeue(Duration::from_secs(15)));
     }
 }

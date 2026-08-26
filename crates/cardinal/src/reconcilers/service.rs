@@ -22,9 +22,8 @@ pub async fn reconcile(
     instance: &CTFInstance,
     template: &ResolvedTemplate,
     ctx: &Context,
-    instance_gen: Option<&str>,
-    target_gen: &str,
 ) -> Result<(), Error> {
+    let target_gen = template.metadata.generation.unwrap_or(1).to_string();
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
@@ -42,7 +41,7 @@ pub async fn reconcile(
             POD_LABEL => pod.name.as_str(),
         };
 
-        reconcile_child_resource(&services, &svc_name, instance_gen, target_gen, sync, || {
+        reconcile_child_resource(&services, &svc_name, instance, &target_gen, sync, || {
             let mut svc = Service::default();
             svc.metadata.name = Some(svc_name.clone());
             svc.metadata.namespace = Some(ns.to_string());
@@ -56,4 +55,32 @@ pub async fn reconcile(
     prune_orphaned_resources(&services, instance_name, &desired_names).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::tests::{dummy_instance, dummy_kube_client, dummy_resolved_template};
+
+    #[tokio::test]
+    async fn test_reconcile_service_success() {
+        let client = dummy_kube_client();
+        let ctx = Context::new(client);
+        let instance = dummy_instance("chal-1", Some("1"));
+        let template = dummy_resolved_template(1);
+
+        let res = reconcile(&instance, &template, &ctx).await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_service_gen_shifted() {
+        let client = dummy_kube_client();
+        let ctx = Context::new(client);
+        let instance = dummy_instance("chal-1", Some("1"));
+        let template = dummy_resolved_template(2);
+
+        let res = reconcile(&instance, &template, &ctx).await;
+        assert!(matches!(res, Err(Error::TemplateGenShifted { .. })));
+    }
 }

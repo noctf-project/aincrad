@@ -26,9 +26,8 @@ pub async fn reconcile(
     instance: &CTFInstance,
     template: &ResolvedTemplate,
     ctx: &Context,
-    instance_gen: Option<&str>,
-    target_gen: &str,
 ) -> Result<(), Error> {
+    let target_gen = template.metadata.generation.unwrap_or(1).to_string();
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
     let replica_sets: Api<ReplicaSet> = Api::namespaced(ctx.client.clone(), ns);
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
@@ -119,8 +118,8 @@ pub async fn reconcile(
         reconcile_child_resource(
             &replica_sets,
             &rs_name,
-            instance_gen,
-            target_gen,
+            instance,
+            &target_gen,
             sync,
             || {
                 let mut rs = ReplicaSet::default();
@@ -147,4 +146,32 @@ pub async fn reconcile(
     prune_orphaned_resources(&replica_sets, instance_name, &desired_names).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::tests::{dummy_instance, dummy_kube_client, dummy_resolved_template};
+
+    #[tokio::test]
+    async fn test_reconcile_replicaset_success() {
+        let client = dummy_kube_client();
+        let ctx = Context::new(client);
+        let instance = dummy_instance("chal-1", Some("1"));
+        let template = dummy_resolved_template(1);
+
+        let res = reconcile(&instance, &template, &ctx).await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_replicaset_gen_shifted() {
+        let client = dummy_kube_client();
+        let ctx = Context::new(client);
+        let instance = dummy_instance("chal-1", Some("1"));
+        let template = dummy_resolved_template(2);
+
+        let res = reconcile(&instance, &template, &ctx).await;
+        assert!(matches!(res, Err(Error::TemplateGenShifted { .. })));
+    }
 }
