@@ -90,7 +90,7 @@ impl Handler {
         }
 
         if let Some(request_challenge) = request_pow {
-            let secret = derive_key(secret, "challenge");
+            let secret = derive_key("challenge", secret);
 
             match Challenge::solve(
                 pow.map(|x| x.difficulty).unwrap_or(0),
@@ -119,7 +119,7 @@ impl Handler {
             self.session.uid = get_line(&mut c_rx, MAX_UID_SIZE, MAX_INPUT_TIME_UID).await?;
         }
 
-        let secret = derive_key(secret, "flag");
+        let secret = derive_key("flag", secret);
 
         if let Some(ref flag_prefix) = spec.flag {
             self.flag = V1FlagGenerator::generate(
@@ -261,6 +261,7 @@ mod tests {
                 tls_key: "key.pem".into(),
                 challenge_domain: "".into(),
                 cluster_domain: "cluster.local".into(),
+                route_seed: "link-start".into(),
                 flag_prefix: "CTF".into(),
                 logs_dir: "./data/".into(),
                 reserved_ports: PortRange(20000..=20999),
@@ -273,6 +274,7 @@ mod tests {
                 443,
                 PortRange(20000..=20999),
                 PortRange(30000..=30999),
+                "link-start",
             ),
             shutdown: CancellationToken::new(),
         })

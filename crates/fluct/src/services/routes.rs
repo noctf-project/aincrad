@@ -38,12 +38,13 @@ impl RoutesService {
         tls_port: u16,
         range_reserved: PortRange,
         range_auto: PortRange,
+        route_seed: &str,
     ) -> Self {
         Self {
             client,
             hostname_suffix: hostname_suffix.to_owned(),
             tls_port,
-            routes: RoutesStore::new(),
+            routes: RoutesStore::new(route_seed),
             ports: PortsStore::new(range_reserved, range_auto),
         }
     }
@@ -401,6 +402,7 @@ mod tests {
             443,
             PortRange(20000..=20010),
             PortRange(30000..=30010),
+            "link-start",
         )
     }
 

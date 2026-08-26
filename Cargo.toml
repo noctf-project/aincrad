@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.dependencies]
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 hmac = "0.13"
 k8s-controller = "0.12"

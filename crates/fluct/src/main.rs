@@ -41,6 +41,7 @@ pub async fn run(config: ServiceConfig) -> Result<(), Error> {
         config.tls_port,
         config.reserved_ports.clone(),
         config.auto_ports.clone(),
+        &config.route_seed,
     );
 
     let (tls_tx, tls_rx) = if let Some(port) = config.tproxy_port {

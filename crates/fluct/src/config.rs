@@ -64,6 +64,7 @@ pub struct ServiceConfig {
     pub tls_key: PathBuf,
     pub challenge_domain: String,
     pub cluster_domain: String,
+    pub route_seed: String,
     pub flag_prefix: String,
     pub logs_dir: String,
 }
@@ -109,6 +110,10 @@ pub struct RawServiceConfig {
     #[clap(long, default_value = "cluster.local")]
     pub cluster_domain: String,
 
+    /// Route seed used for derived TLS hostnames
+    #[clap(long, env = "ROUTE_SEED", default_value = "link-start")]
+    pub route_seed: String,
+
     /// CTF flag prefix
     #[clap(long, default_value = "CTF")]
     pub flag_prefix: String,
@@ -132,6 +137,7 @@ impl TryFrom<RawServiceConfig> for ServiceConfig {
             tls_key: raw.tls_key,
             challenge_domain: raw.challenge_domain,
             cluster_domain: raw.cluster_domain,
+            route_seed: raw.route_seed,
             flag_prefix: raw.flag_prefix,
             logs_dir: raw.logs_dir,
         };

@@ -34,10 +34,23 @@ fn sanitize_prefix(input: &str) -> String {
     }
 }
 
-fn derive_hostname(prefix: &str, namespaced_name: &str) -> String {
-    let clean_prefix = sanitize_prefix(prefix);
-    let seed = format!("meta:{namespaced_name}");
-    let hash = derive_key(&seed, "route:tls");
+pub fn derive_hostname(
+    route_seed: &str,
+    namespaced_name: &str,
+    tls: &k8s_common::crd::CTFRouteSpecTLS,
+) -> String {
+    let name = namespaced_name
+        .rsplit(':')
+        .next()
+        .unwrap_or(namespaced_name);
+    let raw_prefix = tls
+        .prefix
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(name);
+    let clean_prefix = sanitize_prefix(raw_prefix);
+    let key_seed = format!("v1:{route_seed}:{namespaced_name}");
+    let hash = derive_key("route:tls", &key_seed);
     let mut id = base32::encode(base32::Alphabet::Crockford, &hash).to_lowercase();
     id.truncate(HOSTNAME_ID_LEN);
     format!("{}-{}", clean_prefix, id)
@@ -70,7 +83,11 @@ struct StoreInner {
 }
 
 impl StoreInner {
-    fn insert(&mut self, entry: Arc<MetadataAndSpec>) -> Option<Arc<MetadataAndSpec>> {
+    fn insert(
+        &mut self,
+        entry: Arc<MetadataAndSpec>,
+        route_seed: &str,
+    ) -> Option<Arc<MetadataAndSpec>> {
         let key = entry.namespaced_name();
 
         let prev = self.routes.insert(key.clone(), entry.clone());
@@ -82,23 +99,13 @@ impl StoreInner {
             && prev_tls != new_tls
             && let Some(prev_entry) = &prev
         {
-            let old_prefix = old_tls
-                .prefix
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&prev_entry.name);
-            let old_host = derive_hostname(old_prefix, &prev_entry.namespaced_name());
+            let old_host = derive_hostname(route_seed, &prev_entry.namespaced_name(), old_tls);
             info!("Deregistering route {key} hostname: {old_host}");
             self.tls.remove(&old_host);
         }
 
         if let Some(tls) = new_tls {
-            let prefix = tls
-                .prefix
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&entry.name);
-            let host = derive_hostname(prefix, &entry.namespaced_name());
+            let host = derive_hostname(route_seed, &entry.namespaced_name(), tls);
             info!("Registering route {key} hostname: {host}");
             self.tls.insert(host, entry.clone());
         }
@@ -106,17 +113,12 @@ impl StoreInner {
         prev
     }
 
-    fn remove(&mut self, key: &str) -> Option<Arc<MetadataAndSpec>> {
+    fn remove(&mut self, key: &str, route_seed: &str) -> Option<Arc<MetadataAndSpec>> {
         let prev = self.routes.remove(key);
         if let Some(ref prev_entry) = prev
             && let Some(tls) = &prev_entry.spec.tls
         {
-            let prefix = tls
-                .prefix
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&prev_entry.name);
-            let host = derive_hostname(prefix, &prev_entry.namespaced_name());
+            let host = derive_hostname(route_seed, &prev_entry.namespaced_name(), tls);
             info!("Deregistering route {key} hostname: {host}");
             self.tls.remove(&host);
         }
@@ -150,24 +152,32 @@ impl StoreInner {
 pub const LOCK_POISONED_ERROR: &str = "RoutesStore lock poisoned";
 
 pub struct RoutesStore {
+    route_seed: String,
     inner: RwLock<StoreInner>,
 }
 
+impl Default for RoutesStore {
+    fn default() -> Self {
+        Self::new("link-start")
+    }
+}
+
 impl RoutesStore {
-    pub fn new() -> Self {
+    pub fn new(route_seed: impl Into<String>) -> Self {
         Self {
+            route_seed: route_seed.into(),
             inner: RwLock::new(StoreInner::default()),
         }
     }
 
     pub fn insert(&self, entry: Arc<MetadataAndSpec>) -> Option<Arc<MetadataAndSpec>> {
         let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
-        inner.insert(entry)
+        inner.insert(entry, &self.route_seed)
     }
 
     pub fn remove(&self, key: &str) -> Option<Arc<MetadataAndSpec>> {
         let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
-        inner.remove(key)
+        inner.remove(key, &self.route_seed)
     }
 
     pub fn get_tls_route(&self, hostname: &str) -> Option<Arc<MetadataAndSpec>> {
@@ -189,12 +199,11 @@ impl RoutesStore {
         let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
         let route = inner.get_route(key)?;
         let tls = route.spec.tls.as_ref()?;
-        let prefix = tls
-            .prefix
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&route.name);
-        Some(derive_hostname(prefix, &route.namespaced_name()))
+        Some(derive_hostname(
+            &self.route_seed,
+            &route.namespaced_name(),
+            tls,
+        ))
     }
 
     pub fn clear(&self) {
@@ -210,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_routes_store_lifecycle() {
-        let store = RoutesStore::new();
+        let store = RoutesStore::default();
 
         let spec = CTFRouteSpec {
             backend: CTFRouteBackend {
@@ -238,7 +247,14 @@ mod tests {
         let prev = store.insert(entry);
         assert!(prev.is_none());
 
-        let host = derive_hostname("web", "default:test-chal");
+        let host = derive_hostname(
+            "link-start",
+            "default:test-chal",
+            &CTFRouteSpecTLS {
+                prefix: Some("web".to_string()),
+                ..Default::default()
+            },
+        );
         let tls_found = store.get_tls_route(&host);
         assert!(tls_found.is_some());
         assert_eq!(tls_found.unwrap().namespaced_name(), namespaced_name);
@@ -261,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_tls_tag_update_and_removal_lifecycle() {
-        let store = RoutesStore::new();
+        let store = RoutesStore::default();
         let key = "default:chal-web".to_string();
 
         let mut spec = CTFRouteSpec {
@@ -275,7 +291,7 @@ mod tests {
             ..Default::default()
         };
 
-        let host_v1 = derive_hostname("v1", "default:chal-web");
+        let host_v1 = derive_hostname("link-start", "default:chal-web", spec.tls.as_ref().unwrap());
 
         // Initial insert with tag "v1"
         store.insert(Arc::new(MetadataAndSpec {
@@ -319,7 +335,10 @@ mod tests {
         );
 
         // Update with new tag "v2" -> host_v1 should be deregistered, host_v2 registered
-        let host_v2 = derive_hostname("v2", "default:chal-web");
+        spec.tls = Some(CTFRouteSpecTLS {
+            prefix: Some("v2".to_string()),
+        });
+        let host_v2 = derive_hostname("link-start", "default:chal-web", spec.tls.as_ref().unwrap());
         spec.tls = Some(CTFRouteSpecTLS {
             prefix: Some("v2".to_string()),
         });
@@ -359,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_generation_edge_cases_and_unsynced_filtering() {
-        let store = RoutesStore::new();
+        let store = RoutesStore::default();
 
         // Edge Case: 1 vs None -> unsynced
         let key2 = "default:r2".to_string();
@@ -419,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_sni_subdomain_extraction_and_nonexistent_routes() {
-        let store = RoutesStore::new();
+        let store = RoutesStore::default();
 
         // Non-existent route lookups
         assert!(store.get_route("nonexistent:key").is_none());
@@ -440,7 +459,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let host = derive_hostname("web", "prod:chal-sni");
+        let host = derive_hostname("link-start", "prod:chal-sni", spec.tls.as_ref().unwrap());
 
         store.insert(Arc::new(MetadataAndSpec {
             name: "chal-sni".into(),
@@ -461,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_tls_transition_none_to_some() {
-        let store = RoutesStore::new();
+        let store = RoutesStore::default();
         let key = "default:chal-none-to-some".to_string();
 
         // Initial insert with NO TLS (prev_tls = None)
@@ -496,7 +515,11 @@ mod tests {
             spec: spec.clone(),
         }));
 
-        let host = derive_hostname("web", "default:chal-none-to-some");
+        let host = derive_hostname(
+            "link-start",
+            "default:chal-none-to-some",
+            spec.tls.as_ref().unwrap(),
+        );
         assert_eq!(store.get_hostname(&key), Some(host.clone()));
         assert!(store.get_tls_route(&host).is_some());
     }
@@ -531,7 +554,7 @@ mod tests {
             .with_max_level(tracing::Level::INFO)
             .try_init();
 
-        let store = RoutesStore::new();
+        let store = RoutesStore::default();
         let _key = "default:chal-relog".to_string();
 
         let mut spec = CTFRouteSpec {
@@ -579,9 +602,18 @@ mod tests {
 
     #[test]
     fn test_derive_hostname_prefix_and_default() {
-        let host1 = derive_hostname("my-chal", "default:r1");
-        let host2 = derive_hostname("web", "default:r1");
-        let host3 = derive_hostname("my-chal", "default:r2");
+        let tls1 = CTFRouteSpecTLS {
+            prefix: Some("my-chal".to_string()),
+        };
+        let tls2 = CTFRouteSpecTLS {
+            prefix: Some("web".to_string()),
+        };
+        let tls3 = CTFRouteSpecTLS {
+            prefix: Some("my-chal".to_string()),
+        };
+        let host1 = derive_hostname("link-start", "default:r1", &tls1);
+        let host2 = derive_hostname("link-start", "default:r1", &tls2);
+        let host3 = derive_hostname("link-start", "default:r2", &tls3);
 
         assert!(host1.starts_with("my-chal-"));
         assert!(host2.starts_with("web-"));
@@ -605,14 +637,26 @@ mod tests {
 
     #[test]
     fn test_derive_hostname_collision_prevention() {
-        let h1 = derive_hostname("web-chal1-service1-team1", "ns:a");
-        let h2 = derive_hostname("web-chal1-service2-team1", "ns:b");
+        let tls1 = CTFRouteSpecTLS {
+            prefix: Some("web-chal1-service1-team1".to_string()),
+        };
+        let tls2 = CTFRouteSpecTLS {
+            prefix: Some("web-chal1-service2-team1".to_string()),
+        };
+        let h1 = derive_hostname("link-start", "ns:a", &tls1);
+        let h2 = derive_hostname("link-start", "ns:b", &tls2);
         assert!(h1.starts_with("web-chal1-service1-team1-"));
         assert!(h2.starts_with("web-chal1-service2-team1-"));
         assert_ne!(h1, h2);
 
-        let h_metadata = derive_hostname("web", "ns:c");
-        let h_key = derive_hostname("chal-web", "ns:c");
+        let tls_web = CTFRouteSpecTLS {
+            prefix: Some("web".to_string()),
+        };
+        let tls_chal_web = CTFRouteSpecTLS {
+            prefix: Some("chal-web".to_string()),
+        };
+        let h_metadata = derive_hostname("link-start", "ns:c", &tls_web);
+        let h_key = derive_hostname("link-start", "ns:c", &tls_chal_web);
         assert_ne!(h_metadata, h_key);
     }
 
