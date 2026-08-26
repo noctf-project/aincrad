@@ -8,13 +8,15 @@ use kube::{
     runtime::{
         WatchStreamExt,
         controller::{Action, Controller},
-        reflector::{reflector, store},
+        reflector::{ObjectRef, reflector, store},
         watcher::{Config, Event, watcher},
     },
 };
 use tracing::{error, info, instrument};
 
-use crate::{Context, Error, reconcilers, utils::ttl::calculate_remaining_ttl};
+use crate::{
+    Context, Error, reconcilers, utils::ttl::calculate_remaining_ttl,
+};
 
 /// Reconciles a single `CTFInstance` resource state.
 #[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
@@ -97,6 +99,94 @@ pub fn error_policy(instance: Arc<CTFInstance>, error: &Error, _ctx: Arc<Context
     Action::requeue(Duration::from_secs(backoff_secs))
 }
 
+/// Maps a `CTFTemplate` update event to a vector of `ObjectRef<CTFInstance>` for all instances
+/// in the same namespace referencing the template that have `spec.sync == true`.
+pub fn find_synced_instances(
+    template: &CTFTemplate,
+    instances: &[Arc<CTFInstance>],
+) -> Vec<ObjectRef<CTFInstance>> {
+    let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
+    let tmpl_ns = template.metadata.namespace.as_deref().unwrap_or("default");
+
+    instances
+        .iter()
+        .filter(|inst| {
+            let inst_ns = inst.metadata.namespace.as_deref().unwrap_or("default");
+            inst_ns == tmpl_ns && inst.spec.template == tmpl_name && inst.spec.sync
+        })
+        .map(|inst| ObjectRef::from_obj(&**inst))
+        .collect()
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Handles watcher events for `CTFInstance` to update or clear the in-memory index.
+pub fn handle_instance_watcher_event(
+    event: Event<CTFInstance>,
+    cache: &crate::cache::InstanceCache,
+) {
+    match event {
+        Event::Apply(inst) | Event::InitApply(inst) => {
+            cache.update(&inst);
+        }
+        Event::Delete(inst) => {
+            cache.remove(&inst);
+        }
+        Event::Init => {
+            cache.clear();
+            info!("Cleared instance index on watcher init");
+        }
+        Event::InitDone => {}
+    }
+}
+
+/// Handles watcher events for `CTFTemplate` to evict updated or deleted entries from the patcher cache.
+pub fn handle_template_watcher_event(
+    event: Result<Event<CTFTemplate>, kube::runtime::watcher::Error>,
+    cache: &crate::cache::TemplateCache,
+) {
+    match event {
+        Ok(Event::Apply(t)) | Ok(Event::Delete(t)) | Ok(Event::InitApply(t)) => {
+            let name = t.metadata.name.as_deref().unwrap_or_default();
+            let ns = t.metadata.namespace.as_deref().unwrap_or("default");
+            let cache_key = format!("{ns}/{name}");
+            cache.remove(&cache_key);
+            info!(cache_key = %cache_key, "Evicted updated/deleted CTFTemplate from patcher cache");
+        }
+        Ok(Event::Init) => {
+            cache.clear();
+            info!("Cleared all entries from CTFTemplate patcher cache on watcher init");
+        }
+        Ok(Event::InitDone) => {}
+        Err(err) => {
+            error!(%err, "CTFTemplate watcher error");
+        }
+    }
+}
+
+/// Spawns a background task to process a reflector stream.
+fn spawn_reflector_watcher<S, K>(stream: S, kind: &'static str) -> AbortOnDrop
+where
+    S: futures::Stream<Item = Result<K, kube::runtime::watcher::Error>> + Send + 'static,
+    K: Send + Sync + 'static,
+{
+    let task = tokio::spawn(async move {
+        tokio::pin!(stream);
+        while let Some(res) = stream.next().await {
+            if let Err(err) = res {
+                error!(kind, %err, "Reflector watcher error");
+            }
+        }
+    });
+    AbortOnDrop(task)
+}
+
 /// Spawns and runs the `CTFInstance` controller loop.
 pub async fn run(client: Client) {
     let instances = Api::<CTFInstance>::all(client.clone());
@@ -113,54 +203,49 @@ pub async fn run(client: Client) {
         watcher(templates.clone(), Config::default()),
     );
 
+    // Initialize in-memory CTFInstance reflector store cache for watches mapping
+    let (instance_store, instance_writer) = store();
+    let instance_reflector = reflector(
+        instance_writer,
+        watcher(instances.clone(), Config::default()),
+    );
+
     let context = Arc::new(Context::with_template_store(client, template_store));
 
-    struct AbortOnDrop(tokio::task::JoinHandle<()>);
-    impl Drop for AbortOnDrop {
-        fn drop(&mut self) {
-            self.0.abort();
-        }
-    }
+    let _tmpl_store_guard =
+        spawn_reflector_watcher(template_reflector.touched_objects(), "CTFTemplate");
+    let _inst_store_guard =
+        spawn_reflector_watcher(instance_reflector.touched_objects(), "CTFInstance");
 
-    // Spawn background task to update in-memory template store
-    let reflector_task = tokio::spawn(async move {
-        let stream = template_reflector.touched_objects();
-        tokio::pin!(stream);
-        while let Some(res) = stream.next().await {
-            if let Err(err) = res {
-                error!(%err, "CTFTemplate reflector watcher error");
-            }
-        }
-    });
-    let _reflector_guard = AbortOnDrop(reflector_task);
+    use crate::cache::InstanceCache;
+    let instance_cache = InstanceCache::new(instance_store);
 
-    // Spawn background task to watch CTFTemplate events and evict updated/deleted templates from patcher cache
-    let template_cache_watcher = context.template_cache.clone();
-    let templates_watcher_api = templates.clone();
-    let cache_task = tokio::spawn(async move {
-        let watcher_stream = watcher(templates_watcher_api, Config::default());
+    // Spawn background task to watch CTFInstance events and update index
+    let instance_cache_task = instance_cache.clone();
+    let instances_watcher_api = instances.clone();
+    let instance_watcher_task = tokio::spawn(async move {
+        let watcher_stream = watcher(instances_watcher_api, Config::default());
         tokio::pin!(watcher_stream);
         while let Some(res) = watcher_stream.next().await {
             match res {
-                Ok(Event::Apply(t)) | Ok(Event::Delete(t)) | Ok(Event::InitApply(t)) => {
-                    let name = t.metadata.name.as_deref().unwrap_or_default();
-                    let ns = t.metadata.namespace.as_deref().unwrap_or("default");
-                    let cache_key = format!("{ns}/{name}");
-                    template_cache_watcher.remove(&cache_key);
-                    info!(cache_key = %cache_key, "Evicted updated/deleted CTFTemplate from patcher cache");
-                }
-                Ok(Event::Init) => {
-                    template_cache_watcher.clear();
-                    info!("Cleared all entries from CTFTemplate patcher cache on watcher init");
-                }
-                Ok(Event::InitDone) => {}
-                Err(err) => {
-                    error!(%err, "CTFTemplate watcher error");
-                }
+                Ok(event) => handle_instance_watcher_event(event, &instance_cache_task),
+                Err(err) => error!(%err, "CTFInstance watcher error"),
             }
         }
     });
-    let _cache_watcher_guard = AbortOnDrop(cache_task);
+    let _instance_watcher_guard = AbortOnDrop(instance_watcher_task);
+
+    // Spawn background task to watch CTFTemplate events and evict entries from patcher cache
+    let template_cache_watcher = context.template_cache.clone();
+    let templates_watcher_api = templates.clone();
+    let template_watcher_task = tokio::spawn(async move {
+        let watcher_stream = watcher(templates_watcher_api, Config::default());
+        tokio::pin!(watcher_stream);
+        while let Some(res) = watcher_stream.next().await {
+            handle_template_watcher_event(res, &template_cache_watcher);
+        }
+    });
+    let _template_watcher_guard = AbortOnDrop(template_watcher_task);
 
     info!("Starting CTFInstance controller with template caching");
 
@@ -171,14 +256,13 @@ pub async fn run(client: Client) {
         .owns(network_policies, child_config.clone())
         .owns(ctf_routes, child_config.clone())
         .owns(services, child_config)
-        .watches(templates, Config::default(), |template| {
-            // Watch CTFTemplates and trigger reconciliation for CTFInstances referencing the template
-            let name = template.metadata.name.as_deref().unwrap_or_default();
+        .watches(templates, Config::default(), move |template| {
+            let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
             info!(
-                template_name = name,
-                "CTFTemplate updated, triggering watch evaluation"
+                template_name = tmpl_name,
+                "CTFTemplate updated, evaluating synced CTFInstances to retrigger"
             );
-            None::<kube::runtime::reflector::ObjectRef<CTFInstance>>
+            instance_cache.find_synced_instances(&template)
         })
         .run(reconcile, error_policy, context)
         .for_each(|res| async {
@@ -351,5 +435,137 @@ mod tests {
         let err_transient = Error::Custom("failed to connect".into());
         let action_transient = error_policy(instance, &err_transient, ctx);
         assert_eq!(action_transient, Action::requeue(Duration::from_secs(15)));
+    }
+
+    #[tokio::test]
+    async fn test_find_synced_instances() {
+        let tmpl = CTFTemplate::new(
+            "whoami-template",
+            k8s_common::crd::CTFTemplateSpec::default(),
+        );
+
+        let inst_sync_true = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("inst-1".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                sync: true,
+                ..Default::default()
+            },
+            status: None,
+        });
+
+        let inst_sync_false = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("inst-2".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                sync: false,
+                ..Default::default()
+            },
+            status: None,
+        });
+
+        let inst_other_tmpl = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("inst-3".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "other-template".into(),
+                sync: true,
+                ..Default::default()
+            },
+            status: None,
+        });
+
+        let inst_other_ns = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("inst-4".into()),
+                namespace: Some("other-ns".into()),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                sync: true,
+                ..Default::default()
+            },
+            status: None,
+        });
+
+        let instances = vec![
+            inst_sync_true,
+            inst_sync_false,
+            inst_other_tmpl,
+            inst_other_ns,
+        ];
+        let matched = find_synced_instances(&tmpl, &instances);
+
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].name, "inst-1");
+        assert_eq!(matched[0].namespace.as_deref(), Some("default"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_instance_watcher_event() {
+        let (store, _writer) = kube::runtime::reflector::store();
+        let cache = InstanceCache::new(store);
+        let tmpl = CTFTemplate::new(
+            "whoami-template",
+            k8s_common::crd::CTFTemplateSpec::default(),
+        );
+
+        let inst = CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("inst-1".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                sync: true,
+                ..Default::default()
+            },
+            status: None,
+        };
+
+        handle_instance_watcher_event(Event::Apply(inst.clone()), &cache);
+        assert_eq!(cache.find_synced_instances(&tmpl).len(), 1);
+
+        handle_instance_watcher_event(Event::Delete(inst), &cache);
+        assert_eq!(cache.find_synced_instances(&tmpl).len(), 0);
+
+        handle_instance_watcher_event(Event::Init, &cache);
+        assert_eq!(cache.find_synced_instances(&tmpl).len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_template_watcher_event() {
+        let cache = crate::cache::TemplateCache::new();
+        let tmpl = CTFTemplate::new(
+            "whoami-template",
+            k8s_common::crd::CTFTemplateSpec::default(),
+        );
+
+        // Populate cache
+        cache
+            .get_or_compile("default/whoami-template", 1, &[])
+            .unwrap();
+
+        // Test Apply event evicts entry
+        handle_template_watcher_event(Ok(Event::Apply(tmpl.clone())), &cache);
+
+        // Test Init event clears cache
+        cache
+            .get_or_compile("default/whoami-template", 1, &[])
+            .unwrap();
+        handle_template_watcher_event(Ok(Event::Init), &cache);
     }
 }

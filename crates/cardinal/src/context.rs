@@ -2,7 +2,7 @@ use k8s_common::crd::CTFTemplate;
 use kube::Client;
 use kube::runtime::reflector::Store;
 
-use crate::reconcilers::template::TemplateCache;
+use crate::cache::TemplateCache;
 
 /// Contextual data shared across controller reconciliation passes.
 #[derive(Clone)]

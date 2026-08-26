@@ -170,9 +170,10 @@ impl SpecPatcher {
         // First try string patch (preserves string fields like EnvVar values with numbers "8080")
         let mut doc = base_doc.clone();
         if json_patch::patch(&mut doc, &string_patch).is_ok()
-            && let Ok(res) = serde_json::from_value::<T>(doc) {
-                return Ok(res);
-            }
+            && let Ok(res) = serde_json::from_value::<T>(doc)
+        {
+            return Ok(res);
+        }
 
         // Fall back to coerced patch (for numeric/boolean struct fields like activeDeadlineSeconds)
         let mut doc = base_doc;

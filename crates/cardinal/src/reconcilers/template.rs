@@ -1,91 +1,14 @@
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
 
-use k8s_common::{
-    SpecPatcher,
-    crd::{CTFInstance, CTFTemplate, CTFTemplateSpec, CTFTemplateSpecPod, PatchValue},
-};
+use k8s_common::crd::{CTFInstance, CTFTemplate, CTFTemplateSpec, CTFTemplateSpecPod, PatchValue};
 use k8s_openapi::api::core::v1::PodSpec;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Api;
 use tracing::instrument;
 
-use crate::{Context, Error, resources::replicaset::POD_PATCH_BLACKLIST};
+use crate::{Context, Error};
 
-pub type PodPatchersMap = Arc<HashMap<String, Option<SpecPatcher>>>;
-
-#[derive(Debug, Clone)]
-pub struct CachedTemplateEntry {
-    pub generation: i64,
-    pub pod_patchers: Result<PodPatchersMap, String>,
-}
-
-/// In-memory cache of compiled SpecPatchers for CTFTemplates keyed by "namespace/name".
-/// Caches both successful SpecPatcher maps and failed compilation errors per generation.
-#[derive(Debug, Clone, Default)]
-pub struct TemplateCache {
-    cache: Arc<Mutex<HashMap<String, CachedTemplateEntry>>>,
-}
-
-impl TemplateCache {
-    pub fn new() -> Self {
-        Self {
-            cache: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    /// Looks up or compiles and caches the `PodPatchersMap` for a CTFTemplate generation.
-    pub fn get_or_compile(
-        &self,
-        key: &str,
-        generation: i64,
-        pods: &[CTFTemplateSpecPod],
-    ) -> Result<PodPatchersMap, String> {
-        {
-            let lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = lock.get(key)
-                && entry.generation == generation
-            {
-                return entry.pod_patchers.clone();
-            }
-        }
-
-        let compiled_result = compile_pod_patchers(pods);
-        let entry = CachedTemplateEntry {
-            generation,
-            pod_patchers: compiled_result.clone(),
-        };
-
-        let mut lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        lock.insert(key.to_string(), entry);
-        compiled_result
-    }
-
-    /// Removes a template entry from the cache (e.g. when deleted, updated, or dropped).
-    pub fn remove(&self, key: &str) {
-        let mut lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        lock.remove(key);
-    }
-
-    /// Clears all entries from the template cache (e.g. on watcher resync).
-    pub fn clear(&self) {
-        let mut lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        lock.clear();
-    }
-}
-
-fn compile_pod_patchers(pods: &[CTFTemplateSpecPod]) -> Result<PodPatchersMap, String> {
-    let mut pod_patchers = HashMap::new();
-    for pod in pods {
-        let patcher = if let Some(patch) = &pod.patch {
-            Some(SpecPatcher::new(&POD_PATCH_BLACKLIST, patch.clone())?)
-        } else {
-            None
-        };
-        pod_patchers.insert(pod.name.clone(), patcher);
-    }
-    Ok(Arc::new(pod_patchers))
-}
+pub use crate::cache::{CachedTemplateEntry, PodPatchersMap, TemplateCache};
 
 /// Resolved CTFTemplate with merged parameter map and pre-compiled SpecPatchers for pod JSON patches.
 #[derive(Debug, Clone)]
@@ -198,9 +121,13 @@ fn map_insert_param(map: &mut BTreeMap<String, String>, name: String, val: Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::replicaset::POD_PATCH_BLACKLIST;
+    use k8s_common::SpecPatcher;
     use k8s_common::crd::{CTFInstanceSpec, CTFInstanceSpecParam, CTFTemplateSpecParam};
     use k8s_openapi::api::core::v1::Container;
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[test]
     fn test_merge_template_params_override_and_remove() {
