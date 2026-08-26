@@ -93,10 +93,11 @@ where
 
     for existing in list {
         if let Some(name) = existing.meta().name.as_deref()
-            && !desired_names.contains(name) {
-                info!(name, "Orphaned child resource detected, deleting...");
-                let _ = api.delete(name, &Default::default()).await;
-            }
+            && !desired_names.contains(name)
+        {
+            info!(name, "Orphaned child resource detected, deleting...");
+            let _ = api.delete(name, &Default::default()).await;
+        }
     }
 
     Ok(())

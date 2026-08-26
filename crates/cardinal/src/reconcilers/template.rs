@@ -44,9 +44,10 @@ impl TemplateCache {
         let mut lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Some(entry) = lock.get(key)
-            && entry.generation == generation {
-                return entry.pod_patchers.clone();
-            }
+            && entry.generation == generation
+        {
+            return entry.pod_patchers.clone();
+        }
 
         let compiled_result = compile_pod_patchers(pods);
         let entry = CachedTemplateEntry {

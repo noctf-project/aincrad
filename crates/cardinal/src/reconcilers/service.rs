@@ -6,12 +6,13 @@ use kube::Api;
 use tracing::instrument;
 
 use crate::{
-    Context, Error,
+    Context, Error, btreemap,
     reconcilers::{
         helper::{prune_orphaned_resources, reconcile_child_resource},
         template::ResolvedTemplate,
     },
-    resources::build_headless_service,
+    resources::build_headless_service_spec,
+    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL},
     utils::naming::resource_name,
 };
 
@@ -35,8 +36,19 @@ pub async fn reconcile(
         let svc_name = resource_name(instance_name, &pod.name);
         desired_names.insert(svc_name.clone());
 
+        let labels = btreemap! {
+            MANAGED_BY_LABEL => MANAGED_BY_VALUE,
+            INSTANCE_LABEL => instance_name,
+            POD_LABEL => pod.name.as_str(),
+        };
+
         reconcile_child_resource(&services, &svc_name, instance_gen, target_gen, sync, || {
-            build_headless_service(instance_name, pod, Some(ns))
+            let mut svc = Service::default();
+            svc.metadata.name = Some(svc_name.clone());
+            svc.metadata.namespace = Some(ns.to_string());
+            svc.metadata.labels = Some(labels.clone());
+            svc.spec = Some(build_headless_service_spec(instance_name, pod));
+            svc
         })
         .await?;
     }
