@@ -1,7 +1,11 @@
+use aincrad_macros::{BorrowedHash, BorrowedKey, Equivalent};
+
 pub mod ports;
 pub mod routes;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, BorrowedKey, BorrowedHash, Equivalent,
+)]
 pub struct RouteKey {
     pub namespace: String,
     pub name: String,
@@ -9,17 +13,6 @@ pub struct RouteKey {
 
 impl std::fmt::Display for RouteKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.namespace, self.name)
-    }
-}
-
-impl std::str::FromStr for RouteKey {
-    type Err = &'static str;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (namespace, name) = s.split_once(':').ok_or("missing colon delimiter")?;
-        Ok(Self {
-            namespace: namespace.to_string(),
-            name: name.to_string(),
-        })
+        write!(f, "{}/{}", self.namespace, self.name)
     }
 }

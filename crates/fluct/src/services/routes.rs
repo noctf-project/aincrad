@@ -69,7 +69,7 @@ impl RoutesService {
         let mut conditions = Vec::new();
         let key = route.route_key();
         let namespaced_name = key.to_string();
-        let tcp_reserve = self.ports.reserve(&namespaced_name, route.spec.port);
+        let tcp_reserve = self.ports.reserve(&key, route.spec.port);
 
         let tcp_endpoint = match tcp_reserve {
             Ok(Some(r)) => {
@@ -196,7 +196,7 @@ impl RoutesService {
                     .and_then(|status| status.endpoints.as_ref())
                     .and_then(|endpoints| endpoints.tcp.as_ref())
                     .map(|tcp| tcp.port);
-                self.ports.insert(&key.to_string(), port);
+                self.ports.insert(&key, port);
 
                 if let Some(prev) = prev
                     && prev.generation == generation
@@ -212,7 +212,7 @@ impl RoutesService {
                 let route_key = RouteKey { namespace, name };
 
                 self.routes.remove(&route_key);
-                self.ports.insert(&route_key.to_string(), None);
+                self.ports.insert(&route_key, None);
                 info!("Removed route {}", route_key);
                 None
             }
@@ -324,7 +324,7 @@ impl RoutesService {
                         continue;
                     }
                     let status_updates = buffer.drain(..).dedup_last().filter_map(|arc| {
-                        let metadata = self.routes.get_route(&arc.route_key())?;
+                        let metadata = self.routes.get_route(&arc.route_key_ref())?;
                         let (full, status) = self.desired_status(metadata.generation, &metadata);
                         Some(async move {
                             self.update_status(&full, status)
@@ -358,8 +358,7 @@ impl RoutesService {
     }
 
     pub fn get_route_from_port(&self, port: u16) -> Option<Arc<MetadataAndSpec>> {
-        let key_str = self.ports.active_route(port)?;
-        let key: RouteKey = key_str.parse().ok()?;
+        let key = self.ports.active_route(port)?;
         self.routes.get_route(&key)
     }
 
@@ -430,14 +429,18 @@ mod tests {
             observed_generation: None,
             spec,
         }));
-        store.ports.insert("default:my-chal", Some(20001));
+        let key = RouteKey {
+            namespace: "default".into(),
+            name: "my-chal".into(),
+        };
+        store.ports.insert(&key, Some(20001));
 
         let active_ports = store.get_active_ports();
         assert!(active_ports.contains(&20001));
 
         let found = store.get_route_from_port(20001);
         assert!(found.is_some());
-        assert_eq!(found.unwrap().namespaced_name(), "default:my-chal");
+        assert_eq!(found.unwrap().namespaced_name(), "default/my-chal");
 
         assert!(store.get_route_from_port(20002).is_none());
     }
@@ -640,7 +643,7 @@ mod tests {
         };
 
         let (full, status) = store.desired_status(5, &route);
-        assert_eq!(full, "prod:my-challenge");
+        assert_eq!(full, "prod/my-challenge");
         assert_eq!(status.observed_generation, Some(5));
 
         let expected_hostname = store.format_tls_host(&key).unwrap();
@@ -657,7 +660,11 @@ mod tests {
     #[tokio::test]
     async fn test_desired_status_port_occupied_error() {
         let store = make_store(".example.com");
-        store.ports.reserve("prod:r1", Some(20001)).unwrap();
+        let key_r1 = RouteKey {
+            namespace: "prod".into(),
+            name: "r1".into(),
+        };
+        store.ports.reserve(&key_r1, Some(20001)).unwrap();
 
         let spec = CTFRouteSpec {
             port: Some(20001),

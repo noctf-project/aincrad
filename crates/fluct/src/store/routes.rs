@@ -1,14 +1,11 @@
 use k8s_common::crd::{CTFRouteSpec, CTFRouteStatus};
 use regex::Regex;
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock, RwLock},
-};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use tracing::info;
 
 use crate::crypto::hash::derive_key;
-use crate::store::RouteKey;
+use crate::store::{RouteKey, RouteKeyRef};
 
 const HOSTNAME_ID_LEN: usize = 14;
 pub type CTFRouteStatusPair = (String, CTFRouteStatus);
@@ -75,6 +72,13 @@ impl MetadataAndSpec {
         }
     }
 
+    pub fn route_key_ref(&self) -> RouteKeyRef<'_> {
+        RouteKeyRef {
+            namespace: &self.namespace,
+            name: &self.name,
+        }
+    }
+
     pub fn namespaced_name(&self) -> String {
         self.route_key().to_string()
     }
@@ -82,8 +86,8 @@ impl MetadataAndSpec {
 
 #[derive(Default)]
 struct StoreInner {
-    routes: HashMap<RouteKey, Arc<MetadataAndSpec>>,
-    tls: HashMap<String, Arc<MetadataAndSpec>>,
+    routes: hashbrown::HashMap<RouteKey, Arc<MetadataAndSpec>>,
+    tls: hashbrown::HashMap<String, Arc<MetadataAndSpec>>,
 }
 
 impl StoreInner {
@@ -135,7 +139,10 @@ impl StoreInner {
         self.tls.get(clean_host).cloned()
     }
 
-    fn get_route(&self, key: &RouteKey) -> Option<Arc<MetadataAndSpec>> {
+    fn get_route<Q>(&self, key: &Q) -> Option<Arc<MetadataAndSpec>>
+    where
+        Q: hashbrown::Equivalent<RouteKey> + std::hash::Hash + ?Sized,
+    {
         self.routes.get(key).cloned()
     }
 
@@ -189,7 +196,10 @@ impl RoutesStore {
         inner.get_tls_route(hostname)
     }
 
-    pub fn get_route(&self, key: &RouteKey) -> Option<Arc<MetadataAndSpec>> {
+    pub fn get_route<Q>(&self, key: &Q) -> Option<Arc<MetadataAndSpec>>
+    where
+        Q: hashbrown::Equivalent<RouteKey> + std::hash::Hash + ?Sized,
+    {
         let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
         inner.get_route(key)
     }
@@ -614,7 +624,7 @@ mod tests {
 
         let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(
-            output.contains("Registering route default:chal-relog"),
+            output.contains("Registering route default/chal-relog"),
             "Expected 'Registering route' log on same-TLS re-registration, but got: '{output}'"
         );
     }

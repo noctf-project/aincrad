@@ -1,8 +1,8 @@
-use std::{collections::HashMap, sync::RwLock};
+use std::sync::RwLock;
 use thiserror::Error;
 use tracing::info;
 
-use crate::{config::PortRange, util::port_finder::PortFinderFactory};
+use crate::{config::PortRange, store::RouteKey, util::port_finder::PortFinderFactory};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortAllocation<T> {
@@ -18,7 +18,7 @@ pub enum PortError {
     #[error("port {0} is outside reserved range")]
     OutOfRange(u16),
     #[error("port {0} is already occupied by route '{1}'")]
-    Occupied(u16, String),
+    Occupied(u16, RouteKey),
     #[error("auto port pool is exhausted")]
     Exhausted,
 }
@@ -32,26 +32,30 @@ pub enum PortSyncResult {
 }
 
 struct Inner {
-    bindings: Vec<Option<PortAllocation<String>>>,
-    mappings: HashMap<String, PortAllocation<u16>>,
+    bindings: Vec<Option<PortAllocation<RouteKey>>>,
+    mappings: hashbrown::HashMap<RouteKey, PortAllocation<u16>>,
     range_auto: PortRange,
     finder: PortFinderFactory,
 }
 
 impl Inner {
-    fn reserve(&mut self, spec: &str, port: u16) -> Result<Option<PortAllocation<u16>>, PortError> {
+    fn reserve(
+        &mut self,
+        spec: &RouteKey,
+        port: u16,
+    ) -> Result<Option<PortAllocation<u16>>, PortError> {
         // Allocate fixed
         if port != 0 {
             if let Some(allocation) = &self.bindings[port as usize] {
                 let owner = match allocation {
-                    PortAllocation::Intended(s) => s.as_str(),
-                    PortAllocation::Pending { next, .. } => next.as_str(),
+                    PortAllocation::Intended(s) => s,
+                    PortAllocation::Pending { next, .. } => next,
                 };
 
                 if owner == spec {
                     return Ok(self.mappings.get(spec).cloned());
                 }
-                return Err(PortError::Occupied(port, owner.to_string()));
+                return Err(PortError::Occupied(port, owner.clone()));
             }
 
             self.remove_pending(spec);
@@ -62,15 +66,15 @@ impl Inner {
             });
 
             self.bindings[port as usize] = Some(PortAllocation::Pending {
-                current: current_port.map(|_| spec.to_string()),
-                next: spec.to_string(),
+                current: current_port.map(|_| spec.clone()),
+                next: spec.clone(),
             });
 
             let alloc = PortAllocation::Pending {
                 current: current_port,
                 next: port,
             };
-            self.mappings.insert(spec.to_string(), alloc.clone());
+            self.mappings.insert(spec.clone(), alloc.clone());
             return Ok(Some(alloc));
         }
 
@@ -106,7 +110,7 @@ impl Inner {
             _ => None,
         });
 
-        let cycle = self.finder.cycle(spec);
+        let cycle = self.finder.cycle(&spec.to_string());
         let mut allocated_port = None;
 
         for candidate in cycle {
@@ -118,19 +122,19 @@ impl Inner {
         let candidate = allocated_port.ok_or(PortError::Exhausted)?;
 
         self.bindings[candidate as usize] = Some(PortAllocation::Pending {
-            current: current_port.map(|_| spec.to_string()),
-            next: spec.to_string(),
+            current: current_port.map(|_| spec.clone()),
+            next: spec.clone(),
         });
 
         let alloc = PortAllocation::Pending {
             current: current_port,
             next: candidate,
         };
-        self.mappings.insert(spec.to_string(), alloc.clone());
+        self.mappings.insert(spec.clone(), alloc.clone());
         Ok(Some(alloc))
     }
 
-    fn insert(&mut self, spec: &str, port: Option<u16>) -> PortSyncResult {
+    fn insert(&mut self, spec: &RouteKey, port: Option<u16>) -> PortSyncResult {
         let port = match port {
             Some(0) | None => {
                 let old_mapping = self.mappings.get(spec).cloned();
@@ -151,10 +155,10 @@ impl Inner {
 
         let idx = port as usize;
 
-        let old_binding = self.bindings[idx].replace(PortAllocation::Intended(spec.to_string()));
+        let old_binding = self.bindings[idx].replace(PortAllocation::Intended(spec.clone()));
         let old_mapping = self
             .mappings
-            .insert(spec.to_string(), PortAllocation::Intended(port));
+            .insert(spec.clone(), PortAllocation::Intended(port));
 
         let old_spec = match old_binding {
             Some(PortAllocation::Intended(s)) => Some(s),
@@ -169,7 +173,7 @@ impl Inner {
         };
 
         if let Some(s) = old_spec
-            && s != spec
+            && s != *spec
             && let Some(PortAllocation::Pending { next, .. }) = self.mappings.remove(&s)
             && next != port
         {
@@ -196,7 +200,7 @@ impl Inner {
         }
     }
 
-    fn remove_pending(&mut self, spec: &str) -> bool {
+    fn remove_pending(&mut self, spec: &RouteKey) -> bool {
         if matches!(
             self.mappings.get(spec),
             Some(PortAllocation::Pending { .. })
@@ -206,16 +210,15 @@ impl Inner {
 
             if let Some(current_port) = current {
                 self.mappings
-                    .insert(spec.to_string(), PortAllocation::Intended(current_port));
-                self.bindings[current_port as usize] =
-                    Some(PortAllocation::Intended(spec.to_string()));
+                    .insert(spec.clone(), PortAllocation::Intended(current_port));
+                self.bindings[current_port as usize] = Some(PortAllocation::Intended(spec.clone()));
             }
             return true;
         }
         false
     }
 
-    fn remove(&mut self, spec: &str) -> bool {
+    fn remove(&mut self, spec: &RouteKey) -> bool {
         if let Some(mapping) = self.mappings.remove(spec) {
             match mapping {
                 PortAllocation::Intended(port) => {
@@ -258,11 +261,11 @@ impl Inner {
         self.mappings.clear();
     }
 
-    fn get(&self, port: u16) -> Option<PortAllocation<String>> {
+    fn get(&self, port: u16) -> Option<PortAllocation<RouteKey>> {
         self.bindings[port as usize].clone()
     }
 
-    fn active_route(&self, port: u16) -> Option<String> {
+    fn active_route(&self, port: u16) -> Option<RouteKey> {
         self.bindings[port as usize].as_ref().and_then(|a| match a {
             PortAllocation::Intended(a) => Some(a.clone()),
             PortAllocation::Pending { current, .. } => current.clone(),
@@ -283,8 +286,11 @@ impl Inner {
             .collect()
     }
 
-    fn get_route(&self, spec: &str) -> Option<PortAllocation<u16>> {
-        self.mappings.get(spec).cloned()
+    fn get_route<Q>(&self, key: &Q) -> Option<PortAllocation<u16>>
+    where
+        Q: hashbrown::Equivalent<RouteKey> + std::hash::Hash + ?Sized,
+    {
+        self.mappings.get(key).cloned()
     }
 }
 
@@ -301,7 +307,7 @@ impl PortsStore {
             range_auto: range_auto.clone(),
             inner: RwLock::new(Inner {
                 bindings: vec![None; PORTS],
-                mappings: HashMap::new(),
+                mappings: hashbrown::HashMap::new(),
                 range_auto: range_auto.clone(),
                 finder: PortFinderFactory::new(&range_auto),
             }),
@@ -311,7 +317,7 @@ impl PortsStore {
     /// Reserves a port. This is a proposal so only needs to be called from the leader.
     pub fn reserve(
         &self,
-        spec: &str,
+        spec: &RouteKey,
         port: Option<u16>,
     ) -> Result<Option<PortAllocation<u16>>, PortError> {
         let port = match port {
@@ -334,7 +340,7 @@ impl PortsStore {
 
     /// Commits a port from an authoritative source into the tracking array.
     /// This will overwrite the existing allocation and should be called authoritatively.
-    pub fn insert(&self, spec: &str, port: Option<u16>) -> PortSyncResult {
+    pub fn insert(&self, spec: &RouteKey, port: Option<u16>) -> PortSyncResult {
         let mut table = self.inner.write().expect(LOCK_POISONED_ERROR);
         let result = table.insert(spec, port);
         match &result {
@@ -354,7 +360,7 @@ impl PortsStore {
 
     /// Removes a pending port from the table and return it.
     #[cfg(test)]
-    fn remove_pending(&self, spec: &str) -> bool {
+    fn remove_pending(&self, spec: &RouteKey) -> bool {
         let mut table = self.inner.write().expect(LOCK_POISONED_ERROR);
         table.remove_pending(spec)
     }
@@ -373,7 +379,7 @@ impl PortsStore {
 
     /// Gets the allocation (Active or Pending) if it exists.
     #[allow(dead_code)]
-    pub fn get(&self, port: u16) -> Option<PortAllocation<String>> {
+    pub fn get(&self, port: u16) -> Option<PortAllocation<RouteKey>> {
         if !self.range_reserved.contains(port) && !self.range_auto.contains(port) {
             return None;
         }
@@ -381,15 +387,15 @@ impl PortsStore {
     }
 
     #[allow(dead_code)]
-    pub fn get_route(&self, spec: &str) -> Option<PortAllocation<u16>> {
-        self.inner
-            .read()
-            .expect(LOCK_POISONED_ERROR)
-            .get_route(spec)
+    pub fn get_route<Q>(&self, key: &Q) -> Option<PortAllocation<u16>>
+    where
+        Q: hashbrown::Equivalent<RouteKey> + std::hash::Hash + ?Sized,
+    {
+        self.inner.read().expect(LOCK_POISONED_ERROR).get_route(key)
     }
 
     /// Returns the spec only if the service is Active
-    pub fn active_route(&self, port: u16) -> Option<String> {
+    pub fn active_route(&self, port: u16) -> Option<RouteKey> {
         if !self.range_reserved.contains(port) && !self.range_auto.contains(port) {
             return None;
         }
@@ -409,6 +415,13 @@ impl PortsStore {
 mod tests {
     use super::*;
 
+    fn k(s: &str) -> RouteKey {
+        RouteKey {
+            namespace: "default".into(),
+            name: s.into(),
+        }
+    }
+
     fn make_pm() -> PortsStore {
         PortsStore::new(PortRange(20000..=20010), PortRange(30000..=30010))
     }
@@ -416,8 +429,8 @@ mod tests {
     #[test]
     fn test_reserve_none() {
         let pm = make_pm();
-        pm.reserve("r1", Some(20001)).unwrap();
-        assert_eq!(pm.reserve("r1", None), Ok(None));
+        pm.reserve(&k("r1"), Some(20001)).unwrap();
+        assert_eq!(pm.reserve(&k("r1"), None), Ok(None));
         assert_eq!(pm.get(20001), None);
     }
 
@@ -425,7 +438,7 @@ mod tests {
     fn test_out_of_range() {
         let pm = make_pm();
         assert_eq!(
-            pm.reserve("r1", Some(10000)),
+            pm.reserve(&k("r1"), Some(10000)),
             Err(PortError::OutOfRange(10000))
         );
     }
@@ -433,7 +446,7 @@ mod tests {
     #[test]
     fn test_fixed_port_lifecycle() {
         let pm = make_pm();
-        let alloc = pm.reserve("r1", Some(20001)).unwrap().unwrap();
+        let alloc = pm.reserve(&k("r1"), Some(20001)).unwrap().unwrap();
         assert_eq!(
             alloc,
             PortAllocation::Pending {
@@ -443,14 +456,14 @@ mod tests {
         );
         assert_eq!(pm.active_route(20001), None);
 
-        pm.insert("r1", Some(20001));
-        assert_eq!(pm.active_route(20001), Some("r1".to_string()));
+        pm.insert(&k("r1"), Some(20001));
+        assert_eq!(pm.active_route(20001), Some(k("r1")));
     }
 
     #[test]
     fn test_auto_port_lifecycle() {
         let pm = make_pm();
-        let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
+        let alloc = pm.reserve(&k("r1"), Some(0)).unwrap().unwrap();
         let next_port = match alloc {
             PortAllocation::Pending {
                 current: None,
@@ -460,17 +473,17 @@ mod tests {
         };
         assert!(pm.range_auto.contains(next_port));
 
-        pm.insert("r1", Some(next_port));
-        assert_eq!(pm.active_route(next_port), Some("r1".to_string()));
+        pm.insert(&k("r1"), Some(next_port));
+        assert_eq!(pm.active_route(next_port), Some(k("r1")));
     }
 
     #[test]
     fn test_sync_none_deletes() {
         let pm = make_pm();
-        pm.insert("r1", Some(20001));
-        assert_eq!(pm.active_route(20001), Some("r1".to_string()));
+        pm.insert(&k("r1"), Some(20001));
+        assert_eq!(pm.active_route(20001), Some(k("r1")));
 
-        pm.insert("r1", None);
+        pm.insert(&k("r1"), None);
         assert_eq!(pm.active_route(20001), None);
         assert_eq!(pm.get(20001), None);
     }
@@ -478,67 +491,67 @@ mod tests {
     #[test]
     fn test_fixed_port_collision() {
         let pm = make_pm();
-        pm.reserve("r1", Some(20001)).unwrap();
+        pm.reserve(&k("r1"), Some(20001)).unwrap();
         assert_eq!(
-            pm.reserve("r2", Some(20001)),
-            Err(PortError::Occupied(20001, "r1".to_string()))
+            pm.reserve(&k("r2"), Some(20001)),
+            Err(PortError::Occupied(20001, k("r1")))
         );
     }
 
     #[test]
     fn test_auto_port_exhaustion() {
         let pm = PortsStore::new(PortRange(20000..=20010), PortRange(30000..=30001));
-        pm.reserve("r1", Some(0)).unwrap();
-        pm.reserve("r2", Some(0)).unwrap();
-        assert_eq!(pm.reserve("r3", Some(0)), Err(PortError::Exhausted));
+        pm.reserve(&k("r1"), Some(0)).unwrap();
+        pm.reserve(&k("r2"), Some(0)).unwrap();
+        assert_eq!(pm.reserve(&k("r3"), Some(0)), Err(PortError::Exhausted));
     }
 
     #[test]
     fn test_port_swap_conflict() {
         let pm = make_pm();
-        pm.insert("r1", Some(20001));
-        pm.insert("r2", Some(20002));
+        pm.insert(&k("r1"), Some(20001));
+        pm.insert(&k("r2"), Some(20002));
         assert_eq!(
-            pm.reserve("r1", Some(20002)),
-            Err(PortError::Occupied(20002, "r2".to_string()))
+            pm.reserve(&k("r1"), Some(20002)),
+            Err(PortError::Occupied(20002, k("r2")))
         );
     }
 
     #[test]
     fn test_reserve_idempotency() {
         let pm = make_pm();
-        let res1 = pm.reserve("r1", Some(20001)).unwrap();
-        let res2 = pm.reserve("r1", Some(20001)).unwrap();
+        let res1 = pm.reserve(&k("r1"), Some(20001)).unwrap();
+        let res2 = pm.reserve(&k("r1"), Some(20001)).unwrap();
         assert_eq!(res1, res2);
 
-        let res3 = pm.reserve("r2", Some(0)).unwrap();
-        let res4 = pm.reserve("r2", Some(0)).unwrap();
+        let res3 = pm.reserve(&k("r2"), Some(0)).unwrap();
+        let res4 = pm.reserve(&k("r2"), Some(0)).unwrap();
         assert_eq!(res3, res4);
     }
 
     #[test]
     fn test_reassign_auto_to_fixed() {
         let pm = make_pm();
-        let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
+        let alloc = pm.reserve(&k("r1"), Some(0)).unwrap().unwrap();
         let auto_port = match alloc {
             PortAllocation::Pending { next, .. } => next,
             _ => panic!("expected Pending"),
         };
-        pm.insert("r1", Some(auto_port));
+        pm.insert(&k("r1"), Some(auto_port));
 
-        pm.reserve("r1", Some(20001)).unwrap();
-        pm.insert("r1", Some(20001));
+        pm.reserve(&k("r1"), Some(20001)).unwrap();
+        pm.insert(&k("r1"), Some(20001));
 
-        assert_eq!(pm.active_route(20001), Some("r1".to_string()));
+        assert_eq!(pm.active_route(20001), Some(k("r1")));
         assert_eq!(pm.active_route(auto_port), None);
     }
 
     #[test]
     fn test_reassign_fixed_to_auto() {
         let pm = make_pm();
-        pm.insert("r1", Some(20001));
+        pm.insert(&k("r1"), Some(20001));
 
-        let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
+        let alloc = pm.reserve(&k("r1"), Some(0)).unwrap().unwrap();
         let next_port = match alloc {
             PortAllocation::Pending {
                 current: Some(20001),
@@ -547,18 +560,18 @@ mod tests {
             _ => panic!("expected Pending with current: Some(20001)"),
         };
         assert!(pm.range_auto.contains(next_port));
-        pm.insert("r1", Some(next_port));
+        pm.insert(&k("r1"), Some(next_port));
 
-        assert_eq!(pm.active_route(next_port), Some("r1".to_string()));
+        assert_eq!(pm.active_route(next_port), Some(k("r1")));
         assert_eq!(pm.active_route(20001), None);
     }
 
     #[test]
     fn test_rapid_uncommitted_proposal_changes() {
         let pm = make_pm();
-        pm.reserve("r1", Some(20001)).unwrap();
-        pm.reserve("r1", Some(20002)).unwrap();
-        pm.reserve("r1", Some(20003)).unwrap();
+        pm.reserve(&k("r1"), Some(20001)).unwrap();
+        pm.reserve(&k("r1"), Some(20002)).unwrap();
+        pm.reserve(&k("r1"), Some(20003)).unwrap();
 
         assert_eq!(pm.get(20001), None);
         assert_eq!(pm.get(20002), None);
@@ -566,7 +579,7 @@ mod tests {
             pm.get(20003),
             Some(PortAllocation::Pending {
                 current: None,
-                next: "r1".to_string()
+                next: k("r1")
             })
         );
     }
@@ -574,15 +587,15 @@ mod tests {
     #[test]
     fn test_revert_uncommitted_to_active_auto() {
         let pm = make_pm();
-        let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
+        let alloc = pm.reserve(&k("r1"), Some(0)).unwrap().unwrap();
         let auto_port = match alloc {
             PortAllocation::Pending { next, .. } => next,
             _ => panic!("expected Pending"),
         };
-        pm.insert("r1", Some(auto_port));
+        pm.insert(&k("r1"), Some(auto_port));
 
-        pm.reserve("r1", Some(20001)).unwrap();
-        let reverted = pm.reserve("r1", Some(0)).unwrap().unwrap();
+        pm.reserve(&k("r1"), Some(20001)).unwrap();
+        let reverted = pm.reserve(&k("r1"), Some(0)).unwrap().unwrap();
         assert_eq!(reverted, PortAllocation::Intended(auto_port));
         assert_eq!(pm.get(20001), None);
     }
@@ -590,24 +603,24 @@ mod tests {
     #[test]
     fn test_remove_pending_rollback() {
         let pm = make_pm();
-        pm.insert("r1", Some(20001));
-        pm.reserve("r1", Some(20002)).unwrap();
+        pm.insert(&k("r1"), Some(20001));
+        pm.reserve(&k("r1"), Some(20002)).unwrap();
 
-        assert!(pm.remove_pending("r1"));
-        assert_eq!(pm.active_route(20001), Some("r1".to_string()));
+        assert!(pm.remove_pending(&k("r1")));
+        assert_eq!(pm.active_route(20001), Some(k("r1")));
         assert_eq!(pm.get(20002), None);
     }
 
     #[test]
     fn test_clear_pending_failover() {
         let pm = make_pm();
-        pm.insert("r1", Some(20001));
-        pm.reserve("r1", Some(20002)).unwrap();
-        pm.reserve("r2", Some(20003)).unwrap();
+        pm.insert(&k("r1"), Some(20001));
+        pm.reserve(&k("r1"), Some(20002)).unwrap();
+        pm.reserve(&k("r2"), Some(20003)).unwrap();
 
         pm.clear_pending();
 
-        assert_eq!(pm.active_route(20001), Some("r1".to_string()));
+        assert_eq!(pm.active_route(20001), Some(k("r1")));
         assert_eq!(pm.get(20002), None);
         assert_eq!(pm.get(20003), None);
     }
@@ -615,53 +628,50 @@ mod tests {
     #[test]
     fn test_post_failover_sync_healing() {
         let pm = make_pm();
-        pm.insert("r1", Some(20001));
-        pm.reserve("r1", Some(20002)).unwrap();
+        pm.insert(&k("r1"), Some(20001));
+        pm.reserve(&k("r1"), Some(20002)).unwrap();
 
         pm.clear_pending();
-        assert_eq!(pm.active_route(20001), Some("r1".to_string()));
+        assert_eq!(pm.active_route(20001), Some(k("r1")));
 
-        pm.insert("r1", Some(20002));
-        assert_eq!(pm.active_route(20002), Some("r1".to_string()));
+        pm.insert(&k("r1"), Some(20002));
+        assert_eq!(pm.active_route(20002), Some(k("r1")));
         assert_eq!(pm.active_route(20001), None);
     }
 
     #[test]
     fn test_sync_steals_pending_port() {
         let pm = make_pm();
-        pm.reserve("r1", Some(20001)).unwrap();
-        pm.insert("r2", Some(20001));
+        pm.reserve(&k("r1"), Some(20001)).unwrap();
+        pm.insert(&k("r2"), Some(20001));
 
-        assert_eq!(pm.active_route(20001), Some("r2".to_string()));
+        assert_eq!(pm.active_route(20001), Some(k("r2")));
     }
 
     #[test]
     fn test_get_vs_active_route() {
         let pm = make_pm();
-        pm.reserve("r1", Some(20001)).unwrap();
+        pm.reserve(&k("r1"), Some(20001)).unwrap();
 
         assert_eq!(
             pm.get(20001),
             Some(PortAllocation::Pending {
                 current: None,
-                next: "r1".to_string()
+                next: k("r1")
             })
         );
         assert_eq!(pm.active_route(20001), None);
 
-        pm.insert("r1", Some(20001));
-        assert_eq!(
-            pm.get(20001),
-            Some(PortAllocation::Intended("r1".to_string()))
-        );
-        assert_eq!(pm.active_route(20001), Some("r1".to_string()));
+        pm.insert(&k("r1"), Some(20001));
+        assert_eq!(pm.get(20001), Some(PortAllocation::Intended(k("r1"))));
+        assert_eq!(pm.active_route(20001), Some(k("r1")));
     }
 
     #[test]
     fn test_active_ports_mappings() {
         let pm = make_pm();
-        pm.insert("r1", Some(20001));
-        pm.insert("r2", Some(30005));
+        pm.insert(&k("r1"), Some(20001));
+        pm.insert(&k("r2"), Some(30005));
 
         let mut ports = pm.active_ports();
         ports.sort();
@@ -671,7 +681,7 @@ mod tests {
     #[test]
     fn test_port_zero_is_auto() {
         let pm = make_pm();
-        let alloc = pm.reserve("r1", Some(0)).unwrap().unwrap();
+        let alloc = pm.reserve(&k("r1"), Some(0)).unwrap().unwrap();
         match alloc {
             PortAllocation::Pending {
                 current: None,
@@ -687,13 +697,13 @@ mod tests {
     fn test_sync_over_pending_clears_next_binding() {
         let pm = make_pm();
 
-        pm.reserve("r1", Some(20002)).unwrap();
-        pm.insert("r1", Some(20001));
+        pm.reserve(&k("r1"), Some(20002)).unwrap();
+        pm.insert(&k("r1"), Some(20001));
 
-        assert_eq!(pm.active_route(20001), Some("r1".to_string()));
+        assert_eq!(pm.active_route(20001), Some(k("r1")));
         assert_eq!(pm.get(20002), None);
         assert_eq!(
-            pm.reserve("r2", Some(20002)),
+            pm.reserve(&k("r2"), Some(20002)),
             Ok(Some(PortAllocation::Pending {
                 current: None,
                 next: 20002
@@ -704,7 +714,7 @@ mod tests {
     #[test]
     fn test_sync_port_zero_ignored() {
         let pm = make_pm();
-        let res = pm.insert("r1", Some(0));
+        let res = pm.insert(&k("r1"), Some(0));
         assert_eq!(res, PortSyncResult::Unchanged);
         assert!(!pm.active_ports().contains(&0));
         assert_eq!(pm.active_route(0), None);
@@ -714,14 +724,14 @@ mod tests {
     fn test_sync_displacing_spec_with_pending_next_clears_ghost_binding() {
         let pm = make_pm();
 
-        pm.insert("r1", Some(20001));
-        pm.reserve("r1", Some(20002)).unwrap();
+        pm.insert(&k("r1"), Some(20001));
+        pm.reserve(&k("r1"), Some(20002)).unwrap();
 
-        pm.insert("r2", Some(20001));
+        pm.insert(&k("r2"), Some(20001));
 
         assert_eq!(pm.get(20002), None);
         assert_eq!(
-            pm.reserve("r3", Some(20002)),
+            pm.reserve(&k("r3"), Some(20002)),
             Ok(Some(PortAllocation::Pending {
                 current: None,
                 next: 20002

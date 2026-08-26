@@ -17,7 +17,9 @@ crypto = { version = "0.5", features = ["cipher", "digest"] }
 crypto-ops = "0.1"
 futures = { workspace = true }
 gmp-mpfr-sys = "1.7"
+hashbrown = { workspace = true }
 hmac = { workspace = true }
+aincrad-macros = { path = "../macros" }
 k8s-common = { path = "../k8s-common" }
 k8s-openapi = { workspace = true }
 kctf-pow = "2.1"

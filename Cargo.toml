@@ -9,6 +9,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 globset = "0.4"
+hashbrown = "0.15"
 hmac = "0.13"
 json-patch = "4"
 k8s-controller = "0.12"

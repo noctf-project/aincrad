@@ -234,7 +234,8 @@ impl Handler {
     fn get_log_filename(&self) -> String {
         let timestamp_nanos = (self.session.timestamp.timestamp() as u64) * 1_000_000_000
             + (self.session.timestamp.nanosecond() as u64);
-        format!("{}:{}", self.route.namespaced_name(), timestamp_nanos)
+        let key = self.route.route_key_ref();
+        format!("{}:{}:{}", key.namespace, key.name, timestamp_nanos)
     }
 }
 
