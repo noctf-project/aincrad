@@ -4,9 +4,10 @@ use kube::Api;
 use tracing::instrument;
 
 use crate::{
-    Context, Error,
+    Context, Error, btreemap,
     reconcilers::{helper::reconcile_child_resource, template::ResolvedTemplate},
     resources::get_networkpolicy_spec,
+    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE},
     utils::naming::resource_name,
 };
 
@@ -34,6 +35,11 @@ pub async fn reconcile(
         .map(|pod| pod.name.clone())
         .collect();
 
+    let labels = btreemap! {
+        MANAGED_BY_LABEL => MANAGED_BY_VALUE,
+        INSTANCE_LABEL => instance_name,
+    };
+
     reconcile_child_resource(
         &netpols,
         &target_name,
@@ -44,6 +50,7 @@ pub async fn reconcile(
             let mut np = NetworkPolicy::default();
             np.metadata.name = Some(target_name.clone());
             np.metadata.namespace = Some(ns.to_string());
+            np.metadata.labels = Some(labels.clone());
             np.spec = Some(get_networkpolicy_spec(
                 instance_name,
                 &allowed_internet_pods,

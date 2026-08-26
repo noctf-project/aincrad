@@ -5,12 +5,13 @@ use kube::Api;
 use tracing::instrument;
 
 use crate::{
-    Context, Error,
+    Context, Error, btreemap,
     reconcilers::{
         helper::{prune_orphaned_resources, reconcile_child_resource},
         template::ResolvedTemplate,
     },
     resources::build_ctfroute_spec,
+    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL},
     utils::naming::resource_name,
 };
 
@@ -42,9 +43,16 @@ pub async fn reconcile(
 
         let merged_spec = build_ctfroute_spec(&route_tmpl.spec, route_override);
 
+        let labels = btreemap! {
+            MANAGED_BY_LABEL => MANAGED_BY_VALUE,
+            INSTANCE_LABEL => instance_name,
+            POD_LABEL => route_tmpl.name.as_str(),
+        };
+
         reconcile_child_resource(&routes, &route_name, instance_gen, target_gen, sync, || {
             let mut route = CTFRoute::new(&route_name, merged_spec.clone());
             route.metadata.namespace = Some(ns.to_string());
+            route.metadata.labels = Some(labels.clone());
             route
         })
         .await?;

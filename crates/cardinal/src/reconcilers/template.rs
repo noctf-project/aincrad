@@ -41,12 +41,13 @@ impl TemplateCache {
         generation: i64,
         pods: &[CTFTemplateSpecPod],
     ) -> Result<PodPatchersMap, String> {
-        let mut lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-
-        if let Some(entry) = lock.get(key)
-            && entry.generation == generation
         {
-            return entry.pod_patchers.clone();
+            let lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = lock.get(key)
+                && entry.generation == generation
+            {
+                return entry.pod_patchers.clone();
+            }
         }
 
         let compiled_result = compile_pod_patchers(pods);
@@ -55,6 +56,7 @@ impl TemplateCache {
             pod_patchers: compiled_result.clone(),
         };
 
+        let mut lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         lock.insert(key.to_string(), entry);
         compiled_result
     }

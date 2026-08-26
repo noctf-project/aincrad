@@ -66,7 +66,7 @@ async fn reconcile_children(
     instance_gen: Option<&str>,
     target_gen: &str,
 ) -> Result<(), Error> {
-    reconcilers::workload::reconcile(instance, template, ctx, instance_gen, target_gen).await?;
+    reconcilers::replicaset::reconcile(instance, template, ctx, instance_gen, target_gen).await?;
     reconcilers::network_policy::reconcile(instance, template, ctx, instance_gen, target_gen)
         .await?;
     reconcilers::service::reconcile(instance, template, ctx, instance_gen, target_gen).await?;
@@ -100,8 +100,15 @@ pub async fn run(client: Client) {
 
     let context = Arc::new(Context::with_template_store(client, template_store));
 
+    struct AbortOnDrop(tokio::task::JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
     // Spawn background task to update in-memory template store
-    tokio::spawn(async move {
+    let reflector_task = tokio::spawn(async move {
         let stream = template_reflector.touched_objects();
         tokio::pin!(stream);
         while let Some(res) = stream.next().await {
@@ -110,11 +117,12 @@ pub async fn run(client: Client) {
             }
         }
     });
+    let _reflector_guard = AbortOnDrop(reflector_task);
 
     // Spawn background task to watch CTFTemplate events and evict updated/deleted templates from patcher cache
     let template_cache_watcher = context.template_cache.clone();
     let templates_watcher_api = templates.clone();
-    tokio::spawn(async move {
+    let cache_task = tokio::spawn(async move {
         let watcher_stream = watcher(templates_watcher_api, Config::default());
         tokio::pin!(watcher_stream);
         while let Some(res) = watcher_stream.next().await {
@@ -137,6 +145,7 @@ pub async fn run(client: Client) {
             }
         }
     });
+    let _cache_watcher_guard = AbortOnDrop(cache_task);
 
     info!("Starting CTFInstance controller with template caching");
 
@@ -278,11 +287,13 @@ mod tests {
                             ("apps/v1", "ReplicaSet")
                         } else if path.contains("ctfroutes") {
                             ("aincrad.noctf.dev/v1", "CTFRoute")
+                        } else if path.contains("ctfinstances") {
+                            ("aincrad.noctf.dev/v1", "CTFInstance")
                         } else {
                             ("v1", "Service")
                         };
 
-                        let body = serde_json::json!({
+                        let mut body = serde_json::json!({
                             "apiVersion": api_version,
                             "kind": kind,
                             "metadata": {
@@ -290,6 +301,9 @@ mod tests {
                                 "namespace": "default"
                             }
                         });
+                        if kind == "CTFInstance" {
+                            body["spec"] = serde_json::json!({ "template": "whoami-template" });
+                        }
                         let body_str = serde_json::to_string(&body).unwrap();
                         Ok(axum::http::Response::builder()
                             .status(axum::http::StatusCode::CREATED)

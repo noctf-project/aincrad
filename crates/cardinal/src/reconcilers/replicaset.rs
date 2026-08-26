@@ -97,7 +97,7 @@ pub async fn reconcile(
                     pod_tmpl.name
                 );
                 let lp = ListParams::default().labels(&label_selector);
-                let _ = pods.delete_collection(&Default::default(), &lp).await;
+                pods.delete_collection(&Default::default(), &lp).await?;
 
                 let mut updated_rs = existing_rs.clone();
                 let annotations = updated_rs
@@ -108,9 +108,9 @@ pub async fn reconcile(
                     RESTARTED_AT_ANNOTATION.to_string(),
                     instance_restarted_at.clone(),
                 );
-                let _ = replica_sets
+                replica_sets
                     .replace(&rs_name, &Default::default(), &updated_rs)
-                    .await;
+                    .await?;
             }
         }
 

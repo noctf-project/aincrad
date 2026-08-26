@@ -112,9 +112,9 @@ impl SpecPatcher {
         T: Serialize + DeserializeOwned,
         V: Serialize,
     {
-        let mut evaluated_patch = self.patch.clone();
+        let mut string_patch = self.patch.clone();
+        let mut coerced_patch = self.patch.clone();
 
-        // Render each compiled template and substitute back into the patch operation value
         for binding in &self.bindings {
             let rendered_str = self
                 .engine
@@ -123,7 +123,9 @@ impl SpecPatcher {
                 .to_string()
                 .map_err(|e| format!("failed to render template: {e}"))?;
 
-            let val_to_insert = if let Ok(n) = rendered_str.parse::<i64>() {
+            let string_val = serde_json::Value::String(rendered_str.clone());
+
+            let coerced_val = if let Ok(n) = rendered_str.parse::<i64>() {
                 serde_json::Value::Number(n.into())
             } else if let Ok(f) = rendered_str.parse::<f64>() {
                 serde_json::Number::from_f64(f)
@@ -135,7 +137,7 @@ impl SpecPatcher {
                 serde_json::Value::String(rendered_str.clone())
             };
 
-            let op_val = match &mut evaluated_patch.0[binding.op_index] {
+            let string_op_val = match &mut string_patch.0[binding.op_index] {
                 PatchOperation::Add(op) => &mut op.value,
                 PatchOperation::Replace(op) => &mut op.value,
                 PatchOperation::Test(op) => &mut op.value,
@@ -143,15 +145,39 @@ impl SpecPatcher {
             };
 
             if binding.value_path.is_empty() {
-                *op_val = val_to_insert;
+                *string_op_val = string_val;
             } else {
-                set_json_value_at_path(op_val, &binding.value_path, val_to_insert)?;
+                set_json_value_at_path(string_op_val, &binding.value_path, string_val)?;
+            }
+
+            let coerced_op_val = match &mut coerced_patch.0[binding.op_index] {
+                PatchOperation::Add(op) => &mut op.value,
+                PatchOperation::Replace(op) => &mut op.value,
+                PatchOperation::Test(op) => &mut op.value,
+                _ => continue,
+            };
+
+            if binding.value_path.is_empty() {
+                *coerced_op_val = coerced_val;
+            } else {
+                set_json_value_at_path(coerced_op_val, &binding.value_path, coerced_val)?;
             }
         }
 
-        let mut doc =
+        let base_doc =
             serde_json::to_value(spec).map_err(|e| format!("failed to serialize spec: {e}"))?;
-        json_patch::patch(&mut doc, &evaluated_patch)
+
+        // First try string patch (preserves string fields like EnvVar values with numbers "8080")
+        let mut doc = base_doc.clone();
+        if json_patch::patch(&mut doc, &string_patch).is_ok() {
+            if let Ok(res) = serde_json::from_value::<T>(doc) {
+                return Ok(res);
+            }
+        }
+
+        // Fall back to coerced patch (for numeric/boolean struct fields like activeDeadlineSeconds)
+        let mut doc = base_doc;
+        json_patch::patch(&mut doc, &coerced_patch)
             .map_err(|e| format!("failed to apply json patch: {e}"))?;
         serde_json::from_value(doc).map_err(|e| format!("failed to deserialize patched spec: {e}"))
     }
@@ -327,5 +353,41 @@ mod tests {
 
         let patched: PodSpec = patcher.apply(&base_spec, &context_map).unwrap();
         assert_eq!(patched.active_deadline_seconds, Some(3600));
+    }
+
+    #[test]
+    fn test_spec_patcher_env_var_numeric_string_preservation() {
+        let blacklist = build_test_blacklist();
+        let patch_json = json!([
+            {
+                "op": "add",
+                "path": "/containers/0/env",
+                "value": [
+                    { "name": "PORT", "value": "{{ params.port }}" }
+                ]
+            }
+        ]);
+        let patch: Patch = serde_json::from_value(patch_json).unwrap();
+        let patcher = SpecPatcher::new(&blacklist, patch).unwrap();
+
+        let base_spec = PodSpec {
+            containers: vec![Container {
+                name: "web".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let params = vec![CTFTemplateSpecParam {
+            name: "port".into(),
+            value: "8080".into(),
+        }];
+        let mut context_map = BTreeMap::new();
+        context_map.insert("params".to_string(), params_to_map(&params));
+
+        let patched: PodSpec = patcher.apply(&base_spec, &context_map).unwrap();
+        let envs = patched.containers[0].env.as_ref().unwrap();
+        assert_eq!(envs[0].name, "PORT");
+        assert_eq!(envs[0].value, Some("8080".into()));
     }
 }

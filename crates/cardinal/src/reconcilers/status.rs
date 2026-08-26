@@ -33,9 +33,9 @@ pub async fn reconcile(
         annotations.insert(TEMPLATE_GEN_ANNOTATION.to_string(), target_gen.to_string());
 
         let patch_params = kube::api::PatchParams::apply("cardinal");
-        let _ = instances
+        instances
             .patch(name, &patch_params, &kube::api::Patch::Apply(patch))
-            .await;
+            .await?;
     }
 
     Ok(())
