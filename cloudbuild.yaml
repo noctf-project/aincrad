@@ -1,18 +1,43 @@
 steps:
-  - id: build
+  - id: init-buildx
+    name: docker:latest
+    args: ['buildx', 'create', '--use', '--name', 'cloud-builder']
+
+  - id: build-fluct
     name: gcr.io/cloud-builders/docker
     args:
       - build
+      - --target
+      - fluct
       - -t
       - $LOCATION-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/services/aincrad-fluct:latest
       - "-f"
       - "docker/rust.Dockerfile"
       - "."
-  - id: push
+
+  - id: build-cardinal
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --target
+      - cardinal
+      - -t
+      - $LOCATION-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/services/aincrad-cardinal:latest
+      - "-f"
+      - "docker/rust.Dockerfile"
+      - "."
+
+  - id: push-fluct
     name: "gcr.io/cloud-builders/docker"
     args:
       - push
       - $LOCATION-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/services/aincrad-fluct:latest
+
+  - id: push-cardinal
+    name: "gcr.io/cloud-builders/docker"
+    args:
+      - push
+      - $LOCATION-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/services/aincrad-cardinal:latest
 
 substitutions:
   _REPOSITORY: 'infra'

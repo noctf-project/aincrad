@@ -25,10 +25,14 @@ RUN cargo chef cook --release --recipe-path recipe.json
 # Copy source files and compile the final binary
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
-RUN cargo build --release -p fluct
+RUN cargo build --release
 
 # runtime image
-FROM alpine:3
+FROM alpine:3 AS fluct
 RUN apk add --no-cache nftables libcap
 COPY --from=builder /build/target/release/fluct /usr/local/bin/fluct
 ENTRYPOINT ["/usr/local/bin/fluct"]
+
+FROM alpine:3 AS cardinal
+COPY --from=builder /build/target/release/cardinal /usr/local/bin/cardinal
+ENTRYPOINT ["/usr/local/bin/cardinal"]
