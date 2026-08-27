@@ -1,8 +1,11 @@
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use k8s_common::{SpecPatcher, crd::CTFTemplateSpecPod};
+use k8s_common::{
+    SpecPatcher,
+    crd::{CTFTemplate, CTFTemplateSpecPod},
+};
+use kube::runtime::reflector::Store;
 
 use crate::planners::replicaset::POD_PATCH_BLACKLIST;
 
@@ -16,60 +19,76 @@ pub struct TemplateKey {
 
 #[derive(Debug, Clone)]
 pub struct CachedTemplateEntry {
-    pub generation: i64,
+    pub template: Arc<CTFTemplate>,
     pub pod_patchers: Result<PodPatchersMap, String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub struct TemplateCache {
-    cache: Arc<Mutex<BTreeMap<TemplateKey, CachedTemplateEntry>>>,
+    store: Store<CTFTemplate>,
+    index: Arc<Mutex<BTreeMap<TemplateKey, CachedTemplateEntry>>>,
 }
 
 impl TemplateCache {
-    pub fn new() -> Self {
+    pub fn new(store: Store<CTFTemplate>) -> Self {
         Self {
-            cache: Arc::new(Mutex::new(BTreeMap::new())),
+            store,
+            index: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
-    pub fn get_or_compile(
-        &self,
-        key: &TemplateKey,
-        generation: i64,
-        pods: &[CTFTemplateSpecPod],
-    ) -> Result<PodPatchersMap, String> {
-        {
-            let lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = lock.get(key)
-                && entry.generation == generation
-            {
-                return entry.pod_patchers.clone();
-            }
-        }
+    pub fn store(&self) -> &Store<CTFTemplate> {
+        &self.store
+    }
 
-        let compiled_result = compile_pod_patchers(pods);
-        let entry = CachedTemplateEntry {
-            generation,
-            pod_patchers: compiled_result.clone(),
+    pub fn get(&self, namespace: &str, name: &str) -> Option<CachedTemplateEntry> {
+        let key = TemplateKey {
+            namespace: namespace.to_string(),
+            name: name.to_string(),
+        };
+        let lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        lock.get(&key).cloned()
+    }
+
+    pub fn update(&self, template: &CTFTemplate) {
+        let name = template.metadata.name.as_deref().unwrap_or_default();
+        let ns = template.metadata.namespace.as_deref().unwrap_or("default");
+        let key = TemplateKey {
+            namespace: ns.to_string(),
+            name: name.to_string(),
         };
 
-        let mut lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        lock.insert(key.clone(), entry);
-        compiled_result
+        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        if template.metadata.deletion_timestamp.is_none() {
+            let pod_patchers = compile_pod_patchers(&template.spec.pods);
+            let entry = CachedTemplateEntry {
+                template: Arc::new(template.clone()),
+                pod_patchers,
+            };
+            lock.insert(key, entry);
+        } else {
+            lock.remove(&key);
+        }
     }
 
-    pub fn remove(&self, key: &TemplateKey) {
-        let mut lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        lock.remove(key);
+    pub fn remove(&self, template: &CTFTemplate) {
+        let name = template.metadata.name.as_deref().unwrap_or_default();
+        let ns = template.metadata.namespace.as_deref().unwrap_or("default");
+        let key = TemplateKey {
+            namespace: ns.to_string(),
+            name: name.to_string(),
+        };
+        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        lock.remove(&key);
     }
 
     pub fn clear(&self) {
-        let mut lock = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
         lock.clear();
     }
 }
 
-fn compile_pod_patchers(pods: &[CTFTemplateSpecPod]) -> Result<PodPatchersMap, String> {
+pub fn compile_pod_patchers(pods: &[CTFTemplateSpecPod]) -> Result<PodPatchersMap, String> {
     let mut pod_patchers = HashMap::new();
     for pod in pods {
         let patcher = if let Some(patch) = &pod.patch {
@@ -85,12 +104,16 @@ fn compile_pod_patchers(pods: &[CTFTemplateSpecPod]) -> Result<PodPatchersMap, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_common::crd::CTFTemplateSpec;
     use k8s_openapi::api::core::v1::{Container, PodSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use kube::runtime::reflector::store;
     use serde_json::json;
 
     #[test]
-    fn test_template_cache_compile_hit_and_generation_shift() {
-        let cache = TemplateCache::new();
+    fn test_template_cache_update_and_get() {
+        let (store, _writer) = store();
+        let cache = TemplateCache::new(store);
         let valid_patch: json_patch::Patch = serde_json::from_value(json!([
             { "op": "add", "path": "/metadata/labels/test", "value": "true" }
         ]))
@@ -110,28 +133,38 @@ mod tests {
             },
         };
 
-        let pods = vec![pod_tmpl];
-        let key = TemplateKey {
-            namespace: "default".into(),
-            name: "tmpl1".into(),
+        let tmpl = CTFTemplate {
+            metadata: ObjectMeta {
+                name: Some("tmpl1".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: CTFTemplateSpec {
+                pods: vec![pod_tmpl],
+                ..Default::default()
+            },
+            status: None,
         };
 
-        // First compile for gen 1
-        let patchers_gen1 = cache.get_or_compile(&key, 1, &pods).unwrap();
-        assert!(patchers_gen1.contains_key("web"));
+        // Cache update compiles patchers
+        cache.update(&tmpl);
 
-        // Second lookup for gen 1 should hit cache (same Arc pointer)
-        let patchers_gen1_hit = cache.get_or_compile(&key, 1, &pods).unwrap();
-        assert!(Arc::ptr_eq(&patchers_gen1, &patchers_gen1_hit));
+        let entry = cache.get("default", "tmpl1").unwrap();
+        assert_eq!(entry.template.metadata.name.as_deref(), Some("tmpl1"));
+        let patchers = entry.pod_patchers.unwrap();
+        assert!(patchers.contains_key("web"));
 
-        // Generation shift to gen 2 should re-compile (different Arc pointer)
-        let patchers_gen2 = cache.get_or_compile(&key, 2, &pods).unwrap();
-        assert!(!Arc::ptr_eq(&patchers_gen1, &patchers_gen2));
+        // Second lookup should return same compiled Arc pointer
+        let entry2 = cache.get("default", "tmpl1").unwrap();
+        let patchers2 = entry2.pod_patchers.unwrap();
+        assert!(Arc::ptr_eq(&patchers, &patchers2));
     }
 
     #[test]
-    fn test_template_cache_failed_compile_caching() {
-        let cache = TemplateCache::new();
+    fn test_template_cache_failed_compile_cached() {
+        let (store, _writer) = store();
+        let cache = TemplateCache::new(store);
         // Path "/hostNetwork" is blacklisted by POD_PATCH_BLACKLIST
         let invalid_patch: json_patch::Patch = serde_json::from_value(json!([
             { "op": "add", "path": "/hostNetwork", "value": true }
@@ -146,48 +179,61 @@ mod tests {
             spec: PodSpec::default(),
         };
 
-        let pods = vec![pod_tmpl];
-        let key = TemplateKey {
-            namespace: "default".into(),
-            name: "tmpl1".into(),
+        let tmpl = CTFTemplate {
+            metadata: ObjectMeta {
+                name: Some("tmpl_invalid".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: CTFTemplateSpec {
+                pods: vec![pod_tmpl],
+                ..Default::default()
+            },
+            status: None,
         };
 
-        // Compilation should fail and cache the error for gen 1
-        let err1 = cache.get_or_compile(&key, 1, &pods).unwrap_err();
-        let err2 = cache.get_or_compile(&key, 1, &pods).unwrap_err();
-        assert_eq!(err1, err2);
+        cache.update(&tmpl);
+        let entry = cache.get("default", "tmpl_invalid").unwrap();
+        assert!(entry.pod_patchers.is_err());
+        assert!(entry.pod_patchers.unwrap_err().contains("blacklisted"));
     }
 
     #[test]
     fn test_template_cache_remove_and_clear() {
-        let cache = TemplateCache::new();
-        let pod_tmpl = CTFTemplateSpecPod {
-            name: "web".into(),
-            allow_internet: false,
-            replicas: 1,
-            patch: None,
-            spec: PodSpec::default(),
+        let (store, _writer) = store();
+        let cache = TemplateCache::new(store);
+        let tmpl1 = CTFTemplate {
+            metadata: ObjectMeta {
+                name: Some("tmpl1".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: CTFTemplateSpec::default(),
+            status: None,
         };
-        let pods = vec![pod_tmpl];
+        let tmpl2 = CTFTemplate {
+            metadata: ObjectMeta {
+                name: Some("tmpl2".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: CTFTemplateSpec::default(),
+            status: None,
+        };
 
-        let key1 = TemplateKey {
-            namespace: "default".into(),
-            name: "tmpl1".into(),
-        };
-        let key2 = TemplateKey {
-            namespace: "default".into(),
-            name: "tmpl2".into(),
-        };
+        cache.update(&tmpl1);
+        cache.update(&tmpl2);
 
-        cache.get_or_compile(&key1, 1, &pods).unwrap();
-        cache.get_or_compile(&key2, 1, &pods).unwrap();
+        assert!(cache.get("default", "tmpl1").is_some());
+        assert!(cache.get("default", "tmpl2").is_some());
 
         // Remove tmpl1
-        cache.remove(&key1);
-        let patchers_recompiled = cache.get_or_compile(&key1, 1, &pods).unwrap();
-        assert!(patchers_recompiled.contains_key("web"));
+        cache.remove(&tmpl1);
+        assert!(cache.get("default", "tmpl1").is_none());
+        assert!(cache.get("default", "tmpl2").is_some());
 
         // Clear all
         cache.clear();
+        assert!(cache.get("default", "tmpl2").is_none());
     }
 }

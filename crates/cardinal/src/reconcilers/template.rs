@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 
-use k8s_common::crd::{CTFInstance, CTFTemplate, CTFTemplateSpec, CTFTemplateSpecPod, PatchValue};
+use k8s_common::crd::{CTFInstance, CTFTemplateSpec, CTFTemplateSpecPod, PatchValue};
 use k8s_openapi::api::core::v1::PodSpec;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::Api;
 use tracing::instrument;
 
 use crate::{Context, Error};
@@ -40,47 +39,24 @@ impl ResolvedTemplate {
 }
 
 /// Resolves the `CTFTemplate` referenced by `instance.spec.template`, applying parameter overrides,
-/// generating the merged params_map, and querying the TemplateCache for pre-compiled SpecPatchers.
+/// generating the merged params_map, and querying the in-memory TemplateCache for pre-compiled SpecPatchers.
 #[instrument(skip(ctx, instance), fields(instance = %instance.metadata.name.as_deref().unwrap_or_default()))]
 pub async fn reconcile(instance: &CTFInstance, ctx: &Context) -> Result<ResolvedTemplate, Error> {
     let template_name = &instance.spec.template;
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
-    // Check in-memory reflector store cache first
-    let cached_template = if let Some(store) = &ctx.template_store {
-        let key = kube::runtime::reflector::ObjectRef::new(template_name).within(ns);
-        store.get(&key).map(|t| (*t).clone())
-    } else {
-        None
-    };
-
-    let template = match cached_template {
-        Some(t) => t,
-        None => {
-            let templates: Api<CTFTemplate> = Api::namespaced(ctx.client.clone(), ns);
-            match templates.get_opt(template_name).await? {
-                Some(t) => t,
-                None => return Err(Error::TemplateNotFound(template_name.clone())),
-            }
-        }
-    };
-
-    let generation = template.metadata.generation.unwrap_or(1);
-    let cache_key = crate::cache::TemplateKey {
-        namespace: ns.to_string(),
-        name: template_name.clone(),
-    };
-
-    let pod_patchers = ctx
+    let entry = ctx
         .template_cache
-        .get_or_compile(&cache_key, generation, &template.spec.pods)
-        .map_err(Error::TemplateBuildError)?;
+        .as_ref()
+        .and_then(|cache| cache.get(ns, template_name))
+        .ok_or_else(|| Error::TemplateNotFound(template_name.clone()))?;
 
-    let params_map = resolve_template_params(&template.spec, instance);
+    let pod_patchers = entry.pod_patchers.map_err(Error::TemplateBuildError)?;
+    let params_map = resolve_template_params(&entry.template.spec, instance);
 
     Ok(ResolvedTemplate {
-        metadata: template.metadata,
-        spec: template.spec,
+        metadata: entry.template.metadata.clone(),
+        spec: entry.template.spec.clone(),
         pod_patchers,
         params_map,
     })
@@ -239,36 +215,44 @@ mod tests {
 
     #[test]
     fn test_template_cache_eviction() {
-        let cache = TemplateCache::new();
-        let key = crate::cache::TemplateKey {
-            namespace: "default".into(),
-            name: "web-template".into(),
-        };
+        let (store, _writer) = kube::runtime::reflector::store();
+        let cache = TemplateCache::new(store);
         let pod_tmpl = CTFTemplateSpecPod {
             name: "web".into(),
             ..Default::default()
         };
+        let tmpl = k8s_common::crd::CTFTemplate {
+            metadata: ObjectMeta {
+                name: Some("web-template".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: CTFTemplateSpec {
+                pods: vec![pod_tmpl],
+                ..Default::default()
+            },
+            status: None,
+        };
 
-        let patchers1 = cache.get_or_compile(&key, 1, &[pod_tmpl.clone()]).unwrap();
-        let patchers2 = cache.get_or_compile(&key, 1, &[pod_tmpl.clone()]).unwrap();
+        cache.update(&tmpl);
+        let entry1 = cache.get("default", "web-template").unwrap();
+        let entry2 = cache.get("default", "web-template").unwrap();
 
         // Must reuse cached Arc
-        assert!(Arc::ptr_eq(&patchers1, &patchers2));
+        assert!(Arc::ptr_eq(
+            &entry1.pod_patchers.unwrap(),
+            &entry2.pod_patchers.unwrap()
+        ));
 
         // Evict key from cache
-        cache.remove(&key);
-
-        let patchers3 = cache.get_or_compile(&key, 1, &[pod_tmpl]).unwrap();
-        assert!(!Arc::ptr_eq(&patchers1, &patchers3));
+        cache.remove(&tmpl);
+        assert!(cache.get("default", "web-template").is_none());
     }
 
     #[test]
     fn test_template_cache_failed_compile_caching() {
-        let cache = TemplateCache::new();
-        let key = crate::cache::TemplateKey {
-            namespace: "default".into(),
-            name: "blacklisted-template".into(),
-        };
+        let (store, _writer) = kube::runtime::reflector::store();
+        let cache = TemplateCache::new(store);
         let patch_json = json!([
             {
                 "op": "add",
@@ -282,14 +266,28 @@ mod tests {
             patch: Some(patch),
             ..Default::default()
         };
+        let tmpl = k8s_common::crd::CTFTemplate {
+            metadata: ObjectMeta {
+                name: Some("blacklisted-template".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: CTFTemplateSpec {
+                pods: vec![pod_tmpl],
+                ..Default::default()
+            },
+            status: None,
+        };
 
-        // First call fails and caches the Err
-        let res1 = cache.get_or_compile(&key, 1, &[pod_tmpl.clone()]);
-        assert!(res1.is_err());
-        assert!(res1.as_ref().unwrap_err().contains("blacklisted"));
-
-        // Second call for same generation returns cached Err instantly
-        let res2 = cache.get_or_compile(&key, 1, &[pod_tmpl]);
-        assert_eq!(res1.unwrap_err(), res2.unwrap_err());
+        cache.update(&tmpl);
+        let entry = cache.get("default", "blacklisted-template").unwrap();
+        assert!(entry.pod_patchers.is_err());
+        assert!(
+            entry
+                .pod_patchers
+                .as_ref()
+                .unwrap_err()
+                .contains("blacklisted")
+        );
     }
 }

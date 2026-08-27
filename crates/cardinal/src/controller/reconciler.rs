@@ -243,14 +243,6 @@ pub fn find_instance_for_route(route: &CTFRoute) -> Option<ObjectRef<CTFInstance
     None
 }
 
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 /// Handles watcher events for `CTFInstance` to update or clear the in-memory index.
 pub fn handle_instance_watcher_event(
     event: &Event<CTFInstance>,
@@ -271,29 +263,23 @@ pub fn handle_instance_watcher_event(
     }
 }
 
-/// Handles watcher events for `CTFTemplate` to evict updated or deleted entries from the patcher cache.
+/// Handles watcher events for `CTFTemplate` to update or clear the in-memory cache.
 pub fn handle_template_watcher_event(
-    event: &Result<Event<CTFTemplate>, kube::runtime::watcher::Error>,
+    event: &Event<CTFTemplate>,
     cache: &crate::cache::TemplateCache,
 ) {
     match event {
-        Ok(Event::Apply(t)) | Ok(Event::Delete(t)) | Ok(Event::InitApply(t)) => {
-            let name = t.metadata.name.as_deref().unwrap_or_default();
-            let ns = t.metadata.namespace.as_deref().unwrap_or("default");
-            let cache_key = crate::cache::TemplateKey {
-                namespace: ns.to_string(),
-                name: name.to_string(),
-            };
-            cache.remove(&cache_key);
+        Event::Apply(t) | Event::InitApply(t) => {
+            cache.update(t);
         }
-        Ok(Event::Init) => {
+        Event::Delete(t) => {
+            cache.remove(t);
+        }
+        Event::Init => {
             cache.clear();
-            info!("Cleared all entries from CTFTemplate patcher cache on watcher init");
+            info!("Cleared CTFTemplate cache on watcher init");
         }
-        Ok(Event::InitDone) => {}
-        Err(err) => {
-            error!(%err, "CTFTemplate watcher error");
-        }
+        Event::InitDone => {}
     }
 }
 
@@ -314,23 +300,6 @@ pub fn handle_route_watcher_event(event: &Event<CTFRoute>, cache: &crate::cache:
     }
 }
 
-/// Spawns a background task to process a reflector stream.
-fn spawn_reflector_watcher<S, K>(stream: S, kind: &'static str) -> AbortOnDrop
-where
-    S: futures::Stream<Item = Result<K, kube::runtime::watcher::Error>> + Send + 'static,
-    K: Send + Sync + 'static,
-{
-    let task = tokio::spawn(async move {
-        tokio::pin!(stream);
-        while let Some(res) = stream.next().await {
-            if let Err(err) = res {
-                error!(kind, %err, "Reflector watcher error");
-            }
-        }
-    });
-    AbortOnDrop(task)
-}
-
 /// Spawns and runs the `CTFInstance` controller loop.
 pub async fn run(client: Client) {
     let instances = Api::<CTFInstance>::all(client.clone());
@@ -344,21 +313,23 @@ pub async fn run(client: Client) {
     let (route_store, route_writer) = store();
 
     let context = Arc::new(Context::with_stores(client, template_store, route_store));
-    let template_cache_watcher = context.template_cache.clone();
+    let template_cache = context.template_cache.clone().unwrap();
+    let template_cache_task = template_cache.clone();
 
     let route_cache = context.route_cache.clone().unwrap();
     let route_cache_task = route_cache.clone();
 
-    // Template watch stream handles evictions before populating the template store
+    // Template watch stream updates template cache before populating the template store
     let template_watcher_stream = watcher(templates.clone(), Config::default())
         .default_backoff()
         .inspect(move |res| {
-            handle_template_watcher_event(res, &template_cache_watcher);
+            if let Ok(event) = res {
+                handle_template_watcher_event(event, &template_cache_task);
+            }
         });
 
     let template_reflector = reflector(template_writer, template_watcher_stream);
-    let _tmpl_store_guard =
-        spawn_reflector_watcher(template_reflector.touched_objects(), "CTFTemplate");
+    let template_stream = template_reflector.touched_objects();
 
     // CTFRoute watch stream updates route cache index before populating the reflector store
     let route_watcher_stream = watcher(routes.clone(), Config::default())
@@ -369,7 +340,7 @@ pub async fn run(client: Client) {
             }
         });
     let route_reflector = reflector(route_writer, route_watcher_stream);
-    let _route_store_guard = spawn_reflector_watcher(route_reflector.touched_objects(), "CTFRoute");
+    let route_stream = route_reflector.touched_objects();
 
     // Initialize in-memory CTFInstance reflector store cache for watches mapping
     let (instance_store, instance_writer) = store();
@@ -396,7 +367,7 @@ pub async fn run(client: Client) {
     info!("Starting CTFInstance controller with template & route caching");
 
     Controller::for_stream(controller_instance_stream, instance_store)
-        .watches(templates, Config::default(), move |template| {
+        .watches_stream(template_stream, move |template| {
             let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
             info!(
                 template_name = tmpl_name,
@@ -404,7 +375,7 @@ pub async fn run(client: Client) {
             );
             instance_cache.find_synced_instances(&template)
         })
-        .watches(routes, Config::default(), |route| {
+        .watches_stream(route_stream, |route| {
             find_instance_for_route(&route)
         })
         .run(reconcile, error_policy, context)
@@ -430,10 +401,47 @@ mod tests {
     use k8s_common::crd::CTFInstanceSpec;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
+    fn dummy_test_context() -> Arc<Context> {
+        let client = dummy_kube_client();
+        let (template_store, _) = kube::runtime::reflector::store();
+        let (route_store, _) = kube::runtime::reflector::store();
+        let ctx = Context::with_stores(client, template_store, route_store);
+
+        let tmpl = CTFTemplate {
+            metadata: ObjectMeta {
+                name: Some("whoami-template".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: k8s_common::crd::CTFTemplateSpec {
+                pods: vec![k8s_common::crd::CTFTemplateSpecPod {
+                    name: "web".into(),
+                    allow_internet: false,
+                    replicas: 1,
+                    patch: None,
+                    spec: k8s_openapi::api::core::v1::PodSpec {
+                        containers: vec![k8s_openapi::api::core::v1::Container {
+                            name: "web".into(),
+                            image: Some("nginx:latest".into()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                }],
+                ..Default::default()
+            },
+            status: None,
+        };
+        if let Some(cache) = &ctx.template_cache {
+            cache.update(&tmpl);
+        }
+        Arc::new(ctx)
+    }
+
     #[tokio::test]
     async fn test_reconcile_no_expiration() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
@@ -454,8 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_future_expiration() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let future_time = Utc::now() + ChronoDuration::seconds(120);
 
         let instance = Arc::new(CTFInstance {
@@ -478,8 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_past_expiration() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let past_time = Utc::now() - ChronoDuration::seconds(60);
 
         let instance = Arc::new(CTFInstance {
@@ -502,8 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_deletion_timestamp() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let now = Utc::now();
 
         let instance = Arc::new(CTFInstance {
@@ -528,8 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_observed_generation_skips() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
@@ -555,8 +559,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_observed_generation_future_expiration_requeues() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let future_time = Utc::now() + ChronoDuration::seconds(120);
 
         let instance = Arc::new(CTFInstance {
@@ -585,8 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_unobserved_generation_reconciles() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
@@ -612,8 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_min_template_generation_exceeds_caps_and_requeues() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(
             crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
@@ -648,8 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_invalid_min_template_generation_rewrites_and_requeues() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(
             crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
@@ -684,8 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_negative_min_template_generation_rewrites_and_requeues() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(
             crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
@@ -720,8 +719,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_min_template_generation_satisfied_skips() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(
             crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
@@ -755,8 +753,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_restarted_at_annotation_change_reconciles() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(
             crate::utils::labels::RESTARTED_AT_ANNOTATION.to_string(),
@@ -791,8 +788,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_restarted_at_annotation_matching_skips() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(
             crate::utils::labels::RESTARTED_AT_ANNOTATION.to_string(),
@@ -827,8 +823,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_synced_template_generation_change_reconciles() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
@@ -856,8 +851,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_synced_template_generation_match_skips() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
@@ -887,7 +881,41 @@ mod tests {
     async fn test_reconcile_failure_records_status() {
         use crate::test_utils::tests::error_kube_client;
         let client = error_kube_client(500);
-        let ctx = Arc::new(Context::new(client));
+        let (template_store, _) = kube::runtime::reflector::store();
+        let (route_store, _) = kube::runtime::reflector::store();
+        let ctx = Context::with_stores(client, template_store, route_store);
+
+        let tmpl = CTFTemplate {
+            metadata: ObjectMeta {
+                name: Some("whoami-template".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: k8s_common::crd::CTFTemplateSpec {
+                pods: vec![k8s_common::crd::CTFTemplateSpecPod {
+                    name: "web".into(),
+                    allow_internet: false,
+                    replicas: 1,
+                    patch: None,
+                    spec: k8s_openapi::api::core::v1::PodSpec {
+                        containers: vec![k8s_openapi::api::core::v1::Container {
+                            name: "web".into(),
+                            image: Some("nginx:latest".into()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                }],
+                ..Default::default()
+            },
+            status: None,
+        };
+        if let Some(cache) = &ctx.template_cache {
+            cache.update(&tmpl);
+        }
+        let ctx = Arc::new(ctx);
+
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
@@ -908,8 +936,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_error_policy() {
-        let client = dummy_kube_client();
-        let ctx = Arc::new(Context::new(client));
+        let ctx = dummy_test_context();
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
@@ -1043,25 +1070,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_template_watcher_event() {
-        let cache = crate::cache::TemplateCache::new();
+        let (store, _writer) = kube::runtime::reflector::store();
+        let cache = crate::cache::TemplateCache::new(store);
         let tmpl = CTFTemplate::new(
             "whoami-template",
             k8s_common::crd::CTFTemplateSpec::default(),
         );
 
-        let key = crate::cache::TemplateKey {
-            namespace: "default".into(),
-            name: "whoami-template".into(),
-        };
+        // Test Apply event updates cache
+        handle_template_watcher_event(&Event::Apply(tmpl.clone()), &cache);
+        assert!(cache.get("default", "whoami-template").is_some());
 
-        // Populate cache
-        cache.get_or_compile(&key, 1, &[]).unwrap();
-
-        // Test Apply event evicts entry
-        handle_template_watcher_event(&Ok(Event::Apply(tmpl.clone())), &cache);
+        // Test Delete event removes from cache
+        handle_template_watcher_event(&Event::Delete(tmpl.clone()), &cache);
+        assert!(cache.get("default", "whoami-template").is_none());
 
         // Test Init event clears cache
-        cache.get_or_compile(&key, 1, &[]).unwrap();
-        handle_template_watcher_event(&Ok(Event::Init), &cache);
+        handle_template_watcher_event(&Event::Apply(tmpl), &cache);
+        handle_template_watcher_event(&Event::Init, &cache);
+        assert!(cache.get("default", "whoami-template").is_none());
     }
 }
