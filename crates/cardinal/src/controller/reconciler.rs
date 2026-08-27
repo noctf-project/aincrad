@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use k8s_common::crd::{CTFInstance, CTFTemplate};
+use k8s_common::crd::{CTFInstance, CTFRoute, CTFTemplate};
 use kube::{
     Api, Client,
     runtime::{
@@ -117,6 +117,7 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
     let is_tmpl_gen_satisfied = observed_tmpl_gen >= target_tmpl_gen;
 
     if is_instance_gen_current && is_tmpl_gen_satisfied {
+        let _ = reconcilers::status::reconcile_child_status(instance, ctx).await?;
         info!(name, ns, "CTFInstance already reconciled, skipping");
         if let Some(remaining) = calculate_remaining_ttl(instance.spec.expires_at) {
             return Ok(Action::requeue(remaining + Duration::from_secs(10)));
@@ -126,7 +127,7 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
 
     reconcile_children(instance, &template, ctx).await?;
 
-    // Success! Update status conditions (Ready = True, Synced = True) & observed generations
+    // Success! Update status conditions (Ready = True, RoutesReady) & observed generations
     reconcilers::status::reconcile(instance, ctx, template.metadata.generation).await?;
 
     if let Some(remaining) = calculate_remaining_ttl(instance.spec.expires_at) {
@@ -217,6 +218,31 @@ pub fn find_synced_instances(
         .collect()
 }
 
+/// Maps a `CTFRoute` update event to the owning `CTFInstance` ObjectRef.
+pub fn find_instance_for_route(route: &CTFRoute) -> Option<ObjectRef<CTFInstance>> {
+    let ns = route.metadata.namespace.as_deref().unwrap_or("default");
+
+    if let Some(instance_name) = route
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(crate::utils::labels::INSTANCE_LABEL))
+    {
+        return Some(ObjectRef::new(instance_name).within(ns));
+    }
+
+    if let Some(owner) = route
+        .metadata
+        .owner_references
+        .as_ref()
+        .and_then(|refs| refs.iter().find(|r| r.kind == "CTFInstance"))
+    {
+        return Some(ObjectRef::new(&owner.name).within(ns));
+    }
+
+    None
+}
+
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
@@ -271,6 +297,23 @@ pub fn handle_template_watcher_event(
     }
 }
 
+/// Handles watcher events for `CTFRoute` to update or clear the in-memory index.
+pub fn handle_route_watcher_event(event: &Event<CTFRoute>, cache: &crate::cache::RouteCache) {
+    match event {
+        Event::Apply(r) | Event::InitApply(r) => {
+            cache.update(r);
+        }
+        Event::Delete(r) => {
+            cache.remove(r);
+        }
+        Event::Init => {
+            cache.clear();
+            info!("Cleared CTFRoute index on watcher init");
+        }
+        Event::InitDone => {}
+    }
+}
+
 /// Spawns a background task to process a reflector stream.
 fn spawn_reflector_watcher<S, K>(stream: S, kind: &'static str) -> AbortOnDrop
 where
@@ -292,12 +335,19 @@ where
 pub async fn run(client: Client) {
     let instances = Api::<CTFInstance>::all(client.clone());
     let templates = Api::<CTFTemplate>::all(client.clone());
+    let routes = Api::<CTFRoute>::all(client.clone());
 
     // Initialize in-memory CTFTemplate reflector store cache
     let (template_store, template_writer) = store();
 
-    let context = Arc::new(Context::with_template_store(client, template_store));
+    // Initialize in-memory CTFRoute reflector store cache
+    let (route_store, route_writer) = store();
+
+    let context = Arc::new(Context::with_stores(client, template_store, route_store));
     let template_cache_watcher = context.template_cache.clone();
+
+    let route_cache = context.route_cache.clone().unwrap();
+    let route_cache_task = route_cache.clone();
 
     // Template watch stream handles evictions before populating the template store
     let template_watcher_stream = watcher(templates.clone(), Config::default())
@@ -309,6 +359,17 @@ pub async fn run(client: Client) {
     let template_reflector = reflector(template_writer, template_watcher_stream);
     let _tmpl_store_guard =
         spawn_reflector_watcher(template_reflector.touched_objects(), "CTFTemplate");
+
+    // CTFRoute watch stream updates route cache index before populating the reflector store
+    let route_watcher_stream = watcher(routes.clone(), Config::default())
+        .default_backoff()
+        .inspect(move |res| {
+            if let Ok(event) = res {
+                handle_route_watcher_event(event, &route_cache_task);
+            }
+        });
+    let route_reflector = reflector(route_writer, route_watcher_stream);
+    let _route_store_guard = spawn_reflector_watcher(route_reflector.touched_objects(), "CTFRoute");
 
     // Initialize in-memory CTFInstance reflector store cache for watches mapping
     let (instance_store, instance_writer) = store();
@@ -332,11 +393,8 @@ pub async fn run(client: Client) {
         .touched_objects()
         .predicate_filter(predicate, Default::default());
 
-    info!("Starting CTFInstance controller with template caching");
+    info!("Starting CTFInstance controller with template & route caching");
 
-    // We do not watch/own child resources (ReplicaSets, NetworkPolicies, Services, CTFRoutes)
-    // because we largely do not care if child resources get deleted externally, avoiding unnecessary
-    // reconciliation churn, watcher overhead, and duplicate event triggers.
     Controller::for_stream(controller_instance_stream, instance_store)
         .watches(templates, Config::default(), move |template| {
             let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
@@ -345,6 +403,9 @@ pub async fn run(client: Client) {
                 "CTFTemplate updated, evaluating synced CTFInstances to retrigger"
             );
             instance_cache.find_synced_instances(&template)
+        })
+        .watches(routes, Config::default(), |route| {
+            find_instance_for_route(&route)
         })
         .run(reconcile, error_policy, context)
         .for_each(|res| async {
