@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+sha2 = { workspace = true }
 upon = "0.11"
 
 axum = { workspace = true }

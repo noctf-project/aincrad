@@ -132,7 +132,20 @@ fn apply_pod_defaults(pod_spec: &mut PodSpec) {
         pod_spec.enable_service_links = Some(false);
     }
     if pod_spec.termination_grace_period_seconds.is_none() {
-        pod_spec.termination_grace_period_seconds = Some(5);
+        pod_spec.termination_grace_period_seconds = Some(0);
+    }
+
+    for container in &mut pod_spec.containers {
+        let limits = container
+            .resources
+            .get_or_insert_with(Default::default)
+            .limits
+            .get_or_insert_with(Default::default);
+        limits
+            .entry("ephemeral-storage".to_string())
+            .or_insert_with(|| {
+                k8s_openapi::apimachinery::pkg::api::resource::Quantity("256Mi".to_string())
+            });
     }
 }
 
@@ -297,12 +310,29 @@ mod tests {
 
     #[test]
     fn test_pod_defaults_injection() {
-        let mut pod_spec = PodSpec::default();
+        let mut pod_spec = PodSpec {
+            containers: vec![k8s_openapi::api::core::v1::Container {
+                name: "web".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
         apply_pod_defaults(&mut pod_spec);
 
         assert_eq!(pod_spec.automount_service_account_token, Some(false));
         assert_eq!(pod_spec.enable_service_links, Some(false));
         assert_eq!(pod_spec.termination_grace_period_seconds, Some(5));
+        let limits = pod_spec.containers[0]
+            .resources
+            .as_ref()
+            .unwrap()
+            .limits
+            .as_ref()
+            .unwrap();
+        assert_eq!(limits.get("ephemeral-storage").unwrap().0, "256Mi");
+        assert_eq!(limits.get("cpu").unwrap().0, "1000m");
+        assert_eq!(limits.get("memory").unwrap().0, "512Mi");
+        assert_eq!(limits.get("pids").unwrap().0, "256");
 
         // Ensure explicit overrides in template are preserved
         let mut custom_pod_spec = PodSpec {

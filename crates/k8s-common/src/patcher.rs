@@ -75,6 +75,13 @@ impl SpecPatcher {
         }
 
         let mut engine = upon::Engine::new();
+        engine.add_function("sha256", |s: &str| -> String {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(s.as_bytes());
+            let result = hasher.finalize();
+            result.iter().map(|b| format!("{b:02x}")).collect()
+        });
         let mut bindings = Vec::new();
         let mut counter = 0;
 
@@ -418,5 +425,44 @@ mod tests {
         let result: Result<PodSpec, String> = patcher.apply(&base_spec, &context_map);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("failed to render template"));
+    }
+
+    #[test]
+    fn test_spec_patcher_sha256_fn() {
+        let blacklist = build_test_blacklist();
+        let patch_json = json!([
+            {
+                "op": "add",
+                "path": "/containers/0/env",
+                "value": [
+                    { "name": "HASH", "value": "{{ params.secret | sha256 }}" }
+                ]
+            }
+        ]);
+        let patch: Patch = serde_json::from_value(patch_json).unwrap();
+        let patcher = SpecPatcher::new(&blacklist, patch).unwrap();
+
+        let base_spec = PodSpec {
+            containers: vec![Container {
+                name: "web".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let params = vec![CTFTemplateSpecParam {
+            name: "secret".into(),
+            value: "hello".into(),
+        }];
+        let mut context_map = BTreeMap::new();
+        context_map.insert("params".to_string(), params_to_map(&params));
+
+        let patched: PodSpec = patcher.apply(&base_spec, &context_map).unwrap();
+        let envs = patched.containers[0].env.as_ref().unwrap();
+        assert_eq!(envs[0].name, "HASH");
+        assert_eq!(
+            envs[0].value,
+            Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into()) // sha256("hello")
+        );
     }
 }
