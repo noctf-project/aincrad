@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -51,8 +50,8 @@ pub struct CTFInstanceSpecParam {
     )]
     pub name: String,
     /// Parameter value override:
-    /// - `PatchValue::Value("val")`: Set parameter value.
-    /// - `PatchValue::Null` (`value: null`): Remove parameter.
+    /// - Set to string value (e.g. `"val"`) to override parameter value.
+    /// - Set to `null` to remove parameter.
     #[serde(default)]
     pub value: PatchValue<String>,
 }
@@ -82,15 +81,15 @@ pub struct CTFInstanceSpecRouteOverride {
     #[schemars(length(min = 1, max = 20))]
     pub name: String,
     /// Dedicated TCP port override for this route:
-    /// - `PatchValue::Unset` (omitted): Inherit port from CTFTemplate.
-    /// - `PatchValue::Null` (`port: null`): Disable TCP.
-    /// - `PatchValue::Value(port)` (`port: 20001`): Force a specific fixed TCP port.
+    /// - Omitted: Inherit port from CTFTemplate.
+    /// - Set to `null`: Disable TCP.
+    /// - Set to integer (e.g. `20001`): Force a specific fixed TCP port.
     #[serde(default)]
     pub port: PatchValue<u16>,
     /// TLS configuration override for this route:
-    /// - `PatchValue::Unset` (omitted): Inherit TLS configuration from CTFTemplate.
-    /// - `PatchValue::Null` (`tls: null`): Disable TLS.
-    /// - `PatchValue::Value(tls)`: Enable TLS.
+    /// - Omitted: Inherit TLS configuration from CTFTemplate.
+    /// - Set to `null`: Disable TLS.
+    /// - Set to object: Enable and configure TLS.
     #[serde(default)]
     pub tls: PatchValue<CTFRouteSpecTLSPatch>,
 }
@@ -108,12 +107,11 @@ impl KubeListKey for CTFInstanceSpecRouteOverride {
     status = CTFInstanceStatus,
 )]
 #[serde(rename_all = "camelCase")]
+/// Specification for an ephemeral CTF challenge instance sandbox.
 pub struct CTFInstanceSpec {
     /// Name of the CTFTemplate resource to instantiate.
     #[schemars(schema_with = "immutable_property_schema")]
     pub template: String,
-    /// Optional UTC timestamp when this ephemeral player sandbox expires.
-    pub expires_at: Option<DateTime<Utc>>,
     /// Sync instance with the upstream template if enabled.
     #[serde(default)]
     pub sync: bool,

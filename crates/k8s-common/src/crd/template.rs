@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use k8s_openapi::{api::core::v1::PodSpec, apimachinery::pkg::apis::meta::v1::Condition};
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -57,9 +56,8 @@ impl KubeListKey for CTFTemplateSpecRoute {
     ])
 )]
 #[serde(rename_all = "camelCase")]
+/// Specification for a reusable CTF challenge workload template.
 pub struct CTFTemplateSpec {
-    /// Optional UTC timestamp after which instances of this challenge template become active.
-    pub available_at: Option<DateTime<Utc>>,
     /// Key-value parameters passed to challenge pods as environment variables or configuration values.
     #[serde(default)]
     #[schemars(schema_with = "list_schema::<CTFTemplateSpecParam>")]

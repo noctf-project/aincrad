@@ -5,7 +5,9 @@ use k8s_openapi::api::admissionregistration::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
-use crate::labels::{MIN_TEMPLATE_GENERATION_ANNOTATION, RESTARTED_AT_ANNOTATION};
+use crate::labels::{
+    EXPIRES_AT_ANNOTATION, MIN_TEMPLATE_GENERATION_ANNOTATION, RESTARTED_AT_ANNOTATION,
+};
 
 /// Generates the ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding for CTFInstance annotations.
 pub fn generate_ctfinstance_admission_policy()
@@ -35,6 +37,15 @@ pub fn generate_ctfinstance_admission_policy()
                     ),
                     message: Some(format!(
                         "annotation '{RESTARTED_AT_ANNOTATION}' must be a valid RFC3339 date/time string"
+                    )),
+                    ..Default::default()
+                },
+                Validation {
+                    expression: format!(
+                        "!has(object.metadata.annotations) || !('{EXPIRES_AT_ANNOTATION}' in object.metadata.annotations) || !format.datetime().validate(string(object.metadata.annotations['{EXPIRES_AT_ANNOTATION}'])).hasValue()"
+                    ),
+                    message: Some(format!(
+                        "annotation '{EXPIRES_AT_ANNOTATION}' must be a valid RFC3339 date/time string"
                     )),
                     ..Default::default()
                 },
@@ -84,6 +95,6 @@ mod tests {
             Some("ctfinstance-annotations-binding")
         );
         let validations = policy.spec.unwrap().validations.unwrap();
-        assert_eq!(validations.len(), 2);
+        assert_eq!(validations.len(), 3);
     }
 }

@@ -229,7 +229,6 @@ pub mod tests {
                 ..Default::default()
             },
             spec: CTFTemplateSpec {
-                available_at: None,
                 pods: vec![CTFTemplateSpecPod {
                     name: "web".to_string(),
                     allow_internet: false,

@@ -16,6 +16,7 @@ spec:
         description: Auto-generated derived type for CTFRouteSpec via `CustomResource`
         properties:
           spec:
+            description: Specification for dynamic L4 TCP/TLS routing and traffic inspection.
             properties:
               availableAt:
                 description: Optional UTC timestamp after which this route becomes active and accessible to players.
@@ -190,12 +191,8 @@ spec:
         description: Auto-generated derived type for CTFTemplateSpec via `CustomResource`
         properties:
           spec:
+            description: Specification for a reusable CTF challenge workload template.
             properties:
-              availableAt:
-                description: Optional UTC timestamp after which instances of this challenge template become active.
-                format: date-time
-                nullable: true
-                type: string
               params:
                 default: []
                 description: Key-value parameters passed to challenge pods as environment variables or configuration values.
@@ -262,6 +259,7 @@ spec:
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     spec:
+                      description: Specification for dynamic L4 TCP/TLS routing and traffic inspection.
                       properties:
                         availableAt:
                           description: Optional UTC timestamp after which this route becomes active and accessible to players.
@@ -416,12 +414,8 @@ spec:
         description: Auto-generated derived type for CTFInstanceSpec via `CustomResource`
         properties:
           spec:
+            description: Specification for an ephemeral CTF challenge instance sandbox.
             properties:
-              expiresAt:
-                description: Optional UTC timestamp when this ephemeral player sandbox expires.
-                format: date-time
-                nullable: true
-                type: string
               params:
                 default: []
                 description: Parameter overrides for this specific challenge instance.
@@ -436,8 +430,8 @@ spec:
                     value:
                       description: |-
                         Parameter value override:
-                        - `PatchValue::Value("val")`: Set parameter value.
-                        - `PatchValue::Null` (`value: null`): Remove parameter.
+                        - Set to string value (e.g. `"val"`) to override parameter value.
+                        - Set to `null` to remove parameter.
                       nullable: true
                       type: string
                   required:
@@ -484,9 +478,9 @@ spec:
                     port:
                       description: |-
                         Dedicated TCP port override for this route:
-                        - `PatchValue::Unset` (omitted): Inherit port from CTFTemplate.
-                        - `PatchValue::Null` (`port: null`): Disable TCP.
-                        - `PatchValue::Value(port)` (`port: 20001`): Force a specific fixed TCP port.
+                        - Omitted: Inherit port from CTFTemplate.
+                        - Set to `null`: Disable TCP.
+                        - Set to integer (e.g. `20001`): Force a specific fixed TCP port.
                       format: uint16
                       maximum: 65535.0
                       minimum: 0.0
@@ -495,9 +489,9 @@ spec:
                     tls:
                       description: |-
                         TLS configuration override for this route:
-                        - `PatchValue::Unset` (omitted): Inherit TLS configuration from CTFTemplate.
-                        - `PatchValue::Null` (`tls: null`): Disable TLS.
-                        - `PatchValue::Value(tls)`: Enable TLS.
+                        - Omitted: Inherit TLS configuration from CTFTemplate.
+                        - Set to `null`: Disable TLS.
+                        - Set to object: Enable and configure TLS.
                       nullable: true
                       properties:
                         prefix:
@@ -641,6 +635,8 @@ spec:
   validations:
   - expression: '!has(object.metadata.annotations) || !(''aincrad.noctf.dev/restartedAt'' in object.metadata.annotations) || !format.datetime().validate(string(object.metadata.annotations[''aincrad.noctf.dev/restartedAt''])).hasValue()'
     message: annotation 'aincrad.noctf.dev/restartedAt' must be a valid RFC3339 date/time string
+  - expression: '!has(object.metadata.annotations) || !(''aincrad.noctf.dev/expiresAt'' in object.metadata.annotations) || !format.datetime().validate(string(object.metadata.annotations[''aincrad.noctf.dev/expiresAt''])).hasValue()'
+    message: annotation 'aincrad.noctf.dev/expiresAt' must be a valid RFC3339 date/time string
   - expression: '!has(object.metadata.annotations) || !(''aincrad.noctf.dev/minTemplateGeneration'' in object.metadata.annotations) || object.metadata.annotations[''aincrad.noctf.dev/minTemplateGeneration''].matches(r''^[1-9][0-9]*$'')'
     message: annotation 'aincrad.noctf.dev/minTemplateGeneration' must be a positive integer
 ---

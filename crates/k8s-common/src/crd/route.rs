@@ -73,6 +73,7 @@ impl CTFRouteBackend {
     status = CTFRouteStatus,
 )]
 #[serde(rename_all = "camelCase")]
+/// Specification for dynamic L4 TCP/TLS routing and traffic inspection.
 pub struct CTFRouteSpec {
     /// Flag string or template string for the challenge route.
     #[serde(default)]

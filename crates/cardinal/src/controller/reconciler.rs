@@ -14,7 +14,12 @@ use kube::{
 };
 use tracing::{error, info, instrument, warn};
 
-use crate::{Context, Error, reconcilers, utils::ttl::calculate_remaining_ttl};
+use crate::{
+    Context, Error, reconcilers,
+    utils::ttl::{calculate_remaining_ttl, is_expired, parse_expires_at},
+};
+
+const EXPIRES_REQUEUE_BUFFER: Duration = Duration::from_secs(5);
 
 /// Reconciles a single `CTFInstance` resource state.
 #[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
@@ -43,8 +48,10 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
         return Ok(Action::await_change());
     }
 
+    let expires_at = parse_expires_at(instance);
+
     // Check if instance has expired
-    if crate::utils::ttl::is_expired(instance.spec.expires_at) {
+    if is_expired(expires_at) {
         info!(name, ns, "CTFInstance has expired, deleting resource...");
         let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
         instances.delete(name, &Default::default()).await?;
@@ -75,6 +82,24 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
         .annotations
         .as_ref()
         .and_then(|a| a.get(crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION));
+
+    // Fast-path skip: if instance spec generation is current, restartedAt matches,
+    // minTemplateGeneration is not set, sync is false, and instance has already been deployed.
+    if is_instance_gen_current
+        && raw_min_tmpl_gen.is_none()
+        && !instance.spec.sync
+        && observed_tmpl_gen.is_some()
+    {
+        let _ = reconcilers::status::reconcile_child_status(instance, ctx).await?;
+        info!(
+            name,
+            ns, "CTFInstance already reconciled and not synced, skipping template resolution"
+        );
+        if let Some(remaining) = calculate_remaining_ttl(expires_at) {
+            return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
+        }
+        return Ok(Action::await_change());
+    }
 
     // Resolve CTFTemplate referenced by `instance.spec.template`.
     let template = reconcilers::template::reconcile(instance, ctx).await?;
@@ -119,8 +144,8 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
     if is_instance_gen_current && is_tmpl_gen_satisfied {
         let _ = reconcilers::status::reconcile_child_status(instance, ctx).await?;
         info!(name, ns, "CTFInstance already reconciled, skipping");
-        if let Some(remaining) = calculate_remaining_ttl(instance.spec.expires_at) {
-            return Ok(Action::requeue(remaining + Duration::from_secs(10)));
+        if let Some(remaining) = calculate_remaining_ttl(expires_at) {
+            return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
         }
         return Ok(Action::await_change());
     }
@@ -130,9 +155,9 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
     // Success! Update status conditions (Ready = True, RoutesReady) & observed generations
     reconcilers::status::reconcile(instance, ctx, template.metadata.generation).await?;
 
-    if let Some(remaining) = calculate_remaining_ttl(instance.spec.expires_at) {
+    if let Some(remaining) = calculate_remaining_ttl(expires_at) {
         // We want to make sure the object really expires to save requeuing
-        return Ok(Action::requeue(remaining + Duration::from_secs(10)));
+        return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
     }
 
     Ok(Action::await_change())
@@ -336,7 +361,9 @@ pub async fn run(client: Client) {
         });
 
     let template_reflector = reflector(template_writer, template_watcher_stream);
-    let template_stream = template_reflector.touched_objects();
+    let template_stream = template_reflector
+        .touched_objects()
+        .predicate_filter(predicates::generation, Default::default());
 
     // CTFRoute watch stream updates route cache index before populating the reflector store
     let route_watcher_stream = watcher(routes.clone(), Config::default())
@@ -455,7 +482,6 @@ mod tests {
             },
             spec: CTFInstanceSpec {
                 template: "whoami-template".into(),
-                expires_at: None,
                 ..Default::default()
             },
             status: None,
@@ -469,16 +495,21 @@ mod tests {
     async fn test_reconcile_future_expiration() {
         let ctx = dummy_test_context();
         let future_time = Utc::now() + ChronoDuration::seconds(120);
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            crate::utils::labels::EXPIRES_AT_ANNOTATION.to_string(),
+            future_time.to_rfc3339(),
+        );
 
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
                 namespace: Some("default".into()),
+                annotations: Some(annotations),
                 ..Default::default()
             },
             spec: CTFInstanceSpec {
                 template: "whoami-template".into(),
-                expires_at: Some(future_time),
                 ..Default::default()
             },
             status: None,
@@ -492,16 +523,21 @@ mod tests {
     async fn test_reconcile_past_expiration() {
         let ctx = dummy_test_context();
         let past_time = Utc::now() - ChronoDuration::seconds(60);
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            crate::utils::labels::EXPIRES_AT_ANNOTATION.to_string(),
+            past_time.to_rfc3339(),
+        );
 
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
                 namespace: Some("default".into()),
+                annotations: Some(annotations),
                 ..Default::default()
             },
             spec: CTFInstanceSpec {
                 template: "whoami-template".into(),
-                expires_at: Some(past_time),
                 ..Default::default()
             },
             status: None,
@@ -566,17 +602,22 @@ mod tests {
     async fn test_reconcile_observed_generation_future_expiration_requeues() {
         let ctx = dummy_test_context();
         let future_time = Utc::now() + ChronoDuration::seconds(120);
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            crate::utils::labels::EXPIRES_AT_ANNOTATION.to_string(),
+            future_time.to_rfc3339(),
+        );
 
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
                 namespace: Some("default".into()),
                 generation: Some(1),
+                annotations: Some(annotations),
                 ..Default::default()
             },
             spec: CTFInstanceSpec {
                 template: "whoami-template".into(),
-                expires_at: Some(future_time),
                 ..Default::default()
             },
             status: Some(k8s_common::crd::CTFInstanceStatus {
@@ -1098,5 +1139,91 @@ mod tests {
         handle_template_watcher_event(&Event::Apply(tmpl), &cache);
         handle_template_watcher_event(&Event::Init, &cache);
         assert!(cache.get("default", "whoami-template").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_expires_at_fast_path_skips_template_resolution() {
+        // Create a context where template is intentionally NOT in cache.
+        // If template resolution was attempted, it would fail with Error::TemplateNotFound.
+        let client = dummy_kube_client();
+        let (template_store, _) = kube::runtime::reflector::store();
+        let (route_store, _) = kube::runtime::reflector::store();
+        let ctx = Arc::new(Context::with_stores(client, template_store, route_store));
+
+        let future_time = Utc::now() + ChronoDuration::seconds(300);
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            crate::utils::labels::EXPIRES_AT_ANNOTATION.to_string(),
+            future_time.to_rfc3339(),
+        );
+
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "missing-template".into(),
+                sync: false,
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                template_generation: Some(1),
+                conditions: vec![],
+                endpoints: vec![],
+                ..Default::default()
+            }),
+        });
+
+        // Fast-path skip must succeed and return Action::requeue without querying or failing on missing template
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_ne!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_restarted_at_overrides_fast_path_and_reconciles() {
+        let ctx = dummy_test_context();
+        let future_time = Utc::now() + ChronoDuration::seconds(300);
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            crate::utils::labels::EXPIRES_AT_ANNOTATION.to_string(),
+            future_time.to_rfc3339(),
+        );
+        // New restartedAt annotation differs from status.restarted_at
+        annotations.insert(
+            crate::utils::labels::RESTARTED_AT_ANNOTATION.to_string(),
+            "2026-08-28T08:00:00Z".to_string(),
+        );
+
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                sync: false,
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                template_generation: Some(1),
+                restarted_at: Some("2026-08-28T07:00:00Z".to_string()),
+                conditions: vec![],
+                endpoints: vec![],
+                ..Default::default()
+            }),
+        });
+
+        // Must bypass fast-path skip and successfully reconcile
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_ne!(action, Action::await_change());
     }
 }
