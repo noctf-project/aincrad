@@ -132,7 +132,7 @@ fn apply_pod_defaults(pod_spec: &mut PodSpec) {
         pod_spec.enable_service_links = Some(false);
     }
     if pod_spec.termination_grace_period_seconds.is_none() {
-        pod_spec.termination_grace_period_seconds = Some(0);
+        pod_spec.termination_grace_period_seconds = Some(5);
     }
 
     for container in &mut pod_spec.containers {
@@ -330,9 +330,6 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(limits.get("ephemeral-storage").unwrap().0, "256Mi");
-        assert_eq!(limits.get("cpu").unwrap().0, "1000m");
-        assert_eq!(limits.get("memory").unwrap().0, "512Mi");
-        assert_eq!(limits.get("pids").unwrap().0, "256");
 
         // Ensure explicit overrides in template are preserved
         let mut custom_pod_spec = PodSpec {

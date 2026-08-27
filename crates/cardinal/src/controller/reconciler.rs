@@ -5,8 +5,9 @@ use k8s_common::crd::{CTFInstance, CTFTemplate};
 use kube::{
     Api, Client,
     runtime::{
-        WatchStreamExt,
+        Predicate, WatchStreamExt,
         controller::{Action, Controller},
+        predicates,
         reflector::{ObjectRef, reflector, store},
         watcher::{Config, Event, watcher},
     },
@@ -136,7 +137,7 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
     Ok(Action::await_change())
 }
 
-/// Helper function to patch minTemplateGeneration annotation on a CTFInstance and return Action::await_change.
+/// Helper function to patch minTemplateGeneration annotation on a CTFInstance and requeue reconciliation.
 async fn patch_min_template_annotation(
     ctx: &Context,
     name: &str,
@@ -158,7 +159,7 @@ async fn patch_min_template_annotation(
             &kube::api::Patch::Merge(patch),
         )
         .await?;
-    Ok(Action::await_change())
+    Ok(Action::requeue(Duration::from_millis(100)))
 }
 
 /// Reconciles all child resources (workloads, network policies, services, routes) for a CTFInstance.
@@ -183,12 +184,18 @@ pub fn error_policy(instance: Arc<CTFInstance>, error: &Error, _ctx: Arc<Context
     error!(name, %error, "Reconciliation failed");
 
     let backoff_secs = match error {
-        Error::TemplateBuildError(_) => 120,
-        Error::TemplateNotFound(_) => 120,
-        _ => 15,
+        Error::TemplateBuildError(_) => 120_000,
+        Error::TemplateNotFound(_) => 120_000,
+        Error::Kube(e) => match e {
+            kube::Error::Api(status) if status.code == 429 || status.code >= 500 => 5_000,
+            kube::Error::Api(status) if status.code == 409 => 200,
+            kube::Error::HyperError(_) | kube::Error::HttpError(_) => 2_000,
+            _ => 120_000,
+        },
+        _ => 15_000,
     };
 
-    Action::requeue(Duration::from_secs(backoff_secs))
+    Action::requeue(Duration::from_millis(backoff_secs))
 }
 
 /// Maps a `CTFTemplate` update event to a vector of `ObjectRef<CTFInstance>` for all instances
@@ -220,15 +227,15 @@ impl Drop for AbortOnDrop {
 
 /// Handles watcher events for `CTFInstance` to update or clear the in-memory index.
 pub fn handle_instance_watcher_event(
-    event: Event<CTFInstance>,
+    event: &Event<CTFInstance>,
     cache: &crate::cache::InstanceCache,
 ) {
     match event {
         Event::Apply(inst) | Event::InitApply(inst) => {
-            cache.update(&inst);
+            cache.update(inst);
         }
         Event::Delete(inst) => {
-            cache.remove(&inst);
+            cache.remove(inst);
         }
         Event::Init => {
             cache.clear();
@@ -240,24 +247,18 @@ pub fn handle_instance_watcher_event(
 
 /// Handles watcher events for `CTFTemplate` to evict updated or deleted entries from the patcher cache.
 pub fn handle_template_watcher_event(
-    event: Result<Event<CTFTemplate>, kube::runtime::watcher::Error>,
+    event: &Result<Event<CTFTemplate>, kube::runtime::watcher::Error>,
     cache: &crate::cache::TemplateCache,
 ) {
     match event {
         Ok(Event::Apply(t)) | Ok(Event::Delete(t)) | Ok(Event::InitApply(t)) => {
-            let name = t.metadata.name.as_deref().unwrap_or_default().to_string();
-            let ns = t
-                .metadata
-                .namespace
-                .as_deref()
-                .unwrap_or("default")
-                .to_string();
+            let name = t.metadata.name.as_deref().unwrap_or_default();
+            let ns = t.metadata.namespace.as_deref().unwrap_or("default");
             let cache_key = crate::cache::TemplateKey {
-                namespace: ns,
-                name,
+                namespace: ns.to_string(),
+                name: name.to_string(),
             };
             cache.remove(&cache_key);
-            info!("Evicted updated/deleted CTFTemplate from patcher cache");
         }
         Ok(Event::Init) => {
             cache.clear();
@@ -294,61 +295,49 @@ pub async fn run(client: Client) {
 
     // Initialize in-memory CTFTemplate reflector store cache
     let (template_store, template_writer) = store();
-    let template_reflector = reflector(
-        template_writer,
-        watcher(templates.clone(), Config::default()),
-    );
+
+    let context = Arc::new(Context::with_template_store(client, template_store));
+    let template_cache_watcher = context.template_cache.clone();
+
+    // Template watch stream handles evictions before populating the template store
+    let template_watcher_stream = watcher(templates.clone(), Config::default())
+        .default_backoff()
+        .inspect(move |res| {
+            handle_template_watcher_event(res, &template_cache_watcher);
+        });
+
+    let template_reflector = reflector(template_writer, template_watcher_stream);
+    let _tmpl_store_guard =
+        spawn_reflector_watcher(template_reflector.touched_objects(), "CTFTemplate");
 
     // Initialize in-memory CTFInstance reflector store cache for watches mapping
     let (instance_store, instance_writer) = store();
-    let instance_reflector = reflector(
-        instance_writer,
-        watcher(instances.clone(), Config::default()),
-    );
-
-    let context = Arc::new(Context::with_template_store(client, template_store));
-
-    let _tmpl_store_guard =
-        spawn_reflector_watcher(template_reflector.touched_objects(), "CTFTemplate");
-    let _inst_store_guard =
-        spawn_reflector_watcher(instance_reflector.touched_objects(), "CTFInstance");
 
     use crate::cache::InstanceCache;
-    let instance_cache = InstanceCache::new(instance_store);
-
-    // Spawn background task to watch CTFInstance events and update index
+    let instance_cache = InstanceCache::new(instance_store.clone());
     let instance_cache_task = instance_cache.clone();
-    let instances_watcher_api = instances.clone();
-    let instance_watcher_task = tokio::spawn(async move {
-        let watcher_stream = watcher(instances_watcher_api, Config::default());
-        tokio::pin!(watcher_stream);
-        while let Some(res) = watcher_stream.next().await {
-            match res {
-                Ok(event) => handle_instance_watcher_event(event, &instance_cache_task),
-                Err(err) => error!(%err, "CTFInstance watcher error"),
-            }
-        }
-    });
-    let _instance_watcher_guard = AbortOnDrop(instance_watcher_task);
 
-    // Spawn background task to watch CTFTemplate events and evict entries from patcher cache
-    let template_cache_watcher = context.template_cache.clone();
-    let templates_watcher_api = templates.clone();
-    let template_watcher_task = tokio::spawn(async move {
-        let watcher_stream = watcher(templates_watcher_api, Config::default());
-        tokio::pin!(watcher_stream);
-        while let Some(res) = watcher_stream.next().await {
-            handle_template_watcher_event(res, &template_cache_watcher);
-        }
-    });
-    let _template_watcher_guard = AbortOnDrop(template_watcher_task);
+    // Instance watch stream updates custom index before populating the reflector store
+    let instance_watcher_stream = watcher(instances, Config::default())
+        .default_backoff()
+        .inspect(move |res| {
+            if let Ok(event) = res {
+                handle_instance_watcher_event(event, &instance_cache_task);
+            }
+        });
+
+    let instance_reflector = reflector(instance_writer, instance_watcher_stream);
+    let predicate = predicates::generation.combine(predicates::annotations);
+    let controller_instance_stream = instance_reflector
+        .touched_objects()
+        .predicate_filter(predicate, Default::default());
 
     info!("Starting CTFInstance controller with template caching");
 
     // We do not watch/own child resources (ReplicaSets, NetworkPolicies, Services, CTFRoutes)
     // because we largely do not care if child resources get deleted externally, avoiding unnecessary
     // reconciliation churn, watcher overhead, and duplicate event triggers.
-    Controller::new(instances, Config::default())
+    Controller::for_stream(controller_instance_stream, instance_store)
         .watches(templates, Config::default(), move |template| {
             let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
             info!(
@@ -591,9 +580,9 @@ mod tests {
             }),
         });
 
-        // Should return Action::await_change after capping annotation to current template generation (1)
+        // Should return Action::requeue after capping annotation to current template generation (1)
         let action = reconcile(instance, ctx).await.unwrap();
-        assert_eq!(action, Action::await_change());
+        assert_eq!(action, Action::requeue(Duration::from_millis(100)));
     }
 
     #[tokio::test]
@@ -627,9 +616,9 @@ mod tests {
             }),
         });
 
-        // Should rewrite the annotation to valid template generation (1) and return Action::await_change
+        // Should rewrite the annotation to valid template generation (1) and return Action::requeue
         let action = reconcile(instance, ctx).await.unwrap();
-        assert_eq!(action, Action::await_change());
+        assert_eq!(action, Action::requeue(Duration::from_millis(100)));
     }
 
     #[tokio::test]
@@ -663,9 +652,9 @@ mod tests {
             }),
         });
 
-        // Should rewrite the negative annotation to valid template generation (1) and return Action::await_change
+        // Should rewrite the negative annotation to valid template generation (1) and return Action::requeue
         let action = reconcile(instance, ctx).await.unwrap();
-        assert_eq!(action, Action::await_change());
+        assert_eq!(action, Action::requeue(Duration::from_millis(100)));
     }
 
     #[tokio::test]
@@ -981,13 +970,13 @@ mod tests {
             status: None,
         };
 
-        handle_instance_watcher_event(Event::Apply(inst.clone()), &cache);
+        handle_instance_watcher_event(&Event::Apply(inst.clone()), &cache);
         assert_eq!(cache.find_synced_instances(&tmpl).len(), 1);
 
-        handle_instance_watcher_event(Event::Delete(inst), &cache);
+        handle_instance_watcher_event(&Event::Delete(inst), &cache);
         assert_eq!(cache.find_synced_instances(&tmpl).len(), 0);
 
-        handle_instance_watcher_event(Event::Init, &cache);
+        handle_instance_watcher_event(&Event::Init, &cache);
         assert_eq!(cache.find_synced_instances(&tmpl).len(), 0);
     }
 
@@ -1008,10 +997,10 @@ mod tests {
         cache.get_or_compile(&key, 1, &[]).unwrap();
 
         // Test Apply event evicts entry
-        handle_template_watcher_event(Ok(Event::Apply(tmpl.clone())), &cache);
+        handle_template_watcher_event(&Ok(Event::Apply(tmpl.clone())), &cache);
 
         // Test Init event clears cache
         cache.get_or_compile(&key, 1, &[]).unwrap();
-        handle_template_watcher_event(Ok(Event::Init), &cache);
+        handle_template_watcher_event(&Ok(Event::Init), &cache);
     }
 }

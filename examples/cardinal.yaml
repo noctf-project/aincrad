@@ -29,7 +29,7 @@ spec:
           service: chal
           port: 80
         tls:
-          prefix: whoami2
+          prefix: whoami
 ---
 apiVersion: aincrad.noctf.dev/v1
 kind: CTFInstance
