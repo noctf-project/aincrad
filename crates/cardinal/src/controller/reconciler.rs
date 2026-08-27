@@ -184,19 +184,26 @@ pub fn error_policy(instance: Arc<CTFInstance>, error: &Error, _ctx: Arc<Context
     let name = instance.metadata.name.as_deref().unwrap_or("unknown");
     error!(name, %error, "Reconciliation failed");
 
-    let backoff_secs = match error {
-        Error::TemplateBuildError(_) => 120_000,
-        Error::TemplateNotFound(_) => 120_000,
+    match error {
+        Error::TemplateBuildError(_) | Error::TemplateNotFound(_) | Error::KubeCommon(_) => {
+            Action::await_change()
+        }
         Error::Kube(e) => match e {
-            kube::Error::Api(status) if status.code == 429 || status.code >= 500 => 5_000,
-            kube::Error::Api(status) if status.code == 409 => 200,
-            kube::Error::HyperError(_) | kube::Error::HttpError(_) => 2_000,
-            _ => 120_000,
+            kube::Error::Api(status) if status.code == 409 => {
+                Action::requeue(Duration::from_millis(200))
+            }
+            kube::Error::HyperError(_) | kube::Error::HttpError(_) => {
+                Action::requeue(Duration::from_secs(2))
+            }
+            kube::Error::Api(status) if status.code == 429 || status.code >= 500 => {
+                Action::requeue(Duration::from_secs(10))
+            }
+            // Other API errors (400, 403, 422) require manifest or permission fixes
+            kube::Error::Api(_) => Action::await_change(),
+            _ => Action::requeue(Duration::from_secs(30)),
         },
-        _ => 15_000,
-    };
-
-    Action::requeue(Duration::from_millis(backoff_secs))
+        _ => Action::requeue(Duration::from_secs(60)),
+    }
 }
 
 /// Maps a `CTFTemplate` update event to a vector of `ObjectRef<CTFInstance>` for all instances
@@ -375,9 +382,7 @@ pub async fn run(client: Client) {
             );
             instance_cache.find_synced_instances(&template)
         })
-        .watches_stream(route_stream, |route| {
-            find_instance_for_route(&route)
-        })
+        .watches_stream(route_stream, |route| find_instance_for_route(&route))
         .run(reconcile, error_policy, context)
         .for_each(|res| async {
             match res {
@@ -952,11 +957,15 @@ mod tests {
 
         let err_build = Error::TemplateBuildError("invalid json patch".into());
         let action_build = error_policy(instance.clone(), &err_build, ctx.clone());
-        assert_eq!(action_build, Action::requeue(Duration::from_secs(120)));
+        assert_eq!(action_build, Action::await_change());
+
+        let err_not_found = Error::TemplateNotFound("whoami-template".into());
+        let action_not_found = error_policy(instance.clone(), &err_not_found, ctx.clone());
+        assert_eq!(action_not_found, Action::await_change());
 
         let err_transient = Error::Custom("failed to connect".into());
         let action_transient = error_policy(instance, &err_transient, ctx);
-        assert_eq!(action_transient, Action::requeue(Duration::from_secs(15)));
+        assert_eq!(action_transient, Action::requeue(Duration::from_secs(60)));
     }
 
     #[tokio::test]

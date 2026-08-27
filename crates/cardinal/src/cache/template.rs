@@ -58,17 +58,20 @@ impl TemplateCache {
             name: name.to_string(),
         };
 
-        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
-        if template.metadata.deletion_timestamp.is_none() {
-            let pod_patchers = compile_pod_patchers(&template.spec.pods);
-            let entry = CachedTemplateEntry {
-                template: Arc::new(template.clone()),
-                pod_patchers,
-            };
-            lock.insert(key, entry);
-        } else {
+        if template.metadata.deletion_timestamp.is_some() {
+            let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
             lock.remove(&key);
+            return;
         }
+
+        let pod_patchers = compile_pod_patchers(&template.spec.pods);
+        let entry = CachedTemplateEntry {
+            template: Arc::new(template.clone()),
+            pod_patchers,
+        };
+
+        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        lock.insert(key, entry);
     }
 
     pub fn remove(&self, template: &CTFTemplate) {

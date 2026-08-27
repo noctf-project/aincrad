@@ -47,6 +47,10 @@ impl RouteCache {
                 })
             });
 
+        let Some(inst_name) = instance else {
+            return;
+        };
+
         let route_name = route
             .metadata
             .labels
@@ -55,20 +59,21 @@ impl RouteCache {
             .cloned()
             .unwrap_or_else(|| route.metadata.name.clone().unwrap_or_default());
 
-        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        let key = RouteKey {
+            namespace: ns.to_string(),
+            instance: inst_name,
+            route: route_name,
+        };
 
-        if let Some(inst_name) = instance {
-            let key = RouteKey {
-                namespace: ns.to_string(),
-                instance: inst_name,
-                route: route_name,
-            };
-            if route.metadata.deletion_timestamp.is_none() {
-                lock.insert(key, Arc::new(route.clone()));
-            } else {
-                lock.remove(&key);
-            }
+        if route.metadata.deletion_timestamp.is_some() {
+            let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+            lock.remove(&key);
+            return;
         }
+
+        let entry = Arc::new(route.clone());
+        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        lock.insert(key, entry);
     }
 
     pub fn remove(&self, route: &CTFRoute) {
@@ -136,29 +141,30 @@ impl RouteCache {
             route: String::new(),
         };
 
-        let lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
         let mut endpoints = Vec::new();
-
-        for (k, route) in lock
-            .range(start_key..)
-            .take_while(|(k, _)| k.namespace == namespace && k.instance == instance_name)
         {
-            if let Some(status) = &route.status
-                && let Some(route_endpoints) = &status.endpoints
+            let lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+            for (k, route) in lock
+                .range(start_key..)
+                .take_while(|(k, _)| k.namespace == namespace && k.instance == instance_name)
             {
-                if let Some(tls) = &route_endpoints.tls {
-                    endpoints.push(CTFInstanceStatusEndpoint {
-                        name: k.route.clone(),
-                        type_: "tls".to_string(),
-                        target: tls.clone(),
-                    });
-                }
-                if let Some(tcp) = &route_endpoints.tcp {
-                    endpoints.push(CTFInstanceStatusEndpoint {
-                        name: k.route.clone(),
-                        type_: "tcp".to_string(),
-                        target: tcp.clone(),
-                    });
+                if let Some(status) = &route.status
+                    && let Some(route_endpoints) = &status.endpoints
+                {
+                    if let Some(tls) = &route_endpoints.tls {
+                        endpoints.push(CTFInstanceStatusEndpoint {
+                            name: k.route.clone(),
+                            type_: "tls".to_string(),
+                            target: tls.clone(),
+                        });
+                    }
+                    if let Some(tcp) = &route_endpoints.tcp {
+                        endpoints.push(CTFInstanceStatusEndpoint {
+                            name: k.route.clone(),
+                            type_: "tcp".to_string(),
+                            target: tcp.clone(),
+                        });
+                    }
                 }
             }
         }

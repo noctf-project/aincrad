@@ -271,11 +271,22 @@ pub async fn reconcile_failure(
         .map(|s| s.endpoints.clone())
         .unwrap_or_default();
 
+    let (reason, message) = match err {
+        Error::TemplateNotFound(tmpl) => (
+            "TemplateNotFound".to_string(),
+            format!("Template \"{tmpl}\" not found"),
+        ),
+        Error::TemplateBuildError(msg) => ("TemplateBuildError".to_string(), msg.clone()),
+        Error::Kube(e) => ("KubeApiError".to_string(), e.to_string()),
+        Error::KubeCommon(e) => ("KubeCommonError".to_string(), e.to_string()),
+        Error::Custom(msg) => ("ReconciliationFailed".to_string(), msg.clone()),
+    };
+
     let ready_condition = Condition {
         type_: "Ready".to_string(),
         status: "False".to_string(),
-        reason: "ReconciliationFailed".to_string(),
-        message: err.to_string(),
+        reason,
+        message,
         last_transition_time: now,
         observed_generation,
     };
