@@ -5,7 +5,7 @@ pub mod tests {
     use kube::Client;
     use std::sync::Arc;
 
-    use crate::{reconcilers::template::ResolvedTemplate, utils::labels::TEMPLATE_GEN_ANNOTATION};
+    use crate::reconcilers::template::ResolvedTemplate;
 
     pub fn dummy_kube_client() -> Client {
         let config = kube::Config::new("https://127.0.0.1:6443".parse().unwrap());
@@ -202,11 +202,8 @@ pub mod tests {
         Client::new(ErrorService(status_code), config.default_namespace)
     }
 
-    pub fn dummy_instance(name: &str, gen_annotation: Option<&str>) -> CTFInstance {
-        let mut annotations = std::collections::BTreeMap::new();
-        if let Some(target_g) = gen_annotation {
-            annotations.insert(TEMPLATE_GEN_ANNOTATION.to_string(), target_g.to_string());
-        }
+    pub fn dummy_instance(name: &str, _gen_annotation: Option<&str>) -> CTFInstance {
+        let annotations = std::collections::BTreeMap::new();
         CTFInstance {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),

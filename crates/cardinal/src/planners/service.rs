@@ -1,9 +1,53 @@
-use k8s_common::crd::CTFTemplateSpecPod;
-use k8s_openapi::api::core::v1::{ServicePort, ServiceSpec};
+use k8s_common::crd::{CTFInstance, CTFTemplateSpecPod};
+use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
-use crate::btreemap;
-use crate::utils::labels::{INSTANCE_LABEL, POD_LABEL};
+use crate::{
+    Error, btreemap,
+    planners::{Planner, set_owner_ref},
+    reconcilers::template::ResolvedTemplate,
+    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL},
+    utils::naming::resource_name,
+};
+
+pub struct ServicePlanner;
+
+impl Planner for ServicePlanner {
+    type Resource = Service;
+
+    fn plan(instance: &CTFInstance, template: &ResolvedTemplate) -> Result<Vec<Service>, Error> {
+        let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
+        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+
+        let mut desired = Vec::new();
+
+        for pod in &template.spec.pods {
+            let svc_name = resource_name(instance_name, &pod.name);
+
+            let labels = btreemap! {
+                MANAGED_BY_LABEL => MANAGED_BY_VALUE,
+                INSTANCE_LABEL => instance_name,
+                POD_LABEL => pod.name.as_str(),
+            };
+
+            let mut svc = Service {
+                metadata: ObjectMeta {
+                    name: Some(svc_name),
+                    namespace: Some(ns.to_string()),
+                    labels: Some(labels),
+                    ..Default::default()
+                },
+                spec: Some(build_headless_service_spec(instance_name, pod)),
+                ..Default::default()
+            };
+            set_owner_ref(&mut svc, instance);
+            desired.push(svc);
+        }
+
+        Ok(desired)
+    }
+}
 
 /// Builds a Headless ClusterIP ServiceSpec for a specific pod within a CTFInstance.
 ///
@@ -89,5 +133,20 @@ mod tests {
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].port, 8080);
         assert_eq!(ports[0].name, Some("http".into()));
+    }
+
+    #[test]
+    fn test_plan_service() {
+        use crate::test_utils::tests::{dummy_instance, dummy_resolved_template};
+        let instance = dummy_instance("chal-1", None);
+        let template = dummy_resolved_template(1);
+
+        let desired = ServicePlanner::plan(&instance, &template).unwrap();
+        assert_eq!(desired.len(), 1);
+        assert_eq!(desired[0].metadata.name.as_deref(), Some("chal-1-c-web"));
+        assert_eq!(
+            desired[0].metadata.owner_references.as_ref().unwrap().len(),
+            1
+        );
     }
 }

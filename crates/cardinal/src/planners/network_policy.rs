@@ -1,14 +1,66 @@
-use crate::btreemap;
-use crate::utils::labels::{INSTANCE_LABEL, POD_LABEL};
+use k8s_common::crd::CTFInstance;
 use k8s_openapi::{
     api::networking::v1::{
-        IPBlock, NetworkPolicyEgressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec,
+        IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyPeer, NetworkPolicyPort,
+        NetworkPolicySpec,
     },
     apimachinery::pkg::{
-        apis::meta::v1::{LabelSelector, LabelSelectorRequirement},
+        apis::meta::v1::{LabelSelector, LabelSelectorRequirement, ObjectMeta},
         util::intstr::IntOrString,
     },
 };
+
+use crate::{
+    Error, btreemap,
+    planners::{Planner, set_owner_ref},
+    reconcilers::template::ResolvedTemplate,
+    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL},
+    utils::naming::resource_name,
+};
+
+pub struct NetworkPolicyPlanner;
+
+impl Planner for NetworkPolicyPlanner {
+    type Resource = NetworkPolicy;
+
+    fn plan(
+        instance: &CTFInstance,
+        template: &ResolvedTemplate,
+    ) -> Result<Vec<NetworkPolicy>, Error> {
+        let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
+        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+        let target_name = resource_name(instance_name, "np");
+
+        let allowed_internet_pods: Vec<String> = template
+            .spec
+            .pods
+            .iter()
+            .filter(|pod| pod.allow_internet)
+            .map(|pod| pod.name.clone())
+            .collect();
+
+        let labels = btreemap! {
+            MANAGED_BY_LABEL => MANAGED_BY_VALUE,
+            INSTANCE_LABEL => instance_name,
+        };
+
+        let mut np = NetworkPolicy {
+            metadata: ObjectMeta {
+                name: Some(target_name),
+                namespace: Some(ns.to_string()),
+                labels: Some(labels),
+                ..Default::default()
+            },
+            spec: Some(get_networkpolicy_spec(
+                instance_name,
+                &allowed_internet_pods,
+            )),
+        };
+        set_owner_ref(&mut np, instance);
+
+        Ok(vec![np])
+    }
+}
 
 const BLOCKED_IPS: &[&str] = &[
     "0.0.0.0/8",
@@ -228,6 +280,21 @@ mod tests {
         assert_eq!(
             match_exprs[0].values,
             Some(vec!["web".into(), "api".into()])
+        );
+    }
+
+    #[test]
+    fn test_plan_network_policy() {
+        use crate::test_utils::tests::{dummy_instance, dummy_resolved_template};
+        let instance = dummy_instance("chal-1", None);
+        let template = dummy_resolved_template(1);
+
+        let desired = NetworkPolicyPlanner::plan(&instance, &template).unwrap();
+        assert_eq!(desired.len(), 1);
+        assert_eq!(desired[0].metadata.name.as_deref(), Some("chal-1-c-np"));
+        assert_eq!(
+            desired[0].metadata.owner_references.as_ref().unwrap().len(),
+            1
         );
     }
 }

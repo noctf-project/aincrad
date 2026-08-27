@@ -12,12 +12,6 @@ pub enum Error {
     #[error("Template build error: {0}")]
     TemplateBuildError(String),
 
-    #[error("Template generation shifted for instance {instance_name}: target_gen {target_gen}")]
-    TemplateGenShifted {
-        instance_name: String,
-        target_gen: String,
-    },
-
     #[error("{0}")]
     Custom(String),
 }

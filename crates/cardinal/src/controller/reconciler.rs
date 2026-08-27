@@ -1,8 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use k8s_common::crd::{CTFInstance, CTFRoute, CTFTemplate};
-use k8s_openapi::api::{apps::v1::ReplicaSet, core::v1::Service, networking::v1::NetworkPolicy};
+use k8s_common::crd::{CTFInstance, CTFTemplate};
 use kube::{
     Api, Client,
     runtime::{
@@ -19,6 +18,16 @@ use crate::{Context, Error, reconcilers, utils::ttl::calculate_remaining_ttl};
 /// Reconciles a single `CTFInstance` resource state.
 #[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
 pub async fn reconcile(instance: Arc<CTFInstance>, ctx: Arc<Context>) -> Result<Action, Error> {
+    match reconcile_inner(&instance, &ctx).await {
+        Ok(action) => Ok(action),
+        Err(err) => {
+            let _ = reconcilers::status::reconcile_failure(&instance, &ctx, &err).await;
+            Err(err)
+        }
+    }
+}
+
+async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action, Error> {
     let name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
@@ -41,26 +50,47 @@ pub async fn reconcile(instance: Arc<CTFInstance>, ctx: Arc<Context>) -> Result<
         return Ok(Action::await_change());
     }
 
-    // Resolve CTFTemplate referenced by `instance.spec.template`.
-    let template = reconcilers::template::reconcile(&instance, &ctx).await?;
+    // Check if instance generation has already been observed
+    let observed_gen = instance.status.as_ref().and_then(|s| s.observed_generation);
+    let observed_tmpl_gen = instance.status.as_ref().and_then(|s| s.template_generation);
+    let is_instance_gen_current =
+        instance.metadata.generation.is_some() && instance.metadata.generation == observed_gen;
 
-    let target_gen = template.metadata.generation.unwrap_or(1).to_string();
-
-    let res = reconcile_children(&instance, &template, &ctx).await;
-    if let Err(Error::TemplateGenShifted { .. }) = res {
+    // If sync is disabled, instance generation alone determines if we can skip
+    if is_instance_gen_current && !instance.spec.sync {
         info!(
             name,
-            target_gen,
-            "Template generation shifted, updating CTFInstance template-generation annotation"
+            ns,
+            "CTFInstance generation already observed and sync is disabled, skipping reconciliation"
         );
-        reconcilers::status::reconcile(&instance, &ctx, &target_gen, false).await?;
+        if let Some(remaining) = calculate_remaining_ttl(instance.spec.expires_at) {
+            return Ok(Action::requeue(remaining + Duration::from_secs(10)));
+        }
         return Ok(Action::await_change());
     }
 
-    res?;
+    // Resolve CTFTemplate referenced by `instance.spec.template`.
+    let template = reconcilers::template::reconcile(instance, ctx).await?;
 
-    // Success! Update status conditions (Ready = True, Synced = True) & observedGeneration
-    reconcilers::status::reconcile(&instance, &ctx, &target_gen, true).await?;
+    // If sync is enabled, check if both instance and template generations are unchanged
+    if is_instance_gen_current
+        && instance.spec.sync
+        && template.metadata.generation == observed_tmpl_gen
+    {
+        info!(
+            name,
+            ns, "CTFInstance and CTFTemplate generations already observed, skipping reconciliation"
+        );
+        if let Some(remaining) = calculate_remaining_ttl(instance.spec.expires_at) {
+            return Ok(Action::requeue(remaining + Duration::from_secs(10)));
+        }
+        return Ok(Action::await_change());
+    }
+
+    reconcile_children(instance, &template, ctx).await?;
+
+    // Success! Update status conditions (Ready = True, Synced = True) & observed generations
+    reconcilers::status::reconcile(instance, ctx, template.metadata.generation).await?;
 
     if let Some(remaining) = calculate_remaining_ttl(instance.spec.expires_at) {
         // We want to make sure the object really expires to save requeuing
@@ -76,10 +106,13 @@ async fn reconcile_children(
     template: &reconcilers::template::ResolvedTemplate,
     ctx: &Context,
 ) -> Result<(), Error> {
-    reconcilers::replicaset::reconcile(instance, template, ctx).await?;
-    reconcilers::network_policy::reconcile(instance, template, ctx).await?;
-    reconcilers::service::reconcile(instance, template, ctx).await?;
-    reconcilers::route::reconcile(instance, template, ctx).await?;
+    use crate::planners::{NetworkPolicyPlanner, ReplicaSetPlanner, RoutePlanner, ServicePlanner};
+    use crate::reconcilers::helper::apply_planner;
+
+    apply_planner::<ReplicaSetPlanner>(ctx.client.clone(), instance, template).await?;
+    apply_planner::<NetworkPolicyPlanner>(ctx.client.clone(), instance, template).await?;
+    apply_planner::<ServicePlanner>(ctx.client.clone(), instance, template).await?;
+    apply_planner::<RoutePlanner>(ctx.client.clone(), instance, template).await?;
     Ok(())
 }
 
@@ -197,10 +230,6 @@ where
 pub async fn run(client: Client) {
     let instances = Api::<CTFInstance>::all(client.clone());
     let templates = Api::<CTFTemplate>::all(client.clone());
-    let replica_sets = Api::<ReplicaSet>::all(client.clone());
-    let network_policies = Api::<NetworkPolicy>::all(client.clone());
-    let ctf_routes = Api::<CTFRoute>::all(client.clone());
-    let services = Api::<Service>::all(client.clone());
 
     // Initialize in-memory CTFTemplate reflector store cache
     let (template_store, template_writer) = store();
@@ -255,13 +284,10 @@ pub async fn run(client: Client) {
 
     info!("Starting CTFInstance controller with template caching");
 
-    let child_config = Config::default().labels("app.kubernetes.io/managed-by=aincrad-cardinal");
-
+    // We do not watch/own child resources (ReplicaSets, NetworkPolicies, Services, CTFRoutes)
+    // because we largely do not care if child resources get deleted externally, avoiding unnecessary
+    // reconciliation churn, watcher overhead, and duplicate event triggers.
     Controller::new(instances, Config::default())
-        .owns(replica_sets, child_config.clone())
-        .owns(network_policies, child_config.clone())
-        .owns(ctf_routes, child_config.clone())
-        .owns(services, child_config)
         .watches(templates, Config::default(), move |template| {
             let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
             info!(
@@ -289,7 +315,6 @@ mod tests {
     use super::*;
     use crate::cache::InstanceCache;
     use crate::test_utils::tests::dummy_kube_client;
-    use crate::utils::labels::TEMPLATE_GEN_ANNOTATION;
     use chrono::{Duration as ChronoDuration, Utc};
     use k8s_common::crd::CTFInstanceSpec;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -326,9 +351,6 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
                 namespace: Some("default".into()),
-                annotations: Some(crate::btreemap! {
-                    TEMPLATE_GEN_ANNOTATION.to_string() => "1".to_string()
-                }),
                 ..Default::default()
             },
             spec: CTFInstanceSpec {
@@ -394,17 +416,155 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reconcile_template_gen_shifted() {
+    async fn test_reconcile_observed_generation_skips() {
         let client = dummy_kube_client();
         let ctx = Arc::new(Context::new(client));
-        // Instance annotation is at gen "2", but mock template is at gen 1
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
                 namespace: Some("default".into()),
-                annotations: Some(crate::btreemap! {
-                    TEMPLATE_GEN_ANNOTATION.to_string() => "2".to_string()
-                }),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                conditions: vec![],
+                endpoints: vec![],
+                ..Default::default()
+            }),
+        });
+
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_observed_generation_future_expiration_requeues() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let future_time = Utc::now() + ChronoDuration::seconds(120);
+
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                expires_at: Some(future_time),
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                conditions: vec![],
+                endpoints: vec![],
+                ..Default::default()
+            }),
+        });
+
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_ne!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_unobserved_generation_reconciles() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(2),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                conditions: vec![],
+                endpoints: vec![],
+                ..Default::default()
+            }),
+        });
+
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_synced_template_generation_change_reconciles() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                sync: true,
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                template_generation: Some(0), // template default generation is 1, so 0 triggers reconcile
+                conditions: vec![],
+                endpoints: vec![],
+            }),
+        });
+
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_synced_template_generation_match_skips() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                sync: true,
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                template_generation: Some(1), // matches template default generation 1
+                conditions: vec![],
+                endpoints: vec![],
+            }),
+        });
+
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_failure_records_status() {
+        use crate::test_utils::tests::error_kube_client;
+        let client = error_kube_client(500);
+        let ctx = Arc::new(Context::new(client));
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
                 ..Default::default()
             },
             spec: CTFInstanceSpec {
@@ -414,8 +574,8 @@ mod tests {
             status: None,
         });
 
-        let action = reconcile(instance, ctx).await.unwrap();
-        assert_eq!(action, Action::await_change());
+        let res = reconcile(instance, ctx).await;
+        assert!(matches!(res, Err(Error::Kube(_))));
     }
 
     #[tokio::test]

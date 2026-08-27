@@ -2,8 +2,8 @@ pub mod cache;
 pub mod context;
 pub mod controller;
 pub mod error;
+pub mod planners;
 pub mod reconcilers;
-pub mod resources;
 #[cfg(test)]
 pub mod test_utils;
 pub mod utils;

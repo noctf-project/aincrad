@@ -29,6 +29,8 @@ impl KubeListKey for CTFInstanceStatusEndpoint {
 #[serde(rename_all = "camelCase")]
 pub struct CTFInstanceStatus {
     pub observed_generation: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_generation: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(schema_with = "list_schema::<CTFInstanceStatusEndpoint>")]
     pub endpoints: Vec<CTFInstanceStatusEndpoint>,

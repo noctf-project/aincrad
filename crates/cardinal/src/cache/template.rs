@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use k8s_common::{SpecPatcher, crd::CTFTemplateSpecPod};
 
-use crate::resources::replicaset::POD_PATCH_BLACKLIST;
+use crate::planners::replicaset::POD_PATCH_BLACKLIST;
 
 pub type PodPatchersMap = Arc<HashMap<String, Option<SpecPatcher>>>;
 

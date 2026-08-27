@@ -124,7 +124,7 @@ fn map_insert_param(map: &mut BTreeMap<String, String>, name: String, val: Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::replicaset::POD_PATCH_BLACKLIST;
+    use crate::planners::replicaset::POD_PATCH_BLACKLIST;
     use k8s_common::SpecPatcher;
     use k8s_common::crd::{CTFInstanceSpec, CTFInstanceSpecParam, CTFTemplateSpecParam};
     use k8s_openapi::api::core::v1::Container;

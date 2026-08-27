@@ -1,87 +1,101 @@
 use k8s_common::crd::{CTFInstance, CTFInstanceStatus};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use k8s_openapi::jiff::Timestamp;
-use kube::{Api, ResourceExt};
-use tracing::{info, instrument};
+use kube::Api;
+use tracing::instrument;
 
-use crate::{Context, Error, utils::labels::TEMPLATE_GEN_ANNOTATION};
+use crate::{Context, Error};
 
-/// Updates CTFInstance status conditions, observedGeneration, and stamps template-generation annotation.
+/// Updates CTFInstance status conditions to Ready and stamps observed generations.
 #[instrument(skip(ctx, instance))]
 pub async fn reconcile(
     instance: &CTFInstance,
     ctx: &Context,
-    target_gen: &str,
-    is_ready: bool,
+    template_gen: Option<i64>,
 ) -> Result<(), Error> {
     let name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
     let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
 
-    let instance_gen = instance
-        .annotations()
-        .get(TEMPLATE_GEN_ANNOTATION)
-        .map(String::as_str);
-
-    if instance_gen != Some(target_gen) {
-        info!(
-            name,
-            target_gen, "Stamping template-generation annotation on CTFInstance"
-        );
-        let mut patch = instance.clone();
-        patch.metadata.managed_fields = None;
-        let annotations = patch
-            .metadata
-            .annotations
-            .get_or_insert_with(Default::default);
-        annotations.insert(TEMPLATE_GEN_ANNOTATION.to_string(), target_gen.to_string());
-
-        let patch_params = kube::api::PatchParams::apply("cardinal");
-        instances
-            .patch(name, &patch_params, &kube::api::Patch::Apply(patch))
-            .await?;
-    }
-
     let now = Time(Timestamp::now());
+    let observed_generation = instance.metadata.generation;
+    let template_generation = template_gen;
+
     let ready_condition = Condition {
         type_: "Ready".to_string(),
-        status: if is_ready { "True" } else { "False" }.to_string(),
-        reason: if is_ready {
-            "Reconciled"
-        } else {
-            "Progressing"
-        }
-        .to_string(),
-        message: if is_ready {
-            "CTFInstance reconciled successfully".to_string()
-        } else {
-            "Reconciling child resources".to_string()
-        },
+        status: "True".to_string(),
+        reason: "Reconciled".to_string(),
+        message: "CTFInstance reconciled successfully".to_string(),
         last_transition_time: now.clone(),
-        observed_generation: instance.metadata.generation,
+        observed_generation,
     };
 
     let synced_condition = Condition {
         type_: "Synced".to_string(),
-        status: if is_ready { "True" } else { "False" }.to_string(),
-        reason: if is_ready {
-            "Reconciled"
-        } else {
-            "TemplateGenShifted"
-        }
-        .to_string(),
-        message: if is_ready {
-            "Resource synced with template generation".to_string()
-        } else {
-            "Updating instance template-generation".to_string()
-        },
+        status: "True".to_string(),
+        reason: "Reconciled".to_string(),
+        message: "Resource synced with template".to_string(),
         last_transition_time: now,
-        observed_generation: instance.metadata.generation,
+        observed_generation,
     };
 
     let status_patch = serde_json::json!({
         "status": CTFInstanceStatus {
-            observed_generation: instance.metadata.generation,
+            observed_generation,
+            template_generation,
+            conditions: vec![ready_condition, synced_condition],
+            endpoints: vec![],
+        }
+    });
+
+    instances
+        .patch_status(
+            name,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(status_patch),
+        )
+        .await?;
+
+    Ok(())
+}
+
+/// Updates CTFInstance status conditions to indicate reconciliation failure.
+#[instrument(skip(ctx, instance, err))]
+pub async fn reconcile_failure(
+    instance: &CTFInstance,
+    ctx: &Context,
+    err: &Error,
+) -> Result<(), Error> {
+    let name = instance.metadata.name.as_deref().unwrap_or("unknown");
+    let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+    let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
+
+    let now = Time(Timestamp::now());
+    let observed_generation = instance.status.as_ref().and_then(|s| s.observed_generation);
+    let template_generation = instance.status.as_ref().and_then(|s| s.template_generation);
+
+    let ready_condition = Condition {
+        type_: "Ready".to_string(),
+        status: "False".to_string(),
+        reason: "ReconciliationFailed".to_string(),
+        message: err.to_string(),
+        last_transition_time: now.clone(),
+        observed_generation,
+    };
+
+    let synced_condition = Condition {
+        type_: "Synced".to_string(),
+        status: "False".to_string(),
+        reason: "ReconciliationFailed".to_string(),
+        message: err.to_string(),
+        last_transition_time: now,
+        observed_generation,
+    };
+
+    let status_patch = serde_json::json!({
+        "status": CTFInstanceStatus {
+            observed_generation,
+            template_generation,
             conditions: vec![ready_condition, synced_condition],
             endpoints: vec![],
         }
@@ -104,22 +118,24 @@ mod tests {
     use crate::test_utils::tests::{dummy_instance, dummy_kube_client};
 
     #[tokio::test]
-    async fn test_reconcile_status_ready() {
+    async fn test_reconcile_status() {
         let client = dummy_kube_client();
         let ctx = Context::new(client);
-        let instance = dummy_instance("chal-1", Some("1"));
+        let mut instance = dummy_instance("chal-1", Some("1"));
+        instance.metadata.generation = Some(2);
 
-        let res = reconcile(&instance, &ctx, "1", true).await;
+        let res = reconcile(&instance, &ctx, Some(3)).await;
         assert!(res.is_ok());
     }
 
     #[tokio::test]
-    async fn test_reconcile_status_progressing() {
+    async fn test_reconcile_failure() {
         let client = dummy_kube_client();
         let ctx = Context::new(client);
         let instance = dummy_instance("chal-1", None);
+        let err = Error::TemplateNotFound("missing".to_string());
 
-        let res = reconcile(&instance, &ctx, "2", false).await;
+        let res = reconcile_failure(&instance, &ctx, &err).await;
         assert!(res.is_ok());
     }
 }
