@@ -9,6 +9,7 @@ pub const TEMPLATE_LABEL: &str = "aincrad.noctf.dev/template";
 pub const POD_LABEL: &str = "aincrad.noctf.dev/pod";
 
 pub const RESTARTED_AT_ANNOTATION: &str = "aincrad.noctf.dev/restartedAt";
+pub const MIN_TEMPLATE_GENERATION_ANNOTATION: &str = "aincrad.noctf.dev/minTemplateGeneration";
 
 /// Constructs standard selector labels for child resources belonging to a CTFInstance.
 pub fn instance_labels(instance_name: &str) -> BTreeMap<String, String> {

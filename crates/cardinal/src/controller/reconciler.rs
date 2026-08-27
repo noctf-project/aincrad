@@ -50,37 +50,64 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
         return Ok(Action::await_change());
     }
 
-    // Check if instance generation has already been observed
+    // Check if instance generation and restartedAt annotation have already been observed
     let observed_gen = instance.status.as_ref().and_then(|s| s.observed_generation);
     let observed_tmpl_gen = instance.status.as_ref().and_then(|s| s.template_generation);
-    let is_instance_gen_current =
-        instance.metadata.generation.is_some() && instance.metadata.generation == observed_gen;
+    let observed_restarted_at = instance
+        .status
+        .as_ref()
+        .and_then(|s| s.restarted_at.as_deref());
+    let instance_restarted_at = instance
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
+        .map(|s| s.as_str());
 
-    // If sync is disabled, instance generation alone determines if we can skip
-    if is_instance_gen_current && !instance.spec.sync {
-        info!(
-            name,
-            ns,
-            "CTFInstance generation already observed and sync is disabled, skipping reconciliation"
-        );
-        if let Some(remaining) = calculate_remaining_ttl(instance.spec.expires_at) {
-            return Ok(Action::requeue(remaining + Duration::from_secs(10)));
-        }
-        return Ok(Action::await_change());
-    }
+    let min_tmpl_gen_annotation = instance
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION))
+        .and_then(|s| s.parse::<i64>().ok());
+
+    let is_instance_gen_current = instance.metadata.generation.is_some()
+        && instance.metadata.generation == observed_gen
+        && instance_restarted_at == observed_restarted_at;
 
     // Resolve CTFTemplate referenced by `instance.spec.template`.
     let template = reconcilers::template::reconcile(instance, ctx).await?;
 
-    // If sync is enabled, check if both instance and template generations are unchanged
-    if is_instance_gen_current
-        && instance.spec.sync
-        && template.metadata.generation == observed_tmpl_gen
+    // Check if requested minTemplateGeneration annotation exceeds the template's current generation
+    if let (Some(req_gen), Some(tmpl_gen)) = (min_tmpl_gen_annotation, template.metadata.generation)
+        && req_gen > tmpl_gen
     {
-        info!(
-            name,
-            ns, "CTFInstance and CTFTemplate generations already observed, skipping reconciliation"
-        );
+        info!(name, ns, req_gen, tmpl_gen, "Capping minTemplateGeneration annotation");
+        let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
+        let patch = serde_json::json!({
+            "metadata": {
+                "annotations": {
+                    crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION: tmpl_gen.to_string()
+                }
+            }
+        });
+        instances
+            .patch(
+                name,
+                &kube::api::PatchParams::default(),
+                &kube::api::Patch::Merge(patch),
+            )
+            .await?;
+        return Ok(Action::await_change());
+    }
+
+    let target_tmpl_gen = min_tmpl_gen_annotation
+        .or_else(|| if instance.spec.sync { template.metadata.generation } else { None });
+
+    let is_tmpl_gen_satisfied = observed_tmpl_gen >= target_tmpl_gen;
+
+    if is_instance_gen_current && is_tmpl_gen_satisfied {
+        info!(name, ns, "CTFInstance already reconciled, skipping");
         if let Some(remaining) = calculate_remaining_ttl(instance.spec.expires_at) {
             return Ok(Action::requeue(remaining + Duration::from_secs(10)));
         }
@@ -500,6 +527,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reconcile_min_template_generation_exceeds_caps_and_requeues() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+            "99".to_string(),
+        );
+
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                template_generation: Some(1),
+                conditions: vec![],
+                endpoints: vec![],
+                ..Default::default()
+            }),
+        });
+
+        // Should return Action::await_change after capping annotation to current template generation (1)
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_min_template_generation_satisfied_skips() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+            "1".to_string(),
+        );
+
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                template_generation: Some(1),
+                conditions: vec![],
+                endpoints: vec![],
+                ..Default::default()
+            }),
+        });
+
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_restarted_at_annotation_change_reconciles() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            crate::utils::labels::RESTARTED_AT_ANNOTATION.to_string(),
+            "2026-08-27T20:30:00Z".to_string(),
+        );
+
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                restarted_at: Some("2026-08-27T10:00:00Z".into()),
+                conditions: vec![],
+                endpoints: vec![],
+                ..Default::default()
+            }),
+        });
+
+        // Should NOT skip reconciliation because restarted_at annotation does not match status.restarted_at
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_restarted_at_annotation_matching_skips() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            crate::utils::labels::RESTARTED_AT_ANNOTATION.to_string(),
+            "2026-08-27T20:30:00Z".to_string(),
+        );
+
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                restarted_at: Some("2026-08-27T20:30:00Z".into()),
+                conditions: vec![],
+                endpoints: vec![],
+                ..Default::default()
+            }),
+        });
+
+        // Should skip reconciliation because both generation and restarted_at match status
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
     async fn test_reconcile_synced_template_generation_change_reconciles() {
         let client = dummy_kube_client();
         let ctx = Arc::new(Context::new(client));
@@ -520,6 +690,7 @@ mod tests {
                 template_generation: Some(0), // template default generation is 1, so 0 triggers reconcile
                 conditions: vec![],
                 endpoints: vec![],
+                ..Default::default()
             }),
         });
 
@@ -548,6 +719,7 @@ mod tests {
                 template_generation: Some(1), // matches template default generation 1
                 conditions: vec![],
                 endpoints: vec![],
+                ..Default::default()
             }),
         });
 

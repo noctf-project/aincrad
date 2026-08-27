@@ -20,6 +20,12 @@ pub async fn reconcile(
     let now = Time(Timestamp::now());
     let observed_generation = instance.metadata.generation;
     let template_generation = template_gen;
+    let restarted_at = instance
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
+        .cloned();
 
     let ready_condition = Condition {
         type_: "Ready".to_string(),
@@ -43,6 +49,7 @@ pub async fn reconcile(
         "status": CTFInstanceStatus {
             observed_generation,
             template_generation,
+            restarted_at,
             conditions: vec![ready_condition, synced_condition],
             endpoints: vec![],
         }
@@ -72,7 +79,14 @@ pub async fn reconcile_failure(
 
     let now = Time(Timestamp::now());
     let observed_generation = instance.status.as_ref().and_then(|s| s.observed_generation);
-    let template_generation = instance.status.as_ref().and_then(|s| s.template_generation);
+    let template_generation = instance
+        .status
+        .as_ref()
+        .and_then(|s| s.template_generation);
+    let restarted_at = instance
+        .status
+        .as_ref()
+        .and_then(|s| s.restarted_at.clone());
 
     let ready_condition = Condition {
         type_: "Ready".to_string(),
@@ -96,6 +110,7 @@ pub async fn reconcile_failure(
         "status": CTFInstanceStatus {
             observed_generation,
             template_generation,
+            restarted_at,
             conditions: vec![ready_condition, synced_condition],
             endpoints: vec![],
         }

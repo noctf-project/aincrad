@@ -1,8 +1,29 @@
+use std::fmt;
+use std::io;
+
 use sha2::{Digest, Sha256};
 
 pub mod labels;
 pub mod naming;
 pub mod ttl;
+
+pub struct HashWriter<'a, D: sha2::digest::Update>(pub &'a mut D);
+impl<'a, D: sha2::digest::Update> io::Write for HashWriter<'a, D> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+impl<'a, D: sha2::digest::Update> fmt::Write for HashWriter<'a, D> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0.update(s.as_bytes());
+        Ok(())
+    }
+}
 
 /// Computes the full lowercase Crockford Base32 SHA-256 hash of a string.
 pub fn hash_str_crockford(input: &str) -> String {

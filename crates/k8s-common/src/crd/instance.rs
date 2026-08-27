@@ -31,6 +31,8 @@ pub struct CTFInstanceStatus {
     pub observed_generation: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_generation: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarted_at: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(schema_with = "list_schema::<CTFInstanceStatusEndpoint>")]
     pub endpoints: Vec<CTFInstanceStatusEndpoint>,

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::sync::LazyLock;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -6,16 +7,17 @@ use k8s_common::crd::{CTFInstance, CTFTemplateSpecPod};
 use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetSpec};
 use k8s_openapi::api::core::v1::{PodSpec, PodTemplateSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
+use sha2::{Digest, Sha256};
 
+use crate::utils::HashWriter;
+use crate::utils::naming::resource_name;
 use crate::{
     Error, btreemap,
     planners::{Planner, set_owner_ref},
     reconcilers::template::ResolvedTemplate,
-    utils::hash_str_crockford,
     utils::labels::{
         INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL, RESTARTED_AT_ANNOTATION,
     },
-    utils::naming::resource_name,
 };
 
 /// Default GlobSet blacklist enforced for pod JSON patches.
@@ -65,14 +67,6 @@ impl Planner for ReplicaSetPlanner {
                 instance_restarted_at,
             );
 
-            // Compute 10-character Crockford Base32 hash of the rendered PodTemplateSpec
-            let template_json = serde_json::to_string(&rs_spec.template).unwrap_or_default();
-            let full_hash = hash_str_crockford(&template_json);
-            let pod_hash = &full_hash[..10.min(full_hash.len())];
-
-            let suffix = format!("{}-{}", pod_tmpl.name, pod_hash);
-            let rs_name = resource_name(instance_name, &suffix);
-
             let labels = btreemap! {
                 MANAGED_BY_LABEL => MANAGED_BY_VALUE,
                 INSTANCE_LABEL => instance_name,
@@ -81,7 +75,7 @@ impl Planner for ReplicaSetPlanner {
 
             let mut rs = ReplicaSet {
                 metadata: ObjectMeta {
-                    name: Some(rs_name),
+                    name: None,
                     namespace: Some(ns.to_string()),
                     labels: Some(labels),
                     ..Default::default()
@@ -91,6 +85,31 @@ impl Planner for ReplicaSetPlanner {
             };
             set_owner_ref(&mut rs, instance);
             desired.push(rs);
+        }
+
+        // As both replicasets should be managed together, they should be hashed together
+        let indices = {
+            let mut idx: Vec<usize> = (0..template.spec.pods.len()).collect();
+            idx.sort_by_key(|&i| &template.spec.pods[i].name);
+            idx
+        };
+        let mut hash = Sha256::new();
+        let mut writer = HashWriter(&mut hash);
+        for i in indices {
+            let d = &desired[i];
+            write!(writer, "pod/{}", template.spec.pods[i].name).unwrap();
+            serde_json::to_writer(&mut writer, &d.spec.as_ref().map(|x| &x.template))
+                .map_err(|e| format!("failed to serialize spec: {}", e))?;
+            write!(writer, "\n").unwrap();
+        }
+        let digest = hash.finalize();
+        let encoded = base32::encode(base32::Alphabet::Crockford, &digest).to_lowercase();
+        let chars = &encoded[..10.min(encoded.len())];
+        for (i, pod) in template.spec.pods.iter().enumerate() {
+            desired[i].metadata.name = Some(resource_name(
+                instance_name,
+                &format!("{}-{}", pod.name, chars),
+            ));
         }
 
         Ok(desired)
