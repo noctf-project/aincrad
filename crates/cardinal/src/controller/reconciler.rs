@@ -62,47 +62,56 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
         .annotations
         .as_ref()
         .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
-        .map(|s| s.as_str());
-
-    let min_tmpl_gen_annotation = instance
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION))
-        .and_then(|s| s.parse::<i64>().ok());
+        .map(|s| s.as_str())
+        .filter(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok());
 
     let is_instance_gen_current = instance.metadata.generation.is_some()
         && instance.metadata.generation == observed_gen
         && instance_restarted_at == observed_restarted_at;
 
+    let raw_min_tmpl_gen = instance
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION));
+
     // Resolve CTFTemplate referenced by `instance.spec.template`.
     let template = reconcilers::template::reconcile(instance, ctx).await?;
+
+    // Rewrite invalid minTemplateGeneration annotation (non-numeric or <= 0)
+    let min_tmpl_gen_annotation = match raw_min_tmpl_gen {
+        Some(raw_val) => match raw_val.parse::<i64>() {
+            Ok(parsed_gen) if parsed_gen > 0 => Some(parsed_gen),
+            _ => {
+                let valid_gen = template.metadata.generation.unwrap_or(1);
+                info!(
+                    name,
+                    ns, raw_val, valid_gen, "Rewriting invalid minTemplateGeneration annotation"
+                );
+                return patch_min_template_annotation(ctx, name, ns, valid_gen).await;
+            }
+        },
+        None => None,
+    };
 
     // Check if requested minTemplateGeneration annotation exceeds the template's current generation
     if let (Some(req_gen), Some(tmpl_gen)) = (min_tmpl_gen_annotation, template.metadata.generation)
         && req_gen > tmpl_gen
     {
-        info!(name, ns, req_gen, tmpl_gen, "Capping minTemplateGeneration annotation");
-        let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
-        let patch = serde_json::json!({
-            "metadata": {
-                "annotations": {
-                    crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION: tmpl_gen.to_string()
-                }
-            }
-        });
-        instances
-            .patch(
-                name,
-                &kube::api::PatchParams::default(),
-                &kube::api::Patch::Merge(patch),
-            )
-            .await?;
-        return Ok(Action::await_change());
+        info!(
+            name,
+            ns, req_gen, tmpl_gen, "Capping minTemplateGeneration annotation"
+        );
+        return patch_min_template_annotation(ctx, name, ns, tmpl_gen).await;
     }
 
-    let target_tmpl_gen = min_tmpl_gen_annotation
-        .or_else(|| if instance.spec.sync { template.metadata.generation } else { None });
+    let target_tmpl_gen = min_tmpl_gen_annotation.or({
+        if instance.spec.sync {
+            template.metadata.generation
+        } else {
+            None
+        }
+    });
 
     let is_tmpl_gen_satisfied = observed_tmpl_gen >= target_tmpl_gen;
 
@@ -124,6 +133,31 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
         return Ok(Action::requeue(remaining + Duration::from_secs(10)));
     }
 
+    Ok(Action::await_change())
+}
+
+/// Helper function to patch minTemplateGeneration annotation on a CTFInstance and return Action::await_change.
+async fn patch_min_template_annotation(
+    ctx: &Context,
+    name: &str,
+    ns: &str,
+    target_gen: i64,
+) -> Result<Action, Error> {
+    let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
+    let patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION: target_gen.to_string()
+            }
+        }
+    });
+    instances
+        .patch(
+            name,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(patch),
+        )
+        .await?;
     Ok(Action::await_change())
 }
 
@@ -558,6 +592,78 @@ mod tests {
         });
 
         // Should return Action::await_change after capping annotation to current template generation (1)
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_invalid_min_template_generation_rewrites_and_requeues() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+            "invalid_non_numeric".to_string(),
+        );
+
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                template_generation: Some(1),
+                conditions: vec![],
+                endpoints: vec![],
+                ..Default::default()
+            }),
+        });
+
+        // Should rewrite the annotation to valid template generation (1) and return Action::await_change
+        let action = reconcile(instance, ctx).await.unwrap();
+        assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_negative_min_template_generation_rewrites_and_requeues() {
+        let client = dummy_kube_client();
+        let ctx = Arc::new(Context::new(client));
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+            "-5".to_string(),
+        );
+
+        let instance = Arc::new(CTFInstance {
+            metadata: ObjectMeta {
+                name: Some("test-challenge".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: "whoami-template".into(),
+                ..Default::default()
+            },
+            status: Some(k8s_common::crd::CTFInstanceStatus {
+                observed_generation: Some(1),
+                template_generation: Some(1),
+                conditions: vec![],
+                endpoints: vec![],
+                ..Default::default()
+            }),
+        });
+
+        // Should rewrite the negative annotation to valid template generation (1) and return Action::await_change
         let action = reconcile(instance, ctx).await.unwrap();
         assert_eq!(action, Action::await_change());
     }

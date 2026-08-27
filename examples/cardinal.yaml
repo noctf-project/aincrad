@@ -38,5 +38,5 @@ metadata:
   namespace: kubectf-challenges
 spec:
   template: whoami-template
-  expiresAt: "2026-08-27T00:50:00Z"
+  expiresAt: "2026-08-28T00:50:00Z"
   sync: true

@@ -79,10 +79,7 @@ pub async fn reconcile_failure(
 
     let now = Time(Timestamp::now());
     let observed_generation = instance.status.as_ref().and_then(|s| s.observed_generation);
-    let template_generation = instance
-        .status
-        .as_ref()
-        .and_then(|s| s.template_generation);
+    let template_generation = instance.status.as_ref().and_then(|s| s.template_generation);
     let restarted_at = instance
         .status
         .as_ref()

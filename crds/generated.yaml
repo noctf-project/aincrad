@@ -605,6 +605,13 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              restartedAt:
+                nullable: true
+                type: string
+              templateGeneration:
+                format: int64
+                nullable: true
+                type: integer
             type: object
         required:
         - spec
@@ -614,4 +621,35 @@ spec:
     storage: true
     subresources:
       status: {}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ctfinstance-annotations
+spec:
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - aincrad.noctf.dev
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - ctfinstances
+  validations:
+  - expression: '!has(object.metadata.annotations) || !(''aincrad.noctf.dev/restartedAt'' in object.metadata.annotations) || !format.datetime().validate(string(object.metadata.annotations[''aincrad.noctf.dev/restartedAt''])).hasValue()'
+    message: annotation 'aincrad.noctf.dev/restartedAt' must be a valid RFC3339 date/time string
+  - expression: '!has(object.metadata.annotations) || !(''aincrad.noctf.dev/minTemplateGeneration'' in object.metadata.annotations) || object.metadata.annotations[''aincrad.noctf.dev/minTemplateGeneration''].matches(r''^[1-9][0-9]*$'')'
+    message: annotation 'aincrad.noctf.dev/minTemplateGeneration' must be a positive integer
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ctfinstance-annotations-binding
+spec:
+  policyName: ctfinstance-annotations
+  validationActions:
+  - Deny
 ---

@@ -390,4 +390,33 @@ mod tests {
         assert_eq!(envs[0].name, "PORT");
         assert_eq!(envs[0].value, Some("8080".into()));
     }
+
+    #[test]
+    fn test_spec_patcher_missing_param_error() {
+        let blacklist = build_test_blacklist();
+        let patch_json = json!([
+            {
+                "op": "add",
+                "path": "/containers/0/env",
+                "value": [
+                    { "name": "PORT", "value": "{{ params.missing_param }}" }
+                ]
+            }
+        ]);
+        let patch: Patch = serde_json::from_value(patch_json).unwrap();
+        let patcher = SpecPatcher::new(&blacklist, patch).unwrap();
+
+        let base_spec = PodSpec {
+            containers: vec![Container {
+                name: "web".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let context_map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        let result: Result<PodSpec, String> = patcher.apply(&base_spec, &context_map);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("failed to render template"));
+    }
 }

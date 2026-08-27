@@ -27,13 +27,13 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 RUN cargo build --release
 
-# runtime image
+# runtime image (alpine as we need netnl)
 FROM alpine:3 AS fluct
 RUN apk add --no-cache nftables libcap
 COPY --from=builder /build/target/release/fluct /usr/local/bin/fluct
 ENTRYPOINT ["/usr/local/bin/fluct"]
 
-FROM alpine:3 AS cardinal
+FROM gcr.io/distroless/static-debian13 AS cardinal
 COPY --from=builder /build/target/release/cardinal /usr/local/bin/cardinal
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/cardinal"]

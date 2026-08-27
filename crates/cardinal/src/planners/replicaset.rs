@@ -46,8 +46,15 @@ impl Planner for ReplicaSetPlanner {
             .and_then(|a| a.get(RESTARTED_AT_ANNOTATION))
             .map(|s| s.as_str());
 
+        let mut services_map = BTreeMap::new();
+        for pod_tmpl in &template.spec.pods {
+            let svc_name = resource_name(instance_name, &pod_tmpl.name);
+            services_map.insert(pod_tmpl.name.clone(), svc_name);
+        }
+
         let mut context_map = BTreeMap::new();
         context_map.insert("params".to_string(), &template.params_map);
+        context_map.insert("services".to_string(), &services_map);
 
         let mut desired = Vec::new();
 
@@ -100,7 +107,7 @@ impl Planner for ReplicaSetPlanner {
             write!(writer, "pod/{}", template.spec.pods[i].name).unwrap();
             serde_json::to_writer(&mut writer, &d.spec.as_ref().map(|x| &x.template))
                 .map_err(|e| format!("failed to serialize spec: {}", e))?;
-            write!(writer, "\n").unwrap();
+            writeln!(writer).unwrap();
         }
         let digest = hash.finalize();
         let encoded = base32::encode(base32::Alphabet::Crockford, &digest).to_lowercase();
@@ -116,19 +123,28 @@ impl Planner for ReplicaSetPlanner {
     }
 }
 
-/// Builds a ReplicaSetSpec for a specific pod within a CTFInstance.
-///
-/// - Replicas: Overridden or template replica count.
-/// - Selector: Matches `INSTANCE_LABEL => instance_name` and `POD_LABEL => pod_name`
-/// - PodSpec: The patched, evaluated PodSpec obtained from `ResolvedTemplate::get_patched_pod_spec`.
-/// - RestartedAt: Optional timestamp annotation attached to the pod template.
+/// Applies secure pod defaults for unset fields in CTF challenge workloads.
+fn apply_pod_defaults(pod_spec: &mut PodSpec) {
+    if pod_spec.automount_service_account_token.is_none() {
+        pod_spec.automount_service_account_token = Some(false);
+    }
+    if pod_spec.enable_service_links.is_none() {
+        pod_spec.enable_service_links = Some(false);
+    }
+    if pod_spec.termination_grace_period_seconds.is_none() {
+        pod_spec.termination_grace_period_seconds = Some(5);
+    }
+}
+
 pub fn build_replicaset_spec(
     instance_name: &str,
     pod_tmpl: &CTFTemplateSpecPod,
-    patched_pod_spec: PodSpec,
+    mut patched_pod_spec: PodSpec,
     replicas: i32,
     restarted_at: Option<&str>,
 ) -> ReplicaSetSpec {
+    apply_pod_defaults(&mut patched_pod_spec);
+
     let labels = btreemap! {
         MANAGED_BY_LABEL => MANAGED_BY_VALUE,
         INSTANCE_LABEL => instance_name,
@@ -277,5 +293,108 @@ mod tests {
         let desired2 = ReplicaSetPlanner::plan(&instance2, &template).unwrap();
 
         assert_ne!(desired1[0].metadata.name, desired2[0].metadata.name);
+    }
+
+    #[test]
+    fn test_pod_defaults_injection() {
+        let mut pod_spec = PodSpec::default();
+        apply_pod_defaults(&mut pod_spec);
+
+        assert_eq!(pod_spec.automount_service_account_token, Some(false));
+        assert_eq!(pod_spec.enable_service_links, Some(false));
+        assert_eq!(pod_spec.termination_grace_period_seconds, Some(5));
+
+        // Ensure explicit overrides in template are preserved
+        let mut custom_pod_spec = PodSpec {
+            automount_service_account_token: Some(true),
+            enable_service_links: Some(true),
+            termination_grace_period_seconds: Some(30),
+            ..Default::default()
+        };
+        apply_pod_defaults(&mut custom_pod_spec);
+
+        assert_eq!(custom_pod_spec.automount_service_account_token, Some(true));
+        assert_eq!(custom_pod_spec.enable_service_links, Some(true));
+        assert_eq!(custom_pod_spec.termination_grace_period_seconds, Some(30));
+    }
+
+    #[test]
+    fn test_plan_replicasets_with_services_context() {
+        use k8s_common::patcher::SpecPatcher;
+        use serde_json::json;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let patch_json = json!([
+            {
+                "op": "add",
+                "path": "/containers/0/env/0/value",
+                "value": "{{ services.db }}"
+            }
+        ]);
+        let patch: json_patch::Patch = serde_json::from_value(patch_json).unwrap();
+        let patcher = SpecPatcher::new(&POD_PATCH_BLACKLIST, patch).unwrap();
+
+        let mut pod_patchers = HashMap::new();
+        pod_patchers.insert("web".to_string(), Some(patcher));
+
+        let pod_tmpl_web = CTFTemplateSpecPod {
+            name: "web".into(),
+            replicas: 1,
+            spec: PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "web".into(),
+                    env: Some(vec![k8s_openapi::api::core::v1::EnvVar {
+                        name: "DB_HOST".into(),
+                        value: None,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let pod_tmpl_db = CTFTemplateSpecPod {
+            name: "db".into(),
+            replicas: 1,
+            ..Default::default()
+        };
+
+        let instance = dummy_instance("chal-web", None);
+        let template = ResolvedTemplate {
+            metadata: ObjectMeta::default(),
+            spec: k8s_common::crd::CTFTemplateSpec {
+                pods: vec![pod_tmpl_web, pod_tmpl_db],
+                ..Default::default()
+            },
+            pod_patchers: Arc::new(pod_patchers),
+            params_map: BTreeMap::new(),
+        };
+
+        let desired = ReplicaSetPlanner::plan(&instance, &template).unwrap();
+        let web_rs = desired
+            .iter()
+            .find(|rs| {
+                rs.metadata.labels.as_ref().unwrap().get(POD_LABEL) == Some(&"web".to_string())
+            })
+            .unwrap();
+        let web_pod_spec = web_rs
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .as_ref()
+            .unwrap()
+            .spec
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            web_pod_spec.containers[0].env.as_ref().unwrap()[0]
+                .value
+                .as_deref(),
+            Some("chal-web-c-db")
+        );
     }
 }
