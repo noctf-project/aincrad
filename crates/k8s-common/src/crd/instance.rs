@@ -8,7 +8,7 @@ use crate::crd::{
     util::{KubeListKey, PatchValue, immutable_property_schema, list_schema},
 };
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFInstanceStatusEndpoint {
     /// Endpoint or route name.

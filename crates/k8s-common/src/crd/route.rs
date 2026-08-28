@@ -1,3 +1,4 @@
+use aincrad_macros::PatchValue;
 use chrono::{DateTime, Utc};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
@@ -11,7 +12,7 @@ where
     i64::deserialize(d).map(|v| v.max(0) as u64)
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointTarget {
     pub host: String,
@@ -64,6 +65,28 @@ impl CTFRouteBackend {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq, PatchValue)]
+#[serde(rename_all = "camelCase")]
+pub struct CTFRouteSpecTCP {
+    /// Dedicated TCP port (0 or omitted for auto-allocation, or fixed port in reserved range).
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq, PatchValue)]
+#[serde(rename_all = "camelCase")]
+pub struct CTFRouteSpecTLS {
+    /// Subdomain prefix for the derived TLS hostname (e.g. 'web' in 'web-xxxx.c.noctf.dev'). Defaults to the route metadata name if omitted.
+    #[schemars(length(max = 48), regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"))]
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteTarget<'a> {
+    Tcp(&'a CTFRouteSpecTCP),
+    Tls(&'a CTFRouteSpecTLS),
+}
+
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[kube(
     group = "aincrad.noctf.dev",
@@ -71,6 +94,14 @@ impl CTFRouteBackend {
     kind = "CTFRoute",
     namespaced,
     status = CTFRouteStatus,
+)]
+#[schemars(
+    extend("x-kubernetes-validations" = [
+        {
+            "rule": "has(self.tcp) != has(self.tls)",
+            "message": "Exactly one of 'tcp' or 'tls' must be specified"
+        }
+    ])
 )]
 #[serde(rename_all = "camelCase")]
 /// Specification for dynamic L4 TCP/TLS routing and traffic inspection.
@@ -92,10 +123,20 @@ pub struct CTFRouteSpec {
     pub logs: bool,
     /// Target backend Kubernetes service name and port.
     pub backend: CTFRouteBackend,
-    /// Dedicated TCP port requested for raw TCP routing.
-    pub port: Option<u16>,
-    /// Optional TLS SNI routing configuration.
+    /// TCP routing configuration (mutually exclusive with 'tls').
+    pub tcp: Option<CTFRouteSpecTCP>,
+    /// TLS routing configuration (mutually exclusive with 'tcp').
     pub tls: Option<CTFRouteSpecTLS>,
+}
+
+impl CTFRouteSpec {
+    pub fn target(&self) -> Option<RouteTarget<'_>> {
+        match (&self.tcp, &self.tls) {
+            (Some(tcp), None) => Some(RouteTarget::Tcp(tcp)),
+            (None, Some(tls)) => Some(RouteTarget::Tls(tls)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
@@ -107,64 +148,46 @@ pub struct CTFRouteSpecPOW {
     pub enable_admin_bypass: bool,
 }
 
-use aincrad_macros::PatchValue;
-
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, PatchValue)]
-#[serde(rename_all = "camelCase")]
-pub struct CTFRouteSpecTLS {
-    /// Subdomain prefix for the derived TLS hostname (e.g. 'web' in 'web-xxxx.c.noctf.dev'). Defaults to the route metadata name if omitted.
-    #[schemars(length(max = 48), regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"))]
-    pub prefix: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_challenge_spec_deserialization() {
-        let json_omitted = serde_json::json!({
-            "backend": {
-                "service": "127.0.0.1",
-                "port": 8080
-            }
-        });
-        let spec_omitted: CTFRouteSpec = serde_json::from_value(json_omitted).unwrap();
-        assert_eq!(spec_omitted.backend.service, "127.0.0.1");
-        assert_eq!(spec_omitted.backend.port, 8080);
-        assert_eq!(spec_omitted.flag, None);
-        assert_eq!(spec_omitted.tls, None);
-        assert_eq!(spec_omitted.port, None);
-
-        let json_empty_tag = serde_json::json!({
+        let json_tcp = serde_json::json!({
             "backend": {
                 "service": "127.0.0.1",
                 "port": 8080
             },
-            "tls": {},
+            "tcp": {
+                "port": 20001
+            },
+            "flag": "my_flag"
         });
-        let spec_empty_tag: CTFRouteSpec = serde_json::from_value(json_empty_tag).unwrap();
-        assert_eq!(spec_empty_tag.tls, Some(CTFRouteSpecTLS { prefix: None }));
+        let spec_tcp: CTFRouteSpec = serde_json::from_value(json_tcp).unwrap();
+        assert_eq!(spec_tcp.backend.service, "127.0.0.1");
+        assert_eq!(spec_tcp.backend.port, 8080);
+        assert_eq!(spec_tcp.flag, Some("my_flag".to_string()));
+        assert_eq!(
+            spec_tcp.target(),
+            Some(RouteTarget::Tcp(&CTFRouteSpecTCP { port: Some(20001) }))
+        );
 
-        let json_full = serde_json::json!({
+        let json_tls = serde_json::json!({
             "backend": {
                 "service": "127.0.0.1",
                 "port": 8080
             },
-            "flag": "my_flag",
-            "port": 20001,
             "tls": {
                 "prefix": "web"
-            },
+            }
         });
-        let spec_full: CTFRouteSpec = serde_json::from_value(json_full).unwrap();
-        assert_eq!(spec_full.flag, Some("my_flag".to_string()));
-        assert_eq!(spec_full.port, Some(20001));
+        let spec_tls: CTFRouteSpec = serde_json::from_value(json_tls).unwrap();
         assert_eq!(
-            spec_full.tls,
-            Some(CTFRouteSpecTLS {
-                prefix: Some("web".to_string()),
-            })
+            spec_tls.target(),
+            Some(RouteTarget::Tls(&CTFRouteSpecTLS {
+                prefix: Some("web".to_string())
+            }))
         );
     }
 

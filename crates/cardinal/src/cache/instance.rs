@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use k8s_common::crd::{CTFInstance, CTFTemplate};
@@ -11,17 +11,23 @@ pub struct InstanceKey {
     pub instance: String,
 }
 
+#[derive(Default)]
+struct Inner {
+    index: BTreeMap<InstanceKey, ObjectRef<CTFInstance>>,
+    instance_templates: HashMap<(String, String), String>,
+}
+
 #[derive(Clone)]
 pub struct InstanceCache {
     store: Store<CTFInstance>,
-    index: Arc<Mutex<BTreeMap<InstanceKey, ObjectRef<CTFInstance>>>>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl InstanceCache {
     pub fn new(store: Store<CTFInstance>) -> Self {
         Self {
             store,
-            index: Arc::new(Mutex::new(BTreeMap::new())),
+            inner: Arc::new(Mutex::new(Inner::default())),
         }
     }
 
@@ -32,11 +38,8 @@ impl InstanceCache {
     pub fn update(&self, instance: &CTFInstance) {
         let name = instance.metadata.name.as_deref().unwrap_or_default();
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
-        let key = InstanceKey {
-            namespace: ns.to_string(),
-            template: instance.spec.template.clone(),
-            instance: name.to_string(),
-        };
+        let inst_id = (ns.to_string(), name.to_string());
+        let new_template = instance.spec.template.clone();
 
         let observed_gen = instance.status.as_ref().and_then(|s| s.observed_generation);
         let spec_gen = instance.metadata.generation;
@@ -47,32 +50,57 @@ impl InstanceCache {
         };
         let needs_template_watch = instance.spec.sync || is_unobserved;
 
+        let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Remove old indexed entry if the instance migrated from a different template
+        if let Some(old_template) = lock.instance_templates.remove(&inst_id) {
+            let old_key = InstanceKey {
+                namespace: ns.to_string(),
+                template: old_template,
+                instance: name.to_string(),
+            };
+            lock.index.remove(&old_key);
+        }
+
         if needs_template_watch && instance.metadata.deletion_timestamp.is_none() {
             let obj_ref = ObjectRef::from_obj(instance);
-            let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
-            lock.insert(key, obj_ref);
-        } else {
-            let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
-            lock.remove(&key);
+            let key = InstanceKey {
+                namespace: ns.to_string(),
+                template: new_template.clone(),
+                instance: name.to_string(),
+            };
+            lock.index.insert(key, obj_ref);
+            lock.instance_templates.insert(inst_id, new_template);
         }
     }
 
     pub fn remove(&self, instance: &CTFInstance) {
         let name = instance.metadata.name.as_deref().unwrap_or_default();
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
-        let key = InstanceKey {
-            namespace: ns.to_string(),
-            template: instance.spec.template.clone(),
-            instance: name.to_string(),
-        };
+        let inst_id = (ns.to_string(), name.to_string());
 
-        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
-        lock.remove(&key);
+        let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(template) = lock.instance_templates.remove(&inst_id) {
+            let key = InstanceKey {
+                namespace: ns.to_string(),
+                template,
+                instance: name.to_string(),
+            };
+            lock.index.remove(&key);
+        } else {
+            let key = InstanceKey {
+                namespace: ns.to_string(),
+                template: instance.spec.template.clone(),
+                instance: name.to_string(),
+            };
+            lock.index.remove(&key);
+        }
     }
 
     pub fn clear(&self) {
-        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
-        lock.clear();
+        let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        lock.index.clear();
+        lock.instance_templates.clear();
     }
 
     pub fn find_synced_instances(&self, template: &CTFTemplate) -> Vec<ObjectRef<CTFInstance>> {
@@ -84,8 +112,9 @@ impl InstanceCache {
             instance: String::new(),
         };
 
-        let lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
-        lock.range(start_key..)
+        let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        lock.index
+            .range(start_key..)
             .take_while(|(k, _)| k.namespace == tmpl_ns && k.template == tmpl_name)
             .map(|(_, val)| val.clone())
             .collect()
@@ -259,6 +288,11 @@ mod tests {
         cache.update(&inst);
 
         assert_eq!(cache.find_synced_instances(&tmpl_b).len(), 1);
+        assert_eq!(
+            cache.find_synced_instances(&tmpl_a).len(),
+            0,
+            "Demonstrates bug: tmpl-a index entry was leaked and not purged on spec.template change"
+        );
 
         // Explicit removal
         cache.remove(&inst);

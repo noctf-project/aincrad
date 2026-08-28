@@ -382,6 +382,7 @@ dependencies = [
  "axum",
  "base32",
  "chrono",
+ "clap",
  "futures",
  "globset",
  "hmac",

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 k8s-common = { path = "../k8s-common" }
+clap = { workspace = true }
 globset = { workspace = true }
 json-patch = { workspace = true }
 kube = { workspace = true }

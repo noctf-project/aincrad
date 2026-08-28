@@ -6,6 +6,9 @@ pub enum Error {
     #[error("{0}")]
     KubeCommon(#[from] k8s_common::Error),
 
+    #[error("Route allocation error: {0}")]
+    RouteAllocationError(#[from] crate::routing::RouteError),
+
     #[error("Lease manager error: {0}")]
     LeaseManager(#[from] kube_lease_manager::LeaseManagerError),
 

@@ -61,10 +61,12 @@ pub fn build_ctfroute_spec(
     if let Some(ov) = override_spec {
         match ov.port {
             PatchValue::Value(port) => {
-                merged.port = Some(port);
+                let mut tcp = merged.tcp.unwrap_or_default();
+                tcp.port = Some(port);
+                merged.tcp = Some(tcp);
             }
             PatchValue::Null => {
-                merged.port = None;
+                merged.tcp = None;
             }
             PatchValue::Unset => {}
         }
@@ -96,7 +98,7 @@ pub fn build_ctfroute_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_common::crd::{CTFRouteBackend, CTFRouteSpecTLS, CTFRouteSpecTLSPatch};
+    use k8s_common::crd::{CTFRouteBackend, CTFRouteSpecTCP, CTFRouteSpecTLS, CTFRouteSpecTLSPatch};
 
     #[test]
     fn test_build_ctfroute_spec_port_and_tls_overrides() {
@@ -105,7 +107,7 @@ mod tests {
                 service: "web".into(),
                 port: 8080,
             },
-            port: Some(443),
+            tcp: Some(CTFRouteSpecTCP { port: Some(443) }),
             tls: Some(CTFRouteSpecTLS {
                 prefix: Some("whoami".into()),
             }),
@@ -123,7 +125,7 @@ mod tests {
         let merged = build_ctfroute_spec("chal-1", &base_spec, Some(&override_spec));
 
         assert_eq!(merged.backend.service, resource_name("chal-1", "web"));
-        assert_eq!(merged.port, Some(8443));
+        assert_eq!(merged.tcp, Some(CTFRouteSpecTCP { port: Some(8443) }));
         assert_eq!(
             merged.tls,
             Some(CTFRouteSpecTLS {
@@ -139,7 +141,7 @@ mod tests {
                 service: "web".into(),
                 port: 8080,
             },
-            port: Some(443),
+            tcp: Some(CTFRouteSpecTCP { port: Some(443) }),
             tls: Some(CTFRouteSpecTLS {
                 prefix: Some("whoami".into()),
             }),
@@ -155,7 +157,7 @@ mod tests {
         let merged = build_ctfroute_spec("chal-1", &base_spec, Some(&override_spec));
 
         assert_eq!(merged.backend.service, resource_name("chal-1", "web"));
-        assert_eq!(merged.port, Some(443));
+        assert_eq!(merged.tcp, Some(CTFRouteSpecTCP { port: Some(443) }));
         assert_eq!(merged.tls, None);
     }
 
@@ -166,7 +168,7 @@ mod tests {
                 service: "web".into(),
                 port: 8080,
             },
-            port: Some(443),
+            tcp: Some(CTFRouteSpecTCP { port: Some(443) }),
             tls: Some(CTFRouteSpecTLS {
                 prefix: Some("whoami".into()),
             }),
@@ -176,7 +178,7 @@ mod tests {
         let merged = build_ctfroute_spec("chal-1", &base_spec, None);
 
         assert_eq!(merged.backend.service, resource_name("chal-1", "web"));
-        assert_eq!(merged.port, Some(443));
+        assert_eq!(merged.tcp, Some(CTFRouteSpecTCP { port: Some(443) }));
         assert_eq!(
             merged.tls,
             Some(CTFRouteSpecTLS {

@@ -4,8 +4,11 @@ pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 pub const MANAGED_BY_VALUE: &str = "aincrad-cardinal";
 
 pub const INSTANCE_LABEL: &str = "aincrad.noctf.dev/instance";
+pub const INSTANCE_NAMESPACE_LABEL: &str = "aincrad.noctf.dev/instance-namespace";
 pub const TEMPLATE_LABEL: &str = "aincrad.noctf.dev/template";
 pub const POD_LABEL: &str = "aincrad.noctf.dev/pod";
+
+pub const ROUTES_FINALIZER: &str = "aincrad.noctf.dev/routes";
 
 pub const RESTARTED_AT_ANNOTATION: &str = "aincrad.noctf.dev/restartedAt";
 pub const MIN_TEMPLATE_GENERATION_ANNOTATION: &str = "aincrad.noctf.dev/minTemplateGeneration";

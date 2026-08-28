@@ -76,6 +76,7 @@ pub mod tests {
                             || path.ends_with("/networkpolicies")
                             || path.ends_with("/ctfroutes")
                             || path.ends_with("/ctfinstances")
+                            || path.ends_with("/ctfproxyroutes")
                         {
                             let list = serde_json::json!({
                                 "apiVersion": "v1",
@@ -110,6 +111,8 @@ pub mod tests {
                             ("networking.k8s.io/v1", "NetworkPolicy")
                         } else if path.contains("replicasets") {
                             ("apps/v1", "ReplicaSet")
+                        } else if path.contains("ctfproxyroutes") {
+                            ("aincrad.noctf.dev/v1", "CTFProxyRoute")
                         } else if path.contains("ctfroutes") {
                             ("aincrad.noctf.dev/v1", "CTFRoute")
                         } else if path.contains("ctfinstances") {
@@ -128,6 +131,10 @@ pub mod tests {
                         });
                         if kind == "CTFInstance" {
                             body["spec"] = serde_json::json!({ "template": "whoami-template" });
+                        } else if kind == "CTFProxyRoute" {
+                            body["spec"] = serde_json::json!({
+                                "backend": "web.default.svc.cluster.local:80"
+                            });
                         } else if kind == "CTFRoute" {
                             body["spec"] = serde_json::json!({
                                 "backend": {

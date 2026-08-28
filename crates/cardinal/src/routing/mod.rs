@@ -1,6 +1,6 @@
-mod hostname;
+mod allocator;
 mod port_finder;
-mod ports_store;
+pub mod ports_store;
 
-pub use hostname::RouteDeriver;
-pub use ports_store::{PortAllocation, PortError, PortSyncResult, PortsStore, RouteKey};
+pub use allocator::{AllocatedRoute, RouteAllocator, RouteError, RouteKey};
+pub use ports_store::{PortError, PortsStore};

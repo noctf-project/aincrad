@@ -95,7 +95,11 @@ pub struct CTFTemplateSpecPod {
 #[schemars(
     extend("x-kubernetes-validations" = [
         {
-            "rule": "!has(self.spec.port) || self.spec.port == 0",
+            "rule": "has(self.spec.tcp) != has(self.spec.tls)",
+            "message": "Route must specify either 'tcp' or 'tls', but not both"
+        },
+        {
+            "rule": "!has(self.spec.tcp) || !has(self.spec.tcp.port) || self.spec.tcp.port == 0",
             "message": "Explicit external ports cannot be set; port must be omitted or set to 0"
         }
     ])
