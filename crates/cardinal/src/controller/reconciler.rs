@@ -418,12 +418,23 @@ pub async fn run(
     let template_cache = context.template_cache.clone().unwrap();
     let template_cache_task = template_cache.clone();
 
+    let template_ready_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let template_ready_notify = Arc::new(tokio::sync::Notify::new());
+
+    let template_flag_task = template_ready_flag.clone();
+    let template_notify_task = template_ready_notify.clone();
+
     // Template watch stream updates template cache before populating the template store
     let template_watcher_stream = watcher(templates.clone(), Config::default())
         .default_backoff()
         .inspect(move |res| {
             if let Ok(event) = res {
                 handle_template_watcher_event(event, &template_cache_task);
+                if let Event::InitDone = event {
+                    info!("CTFTemplate initial sync complete");
+                    template_flag_task.store(true, std::sync::atomic::Ordering::SeqCst);
+                    template_notify_task.notify_waiters();
+                }
             }
         });
 
@@ -444,6 +455,9 @@ pub async fn run(
     let allocator_init_done = allocator.clone();
     let instance_store_init_done = instance_store.clone();
 
+    let instance_template_flag = template_ready_flag.clone();
+    let instance_template_notify = template_ready_notify.clone();
+
     let (fatal_tx, mut fatal_rx) = tokio::sync::broadcast::channel::<String>(1);
 
     let instance_watcher_stream = watcher(instances, Config::default())
@@ -455,8 +469,14 @@ pub async fn run(
             let store = instance_store_init_done.clone();
             let cache = instance_cache_task.clone();
             let fatal_tx = fatal_tx.clone();
+            let template_flag = instance_template_flag.clone();
+            let template_notify = instance_template_notify.clone();
 
             async move {
+                if !template_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    template_notify.notified().await;
+                }
+
                 if let Ok(ref event) = res {
                     handle_instance_watcher_event(event, &cache);
                     if let Event::InitDone = event
