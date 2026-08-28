@@ -24,7 +24,6 @@ k8s-common = { path = "../k8s-common" }
 k8s-openapi = { workspace = true }
 kctf-pow = "2.1"
 kube = { workspace = true }
-kube-lease-manager = { workspace = true }
 libc = "0.2"
 rand = { workspace = true }
 regex = { workspace = true }

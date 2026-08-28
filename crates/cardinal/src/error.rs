@@ -6,6 +6,9 @@ pub enum Error {
     #[error("{0}")]
     KubeCommon(#[from] k8s_common::Error),
 
+    #[error("Lease manager error: {0}")]
+    LeaseManager(#[from] kube_lease_manager::LeaseManagerError),
+
     #[error("Template \"{0}\" not found")]
     TemplateNotFound(String),
 

@@ -40,13 +40,13 @@ fn accept_connection(
     socket: TcpStream,
     addr: SocketAddr,
 ) -> Option<()> {
-    let pair = service.routes_service.get_route_from_port(port)?;
+    let route = service.routes_service.get_tcp_route(port)?;
     trace!(
         "Accepting connection from {} (route {})",
         addr,
-        pair.namespaced_name()
+        route.metadata.name.as_deref().unwrap_or("unknown")
     );
-    let mut handler = Handler::new(service, pair, addr);
+    let mut handler = Handler::new(service, route, addr);
     let (rx, tx) = tokio::io::split(socket);
     tracker.spawn(async move {
         if let Err(err) = handler.handle(rx, tx).await {
@@ -77,7 +77,7 @@ async fn run_tproxy_listener(
         tokio::net::TcpSocket::new_v6()?
     };
 
-    crate::util::netfilter::set_ip_transparent(socket.as_raw_fd())?;
+    crate::netfilter::set_ip_transparent(socket.as_raw_fd())?;
     socket.set_reuseaddr(true)?;
     socket.bind(socket_addr)?;
 

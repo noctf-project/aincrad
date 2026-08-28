@@ -1218,7 +1218,6 @@ mod tests {
                 restarted_at: Some("2026-08-28T07:00:00Z".to_string()),
                 conditions: vec![],
                 endpoints: vec![],
-                ..Default::default()
             }),
         });
 

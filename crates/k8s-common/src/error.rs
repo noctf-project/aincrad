@@ -2,8 +2,6 @@
 pub enum Error {
     #[error("Kubernetes error: {0}")]
     Kube(#[from] kube::Error),
-    #[error("Lease manager error: {0}")]
-    LeaseManager(#[from] kube_lease_manager::LeaseManagerError),
     #[error("{0}")]
     Custom(String),
 }

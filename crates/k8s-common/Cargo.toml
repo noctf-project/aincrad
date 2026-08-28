@@ -10,7 +10,6 @@ globset = { workspace = true }
 json-patch = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
-kube-lease-manager = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

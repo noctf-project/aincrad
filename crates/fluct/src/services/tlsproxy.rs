@@ -109,14 +109,14 @@ async fn handle_connection(
     }
     .to_lowercase();
 
-    if let Some(pair) = service.routes_service.get_tls_route(&hostname) {
+    if let Some(route) = service.routes_service.get_named_route(&hostname) {
         trace!(
             "client {} connected to TLS challenge {}",
             addr,
-            pair.namespaced_name()
+            route.metadata.name.as_deref().unwrap_or("unknown")
         );
         let (c_rx, c_tx) = tokio::io::split(stream);
-        let mut handler = Handler::new(service, pair, addr);
+        let mut handler = Handler::new(service, route, addr);
         handler.handle(c_rx, c_tx).await?;
     }
 

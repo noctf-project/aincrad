@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
 use fluct::Error;
-use k8s_common::KubernetesClient;
+use kube::Client;
 use tokio::try_join;
 use tokio_rustls::rustls::crypto::ring;
 use tokio_util::sync::CancellationToken;
 
 mod config;
-mod crypto;
+mod hash;
 mod logger;
+mod netfilter;
 mod proxy;
 mod services;
 mod store;
-mod util;
 
 use crate::{
     config::{ServiceConfig, ServiceContext},
@@ -33,27 +33,24 @@ pub async fn run(config: ServiceConfig) -> Result<(), Error> {
 
     let shutdown = CancellationToken::new();
 
-    let kubernetes_client = KubernetesClient::new().await?;
+    let kube_client = Client::try_default().await?;
 
     let routes_service = RoutesService::new(
-        kubernetes_client.clone(),
-        &config.challenge_domain,
-        config.tls_port,
-        config.reserved_ports.clone(),
-        config.auto_ports.clone(),
-        &config.route_seed,
+        kube_client,
+        config.port_ranges.clone(),
+        config.system_namespace.clone(),
     );
 
     let (tls_tx, tls_rx) = if let Some(port) = config.tproxy_port {
-        util::netfilter::configure_netfilter(
-            port,
-            &[
-                config.auto_ports.0.clone(),
-                config.reserved_ports.0.clone(),
-                config.tls_port..=config.tls_port,
-            ],
-        )
-        .map_err(|e| format!("unable to configure netfilter {}", e))?;
+        let mut ranges: Vec<std::ops::RangeInclusive<u16>> = config
+            .port_ranges
+            .iter()
+            .map(|r| r.0.clone())
+            .collect();
+        ranges.push(config.tls_port..=config.tls_port);
+
+        netfilter::configure_netfilter(port, &ranges)
+            .map_err(|e| format!("unable to configure netfilter {}", e))?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         (Some(tx), Some(rx))

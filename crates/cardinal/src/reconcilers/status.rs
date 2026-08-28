@@ -279,6 +279,7 @@ pub async fn reconcile_failure(
         Error::TemplateBuildError(msg) => ("TemplateBuildError".to_string(), msg.clone()),
         Error::Kube(e) => ("KubeApiError".to_string(), e.to_string()),
         Error::KubeCommon(e) => ("KubeCommonError".to_string(), e.to_string()),
+        Error::LeaseManager(e) => ("LeaseManagerError".to_string(), e.to_string()),
         Error::Custom(msg) => ("ReconciliationFailed".to_string(), msg.clone()),
     };
 

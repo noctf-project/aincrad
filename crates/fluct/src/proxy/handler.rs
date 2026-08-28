@@ -2,6 +2,7 @@ use std::{io::Write, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use chrono::{Timelike, Utc};
 use fluct::{Error, Session};
+use k8s_common::crd::CTFProxyRoute;
 use tokio::{
     fs::OpenOptions,
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
@@ -15,19 +16,18 @@ use tracing::{debug, trace};
 
 use crate::{
     config::ServiceContext,
-    crypto::hash::derive_key,
+    hash::derive_key,
     logger::FileLogger,
     proxy::{
         challenge::{Challenge, ChallengeSolveState},
         flag::{FlagGenerator, V1FlagGenerator},
         get_line,
     },
-    store::routes::MetadataAndSpec,
 };
 
 pub struct Handler {
     service: Arc<ServiceContext>,
-    route: Arc<MetadataAndSpec>,
+    route: Arc<CTFProxyRoute>,
     session: Session,
     flag: String,
 }
@@ -41,7 +41,7 @@ type LogMessage = (u8, Vec<u8>);
 impl Handler {
     pub fn new(
         service: Arc<ServiceContext>,
-        route: Arc<MetadataAndSpec>,
+        route: Arc<CTFProxyRoute>,
         addr: SocketAddr,
     ) -> Self {
         Self {
@@ -130,12 +130,9 @@ impl Handler {
             );
         }
 
-        let namespace = &self.route.namespace;
-        let backend_addr = spec
-            .backend
-            .address(namespace, &self.service.config.cluster_domain);
+        let backend_addr = &spec.backend;
         debug!("Connecting to backend {}", backend_addr);
-        let mut socket = TcpStream::connect(&backend_addr).await?;
+        let mut socket = TcpStream::connect(backend_addr).await?;
         let (b_rx, mut b_tx) = socket.split();
         let mut b_rx = BufReader::with_capacity(BUF_SIZE, b_rx);
         if spec.flag.is_some() {
@@ -163,7 +160,6 @@ impl Handler {
         Ok(())
     }
 
-    // TODO: this is shit, too many heap allocations
     async fn pipe<R, W>(
         &self,
         cancel: CancellationToken,
@@ -178,25 +174,19 @@ impl Handler {
     {
         loop {
             select! {
-              r = rx.fill_buf() => {
-                match r {
-                  Ok(n) => {
-                    let l = n.len();
-                    if l == 0 {
-                      cancel.cancel();
-                      break Ok(());
-                    }
-                    let _ = log.try_send((stream, n.to_vec()));
-                    if tx.write_all(n).await.is_err() {
-                      cancel.cancel();
-                      break Ok(());
-                    }
-                    rx.consume(l);
-                  },
-                  Err(_) => {
-                    cancel.cancel();
-                    break Ok(());
-                  }
+              res = rx.fill_buf() => {
+                let bytes = res?;
+                let len = bytes.len();
+                if len == 0 {
+                  cancel.cancel();
+                  break Ok(());
+                }
+                tx.write_all(bytes).await?;
+                let log_data = bytes.to_vec();
+                rx.consume(len);
+                if log.send((stream, log_data)).await.is_err() {
+                  cancel.cancel();
+                  break Ok(());
                 }
               },
               _ = cancel.cancelled() => {
@@ -234,8 +224,9 @@ impl Handler {
     fn get_log_filename(&self) -> String {
         let timestamp_nanos = (self.session.timestamp.timestamp() as u64) * 1_000_000_000
             + (self.session.timestamp.nanosecond() as u64);
-        let key = self.route.route_key_ref();
-        format!("{}:{}:{}", key.namespace, key.name, timestamp_nanos)
+        let name = self.route.metadata.name.as_deref().unwrap_or("unknown");
+        let ns = self.route.metadata.namespace.as_deref().unwrap_or("default");
+        format!("{}:{}:{}", ns, name, timestamp_nanos)
     }
 }
 
@@ -245,15 +236,13 @@ mod tests {
     use crate::config::{PortRange, ServiceConfig};
     use crate::services::routes::RoutesService;
     use chrono::{Duration as ChronoDuration, Utc};
-    use k8s_common::{
-        KubernetesClient,
-        crd::{CTFRouteBackend, CTFRouteSpec, CTFRouteSpecPOW},
-    };
+    use k8s_common::crd::{CTFProxyRouteSpec, CTFProxyRouteSpecPOW};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::net::{IpAddr, Ipv4Addr};
     use tokio::io::AsyncReadExt;
 
     fn create_test_service_context() -> Arc<ServiceContext> {
-        let client = KubernetesClient::new_dummy_for_tests();
+        let client = crate::services::routes::create_dummy_kube_client();
         Arc::new(ServiceContext {
             config: ServiceConfig {
                 host: "[::]".into(),
@@ -261,21 +250,16 @@ mod tests {
                 tls_cert: "cert.pem".into(),
                 tls_key: "key.pem".into(),
                 challenge_domain: "".into(),
-                cluster_domain: "cluster.local".into(),
-                route_seed: "link-start".into(),
                 flag_prefix: "CTF".into(),
                 logs_dir: "./data/".into(),
-                reserved_ports: PortRange(20000..=20999),
-                auto_ports: PortRange(30000..=30999),
+                port_ranges: vec![PortRange(20000..=20999), PortRange(30000..=30999)],
+                system_namespace: None,
                 tproxy_port: None,
             },
             routes_service: RoutesService::new(
                 client.clone(),
-                "",
-                443,
-                PortRange(20000..=20999),
-                PortRange(30000..=30999),
-                "link-start",
+                vec![PortRange(20000..=20999), PortRange(30000..=30999)],
+                None,
             ),
             shutdown: CancellationToken::new(),
         })
@@ -284,20 +268,17 @@ mod tests {
     #[tokio::test]
     async fn test_handler_get_log_filename() {
         let ctx = create_test_service_context();
-        let spec = CTFRouteSpec {
+        let spec = CTFProxyRouteSpec {
             flag: Some("test_flag".into()),
-            backend: CTFRouteBackend {
-                service: "127.0.0.1".into(),
-                port: 8080,
-            },
+            backend: "127.0.0.1:8080".into(),
             ..Default::default()
         };
-        let challenge = Arc::new(MetadataAndSpec {
-            name: "my-chal".into(),
-            namespace: "default".into(),
-            uid: "uid-handler-log".into(),
-            generation: 1,
-            observed_generation: None,
+        let challenge = Arc::new(CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("p20001".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
             spec,
         });
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
@@ -305,19 +286,22 @@ mod tests {
         handler.flag = "CTF{test_flag|secret_payload}".into();
 
         let filename = handler.get_log_filename();
-        assert!(filename.starts_with("default:my-chal:"));
+        assert!(filename.starts_with("default:p20001:"));
     }
 
     #[tokio::test]
     async fn test_handler_pipe() {
         let ctx = create_test_service_context();
-        let spec = CTFRouteSpec::default();
-        let challenge = Arc::new(MetadataAndSpec {
-            name: "my-chal".into(),
-            namespace: "default".into(),
-            uid: "uid-pipe".into(),
-            generation: 1,
-            observed_generation: None,
+        let spec = CTFProxyRouteSpec {
+            backend: "127.0.0.1:8080".into(),
+            ..Default::default()
+        };
+        let challenge = Arc::new(CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("p20001".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
             spec,
         });
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
@@ -354,20 +338,21 @@ mod tests {
     async fn test_handler_unavailable_challenge() {
         let ctx = create_test_service_context();
         let future_time = Utc::now() + ChronoDuration::hours(24);
-        let spec = CTFRouteSpec {
-            available_at: Some(future_time.into()),
-            pow: Some(CTFRouteSpecPOW {
+        let spec = CTFProxyRouteSpec {
+            backend: "127.0.0.1:8080".into(),
+            available_at: Some(future_time),
+            pow: Some(CTFProxyRouteSpecPOW {
                 difficulty: 0,
                 enable_admin_bypass: false,
             }),
             ..Default::default()
         };
-        let challenge = Arc::new(MetadataAndSpec {
-            name: "my-chal".into(),
-            namespace: "default".into(),
-            uid: "uid-unavail".into(),
-            generation: 1,
-            observed_generation: None,
+        let challenge = Arc::new(CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("p20001".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
             spec,
         });
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
@@ -393,20 +378,21 @@ mod tests {
     async fn test_handler_unavailable_challenge_admin_bypass() {
         let ctx = create_test_service_context();
         let future_time = Utc::now() + ChronoDuration::hours(24);
-        let spec = CTFRouteSpec {
-            available_at: Some(future_time.into()),
-            pow: Some(CTFRouteSpecPOW {
+        let spec = CTFProxyRouteSpec {
+            backend: "127.0.0.1:8080".into(),
+            available_at: Some(future_time),
+            pow: Some(CTFProxyRouteSpecPOW {
                 difficulty: 0,
                 enable_admin_bypass: true,
             }),
             ..Default::default()
         };
-        let challenge = Arc::new(MetadataAndSpec {
-            name: "my-chal".into(),
-            namespace: "default".into(),
-            uid: "uid-admin-bypass".into(),
-            generation: 1,
-            observed_generation: None,
+        let challenge = Arc::new(CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("p20001".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
             spec,
         });
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
@@ -432,47 +418,5 @@ mod tests {
         client_tx.write_all(b"invalid_token\n").await.unwrap();
 
         assert!(handle.await.unwrap().is_ok());
-    }
-
-    #[test]
-    fn test_route_backend_address_resolution() {
-        let spec_simple = CTFRouteSpec {
-            backend: CTFRouteBackend {
-                service: "web-svc".to_string(),
-                port: 80,
-            },
-            ..Default::default()
-        };
-        let route_pair = ("kubectf-challenges:web-target".to_string(), spec_simple);
-
-        let (namespace, _) = route_pair
-            .0
-            .split_once(':')
-            .unwrap_or(("default", &route_pair.0));
-        assert_eq!(namespace, "kubectf-challenges");
-        assert_eq!(
-            route_pair.1.backend.address(namespace, "cluster.local"),
-            "web-svc.kubectf-challenges.svc.cluster.local:80"
-        );
-
-        let spec_fqdn = CTFRouteSpec {
-            backend: CTFRouteBackend {
-                service: "example.com".to_string(),
-                port: 443,
-            },
-            ..Default::default()
-        };
-        let route_fqdn = ("kubectf-challenges:web-fqdn".to_string(), spec_fqdn);
-        let (namespace_fqdn, _) = route_fqdn
-            .0
-            .split_once(':')
-            .unwrap_or(("default", &route_fqdn.0));
-        assert_eq!(
-            route_fqdn
-                .1
-                .backend
-                .address(namespace_fqdn, "cluster.local"),
-            "example.com:443"
-        );
     }
 }

@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 
-use crate::crypto::hash::hmac_sha256;
+use crate::hash::hmac_sha256;
 
 use super::get_line;
 

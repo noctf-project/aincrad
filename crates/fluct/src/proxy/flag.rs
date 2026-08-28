@@ -12,7 +12,7 @@ use fluct::Session;
 use rand::Rng;
 use rand::rngs::StdRng;
 
-use crate::crypto::hash::hmac_sha256;
+use crate::hash::hmac_sha256;
 
 const V6_V4: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff];
 pub trait FlagGenerator {

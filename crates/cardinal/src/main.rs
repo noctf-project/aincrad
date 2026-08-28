@@ -1,8 +1,6 @@
-use std::time::Duration;
-
 use cardinal::Error;
-use k8s_common::KubernetesClient;
 use kube::Client;
+use kube_lease_manager::LeaseManagerBuilder;
 use tokio_rustls::rustls;
 use tracing::{info, warn};
 
@@ -11,13 +9,14 @@ async fn main() -> Result<(), Error> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt::init();
 
-    let k8s_client = KubernetesClient::new().await?;
     let kube_client = Client::try_default().await?;
 
     info!("Starting cardinal controller");
 
-    let manager = k8s_client
-        .get_lease_manager("cardinal-leader", Duration::from_secs(15))
+    let manager = LeaseManagerBuilder::new(kube_client.clone(), "cardinal-leader")
+        .with_duration(15)
+        .with_namespace(kube_client.default_namespace())
+        .build()
         .await?;
 
     let (mut channel, _task) = manager.watch().await;
