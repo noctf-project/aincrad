@@ -33,6 +33,7 @@ pub static POD_PATCH_BLACKLIST: LazyLock<GlobSet> = LazyLock::new(|| {
 pub struct ReplicaSetPlanner;
 
 impl Planner for ReplicaSetPlanner {
+    const KIND: &'static str = "ReplicaSet";
     type Resource = ReplicaSet;
 
     fn plan(instance: &CTFInstance, template: &ResolvedTemplate) -> Result<Vec<ReplicaSet>, Error> {

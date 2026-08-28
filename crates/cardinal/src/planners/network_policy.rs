@@ -21,6 +21,7 @@ use crate::{
 pub struct NetworkPolicyPlanner;
 
 impl Planner for NetworkPolicyPlanner {
+    const KIND: &'static str = "NetworkPolicy";
     type Resource = NetworkPolicy;
 
     fn plan(

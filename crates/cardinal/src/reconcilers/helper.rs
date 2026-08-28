@@ -29,12 +29,13 @@ pub async fn apply_planner<P: Planner>(
     let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let api: Api<P::Resource> = Api::namespaced(client, ns);
 
-    sync_resources(&api, instance_name, desired).await
+    sync_resources(&api, P::KIND, instance_name, desired).await
 }
 
 /// Applies a list of desired resources using Server-Side Apply and prunes orphans.
 pub async fn sync_resources<K>(
     api: &Api<K>,
+    kind: &'static str,
     instance_name: &str,
     desired: Vec<K>,
 ) -> Result<(), Error>
@@ -48,7 +49,12 @@ where
         if let Some(name) = resource.meta().name.as_deref() {
             desired_names.insert(name.to_string());
             api.patch(name, &patch_params, &Patch::Apply(&resource))
-                .await?;
+                .await
+                .map_err(|e| Error::ApplyResource {
+                    kind,
+                    name: name.to_string(),
+                    source: Box::new(e),
+                })?;
         }
     }
 
@@ -185,7 +191,12 @@ pub async fn apply_proxy_routes(
     for route in desired_routes {
         if let Some(name) = route.meta().name.as_deref() {
             api.patch(name, &patch_params, &Patch::Apply(&route))
-                .await?;
+                .await
+                .map_err(|e| Error::ApplyResource {
+                    kind: "CTFProxyRoute",
+                    name: name.to_string(),
+                    source: Box::new(e),
+                })?;
         }
     }
 
@@ -383,6 +394,39 @@ mod tests {
 
         let res = apply_planner::<ReplicaSetPlanner>(client, &instance, &template).await;
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_apply_planner_failure_returns_apply_resource_error() {
+        use axum::body::Body;
+        use axum::http::{Response, StatusCode};
+        use tower::service_fn;
+
+        let mock_service = service_fn(|_req: axum::http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(
+                        r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"webhook rejected","code":500}"#,
+                    ))
+                    .unwrap(),
+            )
+        });
+
+        let client = kube::Client::new(mock_service, "default");
+        let instance = dummy_instance("chal-1", None);
+        let template = dummy_resolved_template(1);
+
+        let res = apply_planner::<ReplicaSetPlanner>(client, &instance, &template).await;
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            Error::ApplyResource { kind, name, source } => {
+                assert_eq!(kind, "ReplicaSet");
+                assert!(name.starts_with("chal-1-c-web"));
+                assert!(source.to_string().contains("webhook rejected"));
+            }
+            other => panic!("Expected ApplyResource, got: {:?}", other),
+        }
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ use crate::{
 pub struct ServicePlanner;
 
 impl Planner for ServicePlanner {
+    const KIND: &'static str = "Service";
     type Resource = Service;
 
     fn plan(instance: &CTFInstance, template: &ResolvedTemplate) -> Result<Vec<Service>, Error> {

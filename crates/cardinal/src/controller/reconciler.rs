@@ -162,7 +162,7 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
 
     let endpoints = reconcile_children(instance, &template, ctx).await?;
 
-    // Success! Update status conditions (Ready = True, RoutesReady) & observed generations & endpoints
+    // Success! Update status conditions (Ready = True) & observed generations & endpoints
     reconcilers::status::reconcile(instance, ctx, template.metadata.generation, endpoints).await?;
 
     if let Some(remaining) = calculate_remaining_ttl(expires_at) {

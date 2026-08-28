@@ -6,33 +6,6 @@ use tracing::instrument;
 
 use crate::{Context, Error};
 
-/// Helper function to build the RoutesReady status condition based on allocated endpoints.
-pub fn build_routes_ready_condition(
-    endpoints_count: usize,
-    now: Time,
-    observed_generation: Option<i64>,
-) -> Condition {
-    if endpoints_count == 0 {
-        return Condition {
-            type_: "RoutesReady".to_string(),
-            status: "True".to_string(),
-            reason: "NoRoutes".to_string(),
-            message: "No routes configured for instance".to_string(),
-            last_transition_time: now,
-            observed_generation,
-        };
-    }
-
-    Condition {
-        type_: "RoutesReady".to_string(),
-        status: "True".to_string(),
-        reason: "AllRoutesReady".to_string(),
-        message: format!("{endpoints_count}/{endpoints_count} routes ready"),
-        last_transition_time: now,
-        observed_generation,
-    }
-}
-
 /// Updates CTFInstance status conditions to Ready and stamps observed generations and endpoints.
 #[instrument(skip(ctx, instance, endpoints))]
 pub async fn reconcile(
@@ -60,19 +33,16 @@ pub async fn reconcile(
         status: "True".to_string(),
         reason: "Reconciled".to_string(),
         message: "CTFInstance reconciled successfully".to_string(),
-        last_transition_time: now.clone(),
+        last_transition_time: now,
         observed_generation,
     };
-
-    let routes_ready_condition =
-        build_routes_ready_condition(endpoints.len(), now, observed_generation);
 
     let status_patch = serde_json::json!({
         "status": CTFInstanceStatus {
             observed_generation,
             template_generation,
             restarted_at,
-            conditions: vec![ready_condition, routes_ready_condition],
+            conditions: vec![ready_condition],
             endpoints,
         }
     });
@@ -119,6 +89,10 @@ pub async fn reconcile_failure(
         ),
         Error::TemplateBuildError(msg) => ("TemplateBuildError".to_string(), msg.clone()),
         Error::RouteAllocationError(e) => ("RouteAllocationError".to_string(), e.to_string()),
+        Error::ApplyResource { kind, name, source } => (
+            "ResourceApplyError".to_string(),
+            format!("Failed to apply {kind} \"{name}\": {source}"),
+        ),
         Error::Kube(e) => ("KubeApiError".to_string(), e.to_string()),
         Error::KubeCommon(e) => ("KubeCommonError".to_string(), e.to_string()),
         Error::LeaseManager(e) => ("LeaseManagerError".to_string(), e.to_string()),
@@ -130,28 +104,16 @@ pub async fn reconcile_failure(
         status: "False".to_string(),
         reason,
         message,
-        last_transition_time: now.clone(),
+        last_transition_time: now,
         observed_generation,
     };
-
-    let mut conditions = vec![ready_condition];
-    if matches!(err, Error::RouteAllocationError(_)) {
-        conditions.push(Condition {
-            type_: "RoutesReady".to_string(),
-            status: "False".to_string(),
-            reason: "RouteAllocationError".to_string(),
-            message: err.to_string(),
-            last_transition_time: now,
-            observed_generation,
-        });
-    }
 
     let status_patch = serde_json::json!({
         "status": CTFInstanceStatus {
             observed_generation,
             template_generation,
             restarted_at,
-            conditions,
+            conditions: vec![ready_condition],
             endpoints,
         }
     });
@@ -203,22 +165,6 @@ mod tests {
         assert!(res_route.is_ok());
     }
 
-    #[test]
-    fn test_build_routes_ready_condition() {
-        let now = Time(Timestamp::now());
-
-        // Zero expected routes
-        let cond_zero = build_routes_ready_condition(0, now.clone(), Some(1));
-        assert_eq!(cond_zero.status, "True");
-        assert_eq!(cond_zero.reason, "NoRoutes");
-
-        // Routes ready
-        let cond_routes = build_routes_ready_condition(2, now, Some(1));
-        assert_eq!(cond_routes.status, "True");
-        assert_eq!(cond_routes.reason, "AllRoutesReady");
-        assert_eq!(cond_routes.message, "2/2 routes ready");
-    }
-
     #[tokio::test]
     async fn test_reconcile_failure_preserves_existing_endpoints() {
         use k8s_common::crd::EndpointTarget;
@@ -242,5 +188,13 @@ mod tests {
         let err = Error::TemplateBuildError("Failed to patch JSON".to_string());
         let res = reconcile_failure(&instance, &ctx, &err).await;
         assert!(res.is_ok());
+
+        let apply_err = Error::ApplyResource {
+            kind: "ReplicaSet",
+            name: "chal-1-web".to_string(),
+            source: Box::new(kube::Error::Service(tower::BoxError::from("quota exceeded"))),
+        };
+        let res_apply = reconcile_failure(&instance, &ctx, &apply_err).await;
+        assert!(res_apply.is_ok());
     }
 }

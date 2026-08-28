@@ -18,6 +18,14 @@ pub enum Error {
     #[error("{0}")]
     TemplateBuildError(String),
 
+    #[error("Failed to apply {kind} \"{name}\": {source}")]
+    ApplyResource {
+        kind: &'static str,
+        name: String,
+        #[source]
+        source: Box<kube::Error>,
+    },
+
     #[error("{0}")]
     Custom(String),
 }
