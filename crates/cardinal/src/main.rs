@@ -44,12 +44,44 @@ pub struct Opts {
     pub cluster_domain: String,
 }
 
+impl Opts {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.reserved_ports.overlaps(&self.auto_ports) {
+            return Err(format!(
+                "reserved_ports ({:?}) overlaps with auto_ports ({:?})",
+                self.reserved_ports.0, self.auto_ports.0
+            ));
+        }
+
+        if self.reserved_ports.contains(self.tls_port) {
+            return Err(format!(
+                "tls_port ({}) overlaps with reserved_ports ({:?})",
+                self.tls_port, self.reserved_ports.0
+            ));
+        }
+
+        if self.auto_ports.contains(self.tls_port) {
+            return Err(format!(
+                "tls_port ({}) overlaps with auto_ports ({:?})",
+                self.tls_port, self.auto_ports.0
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt::init();
 
     let opts = Opts::parse();
+    if let Err(err) = opts.validate() {
+        error!(error = %err, "Invalid configuration");
+        return Err(Error::Custom(err));
+    }
+
     let kube_client = Client::try_default().await?;
 
     let system_namespace = opts
@@ -131,5 +163,69 @@ async fn wait_for_shutdown_signal() {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
         _ = sigterm.recv() => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_opts_validation_success() {
+        let opts = Opts {
+            reserved_ports: PortRange(20000..=29999),
+            auto_ports: PortRange(30000..=32767),
+            route_seed: "seed".into(),
+            hostname_suffix: "c.noctf.dev".into(),
+            tls_port: 4433,
+            system_namespace: None,
+            cluster_domain: "cluster.local".into(),
+        };
+        assert!(opts.validate().is_ok());
+    }
+
+    #[test]
+    fn test_opts_validation_overlapping_ports() {
+        let opts = Opts {
+            reserved_ports: PortRange(20000..=25000),
+            auto_ports: PortRange(24000..=30000),
+            route_seed: "seed".into(),
+            hostname_suffix: "c.noctf.dev".into(),
+            tls_port: 4433,
+            system_namespace: None,
+            cluster_domain: "cluster.local".into(),
+        };
+        let err = opts.validate().unwrap_err();
+        assert!(err.contains("overlaps with auto_ports"));
+    }
+
+    #[test]
+    fn test_opts_validation_tls_port_in_reserved() {
+        let opts = Opts {
+            reserved_ports: PortRange(4000..=5000),
+            auto_ports: PortRange(30000..=32767),
+            route_seed: "seed".into(),
+            hostname_suffix: "c.noctf.dev".into(),
+            tls_port: 4433,
+            system_namespace: None,
+            cluster_domain: "cluster.local".into(),
+        };
+        let err = opts.validate().unwrap_err();
+        assert!(err.contains("tls_port (4433) overlaps with reserved_ports"));
+    }
+
+    #[test]
+    fn test_opts_validation_tls_port_in_auto() {
+        let opts = Opts {
+            reserved_ports: PortRange(20000..=29999),
+            auto_ports: PortRange(4000..=5000),
+            route_seed: "seed".into(),
+            hostname_suffix: "c.noctf.dev".into(),
+            tls_port: 4433,
+            system_namespace: None,
+            cluster_domain: "cluster.local".into(),
+        };
+        let err = opts.validate().unwrap_err();
+        assert!(err.contains("tls_port (4433) overlaps with auto_ports"));
     }
 }

@@ -192,7 +192,9 @@ mod tests {
         let apply_err = Error::ApplyResource {
             kind: "ReplicaSet",
             name: "chal-1-web".to_string(),
-            source: Box::new(kube::Error::Service(tower::BoxError::from("quota exceeded"))),
+            source: Box::new(kube::Error::Service(tower::BoxError::from(
+                "quota exceeded",
+            ))),
         };
         let res_apply = reconcile_failure(&instance, &ctx, &apply_err).await;
         assert!(res_apply.is_ok());

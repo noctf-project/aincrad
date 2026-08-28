@@ -125,6 +125,11 @@ impl RouteAllocator {
         self.ports.release(key)
     }
 
+    /// Releases all ports allocated to any route belonging to the given namespace and instance.
+    pub fn release_instance(&self, namespace: &str, instance: &str) -> Vec<u16> {
+        self.ports.release_instance(namespace, instance)
+    }
+
     /// Releases the port only if it is currently mapped to this exact port for the given RouteKey.
     pub fn release_if_bound(&self, key: &RouteKey, port: u16) -> bool {
         self.ports.release_if_bound(key, port)

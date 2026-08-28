@@ -325,4 +325,63 @@ mod tests {
             other => panic!("Expected RouteAllocationError(Occupied), got: {:?}", other),
         }
     }
+
+    #[test]
+    fn test_mid_plan_failure_retained_until_instance_cleanup() {
+        let ports = Arc::new(PortsStore::new(
+            PortRange(20000..=20010),
+            PortRange(30000..=30010),
+        ));
+        let allocator = RouteAllocator::new(ports.clone(), "seed", "c.noctf.dev", 4433);
+
+        // Occupy port 20001 by another instance
+        let other_key = RouteKey::new("default", "other-chal", "pwn");
+        allocator.sync(&other_key, 20001);
+        assert_eq!(ports.active_ports(), vec![20001]);
+
+        let instance = dummy_instance("chal-1", None);
+        let mut template = crate::test_utils::tests::dummy_resolved_template(1);
+        template.spec.routes = vec![
+            k8s_common::crd::CTFTemplateSpecRoute {
+                name: "route-a".into(),
+                spec: RouteSpec {
+                    backend: RouteBackend {
+                        service: "pwn1".into(),
+                        port: 1337,
+                    },
+                    tcp: Some(RouteSpecTCP { port: Some(0) }), // Auto port
+                    ..Default::default()
+                },
+            },
+            k8s_common::crd::CTFTemplateSpecRoute {
+                name: "route-b".into(),
+                spec: RouteSpec {
+                    backend: RouteBackend {
+                        service: "pwn2".into(),
+                        port: 1338,
+                    },
+                    tcp: Some(RouteSpecTCP { port: Some(20001) }), // Occupied port
+                    ..Default::default()
+                },
+            },
+        ];
+
+        let res = ProxyRoutePlanner::plan(
+            &instance,
+            &template,
+            &allocator,
+            "aincrad-system",
+            "cluster.local",
+        );
+        assert!(res.is_err());
+
+        // Route-A's allocated auto port remains allocated during reconciliation failure
+        assert_eq!(ports.active_ports().len(), 2);
+        assert!(ports.active_ports().contains(&20001));
+
+        // When the instance is deleted, release_instance frees all routes for chal-1
+        let freed = allocator.release_instance("default", "chal-1");
+        assert_eq!(freed.len(), 1);
+        assert_eq!(ports.active_ports(), vec![20001]);
+    }
 }

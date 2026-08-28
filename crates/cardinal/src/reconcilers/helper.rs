@@ -225,19 +225,16 @@ pub async fn cleanup_instance_routes(
                 name,
                 system_namespace, "Deleting CTFProxyRoute on instance finalizer cleanup..."
             );
-            let _ = api.delete(name, &Default::default()).await;
-
-            if let Some(alloc) = allocator
-                && let Some(pod_name) = route
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| l.get(POD_LABEL))
-            {
-                let route_key = RouteKey::new(instance_ns, instance_name, pod_name);
-                alloc.release(&route_key);
+            match api.delete(name, &Default::default()).await {
+                Ok(_) => {}
+                Err(kube::Error::Api(ref e)) if e.code == 404 => {}
+                Err(e) => return Err(e.into()),
             }
         }
+    }
+
+    if let Some(alloc) = allocator {
+        alloc.release_instance(instance_ns, instance_name);
     }
 
     remove_finalizer(client, instance).await?;
@@ -474,6 +471,120 @@ mod tests {
         let clean_res =
             cleanup_instance_routes(client, "aincrad-system", &instance, Some(&allocator)).await;
         assert!(clean_res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_instance_routes_api_error_preserves_finalizer_and_port() {
+        use axum::body::Body;
+        use axum::http::{Response, StatusCode};
+        use tower::service_fn;
+
+        let mut instance = dummy_instance("chal-1", None);
+        instance.metadata.finalizers = Some(vec![ROUTES_FINALIZER.to_string()]);
+
+        let ports = Arc::new(PortsStore::new(
+            PortRange(20000..=20010),
+            PortRange(30000..=30010),
+        ));
+        let allocator = RouteAllocator::new(ports.clone(), "seed", "c.sk8.dog", 4433);
+        let route_key = RouteKey::new("default", "chal-1", "pwn");
+        allocator.sync(&route_key, 20005);
+        assert_eq!(ports.active_ports(), vec![20005]);
+
+        let mock_service = service_fn(|req: axum::http::Request<kube::client::Body>| async move {
+            let path = req.uri().path();
+            if req.method() == axum::http::Method::GET && path.contains("ctfproxyroutes") {
+                let existing = serde_json::json!({
+                    "apiVersion": "aincrad.noctf.dev/v1",
+                    "kind": "CTFProxyRouteList",
+                    "metadata": {},
+                    "items": [{
+                        "apiVersion": "aincrad.noctf.dev/v1",
+                        "kind": "CTFProxyRoute",
+                        "metadata": {
+                            "name": "p20005",
+                            "namespace": "aincrad-system",
+                            "labels": {
+                                "aincrad.noctf.dev/instance": "chal-1",
+                                "aincrad.noctf.dev/instance-namespace": "default",
+                                "aincrad.noctf.dev/pod": "pwn"
+                            }
+                        },
+                        "spec": {
+                            "backend": "chal-1-pwn.default.svc.cluster.local:1337"
+                        }
+                    }]
+                });
+                let body_str = serde_json::to_string(&existing).unwrap();
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body_str))
+                        .unwrap(),
+                )
+            } else if req.method() == axum::http::Method::DELETE {
+                // Return 500 error on delete
+                let err_status = serde_json::json!({
+                    "kind": "Status",
+                    "apiVersion": "v1",
+                    "status": "Failure",
+                    "message": "etcd timeout",
+                    "code": 500
+                });
+                let body_str = serde_json::to_string(&err_status).unwrap();
+                Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body_str))
+                    .unwrap())
+            } else {
+                // Fallback (e.g. patch finalizer should never be reached)
+                panic!("Unexpected request: {:?}", req);
+            }
+        });
+
+        let client = kube::Client::new(mock_service, "default");
+        let res =
+            cleanup_instance_routes(client, "aincrad-system", &instance, Some(&allocator)).await;
+        assert!(res.is_err());
+
+        // Verify port 20005 was NOT released on deletion failure
+        assert_eq!(ports.active_ports(), vec![20005]);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_instance_routes_releases_in_memory_ports_when_no_k8s_routes_exist() {
+        let client = dummy_kube_client();
+        let instance = dummy_instance("chal-1", None);
+
+        let ports = Arc::new(PortsStore::new(
+            PortRange(20000..=20010),
+            PortRange(30000..=30010),
+        ));
+        let allocator = RouteAllocator::new(ports.clone(), "seed", "c.sk8.dog", 4433);
+
+        // Pre-allocate in-memory ports for chal-1 (simulating mid-plan failure where K8s routes were never written)
+        let k1 = RouteKey::new("default", "chal-1", "web");
+        let k2 = RouteKey::new("default", "chal-1", "pwn");
+        let k_other = RouteKey::new("default", "other-chal", "pwn");
+
+        let _p1 = ports.allocate(&k1, 0).unwrap();
+        let _p2 = ports.allocate(&k2, 20001).unwrap();
+        let p_other = ports.allocate(&k_other, 20002).unwrap();
+
+        assert_eq!(ports.active_ports().len(), 3);
+
+        // Cleanup instance with 0 K8s routes in cluster
+        let res =
+            cleanup_instance_routes(client, "aincrad-system", &instance, Some(&allocator)).await;
+        assert!(res.is_ok());
+
+        // Both in-memory ports for chal-1 are released, while other-chal is preserved
+        assert_eq!(ports.get_port(&k1), None);
+        assert_eq!(ports.get_port(&k2), None);
+        assert_eq!(ports.get_port(&k_other), Some(p_other));
+        assert_eq!(ports.active_ports(), vec![p_other]);
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::RwLock;
 
 use k8s_common::PortRange;
@@ -23,7 +23,7 @@ pub enum PortError {
 
 struct Inner {
     bindings: Vec<Option<RouteKey>>,
-    mappings: HashMap<RouteKey, u16>,
+    mappings: BTreeMap<RouteKey, u16>,
     range_reserved: PortRange,
     range_auto: PortRange,
     finder: PortFinderFactory,
@@ -95,6 +95,24 @@ impl Inner {
         false
     }
 
+    fn release_instance(&mut self, namespace: &str, instance: &str) -> Vec<u16> {
+        let keys_to_remove: Vec<RouteKey> = self
+            .mappings
+            .keys()
+            .filter(|k| k.namespace == namespace && k.instance == instance)
+            .cloned()
+            .collect();
+
+        let mut released = Vec::new();
+        for key in keys_to_remove {
+            if let Some(port) = self.mappings.remove(&key) {
+                self.bindings[port as usize] = None;
+                released.push(port);
+            }
+        }
+        released
+    }
+
     fn sync(&mut self, key: &RouteKey, port: u16) {
         if port == 0 {
             self.release(key);
@@ -145,7 +163,7 @@ impl PortsStore {
         Self {
             inner: RwLock::new(Inner {
                 bindings: vec![None; PORTS],
-                mappings: HashMap::new(),
+                mappings: BTreeMap::new(),
                 range_reserved,
                 range_auto: range_auto.clone(),
                 finder: PortFinderFactory::new(&range_auto),
@@ -167,6 +185,16 @@ impl PortsStore {
             info!("route {key} released port {p}");
         }
         port
+    }
+
+    /// Releases all ports allocated to any route belonging to the given namespace and instance.
+    pub fn release_instance(&self, namespace: &str, instance: &str) -> Vec<u16> {
+        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        let released = inner.release_instance(namespace, instance);
+        for &port in &released {
+            info!("instance {namespace}/{instance} released port {port}");
+        }
+        released
     }
 
     /// Releases the port only if it is currently mapped to this exact port for the given RouteKey.
@@ -387,5 +415,30 @@ mod tests {
 
         assert_eq!(allocated_ports.len(), 50);
         assert_eq!(store.active_ports().len(), 50);
+    }
+
+    #[test]
+    fn test_release_instance() {
+        let store = make_store();
+        let k1 = RouteKey::new("default", "chal-1", "web");
+        let k2 = RouteKey::new("default", "chal-1", "pwn");
+        let k3 = RouteKey::new("default", "chal-2", "web");
+
+        let p1 = store.allocate(&k1, 20001).unwrap();
+        let p2 = store.allocate(&k2, 0).unwrap();
+        let p3 = store.allocate(&k3, 20002).unwrap();
+
+        assert_eq!(store.active_ports().len(), 3);
+
+        // Release chal-1 (should release k1 and k2, but keep k3)
+        let released = store.release_instance("default", "chal-1");
+        assert_eq!(released.len(), 2);
+        assert!(released.contains(&p1));
+        assert!(released.contains(&p2));
+
+        assert_eq!(store.get_port(&k1), None);
+        assert_eq!(store.get_port(&k2), None);
+        assert_eq!(store.get_port(&k3), Some(p3));
+        assert_eq!(store.active_ports(), vec![p3]);
     }
 }
