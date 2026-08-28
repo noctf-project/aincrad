@@ -1,7 +1,7 @@
 use std::sync::{Arc, LazyLock};
 
 use k8s_common::crd::{
-    CTFInstanceStatusEndpoint, CTFRouteSpec, EndpointTarget, ProxyRouteKey, RouteTarget,
+    CTFInstanceStatusEndpoint, EndpointTarget, ProxyRouteKey, RouteSpec, RouteTarget,
 };
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -81,11 +81,7 @@ impl RouteAllocator {
     }
 
     /// Allocates an endpoint and proxy route key given a RouteKey and CTFRouteSpec.
-    pub fn allocate(
-        &self,
-        key: &RouteKey,
-        spec: &CTFRouteSpec,
-    ) -> Result<AllocatedRoute, RouteError> {
+    pub fn allocate(&self, key: &RouteKey, spec: &RouteSpec) -> Result<AllocatedRoute, RouteError> {
         match spec.target() {
             Some(RouteTarget::Tcp(tcp)) => {
                 let port = self.ports.allocate(key, tcp.port.unwrap_or(0))?;
@@ -204,7 +200,7 @@ fn sanitize_prefix(input: &str) -> String {
 mod tests {
     use super::*;
     use k8s_common::PortRange;
-    use k8s_common::crd::{CTFRouteBackend, CTFRouteSpecTCP, CTFRouteSpecTLS};
+    use k8s_common::crd::{RouteBackend, RouteSpec, RouteSpecTCP};
 
     fn make_allocator() -> RouteAllocator {
         let ports = Arc::new(PortsStore::new(
@@ -218,12 +214,12 @@ mod tests {
     fn test_allocate_tcp_auto_and_fixed() {
         let allocator = make_allocator();
         let key_auto = RouteKey::new("default", "chal-1", "pwn");
-        let spec_auto = CTFRouteSpec {
-            backend: CTFRouteBackend {
+        let spec_auto = RouteSpec {
+            backend: RouteBackend {
                 service: "pwn".into(),
                 port: 1337,
             },
-            tcp: Some(CTFRouteSpecTCP { port: Some(0) }),
+            tcp: Some(RouteSpecTCP { port: Some(0) }),
             ..Default::default()
         };
 
@@ -240,12 +236,12 @@ mod tests {
         }
 
         let key_fixed = RouteKey::new("default", "chal-1", "admin");
-        let spec_fixed = CTFRouteSpec {
-            backend: CTFRouteBackend {
+        let spec_fixed = RouteSpec {
+            backend: k8s_common::crd::RouteBackend {
                 service: "admin".into(),
                 port: 8080,
             },
-            tcp: Some(CTFRouteSpecTCP { port: Some(20001) }),
+            tcp: Some(k8s_common::crd::RouteSpecTCP { port: Some(20001) }),
             ..Default::default()
         };
 
@@ -261,12 +257,12 @@ mod tests {
     fn test_allocate_tls_endpoint() {
         let allocator = make_allocator();
         let key = RouteKey::new("default", "chal-1", "web");
-        let spec = CTFRouteSpec {
-            backend: CTFRouteBackend {
+        let spec = RouteSpec {
+            backend: k8s_common::crd::RouteBackend {
                 service: "web".into(),
                 port: 80,
             },
-            tls: Some(CTFRouteSpecTLS {
+            tls: Some(k8s_common::crd::RouteSpecTLS {
                 prefix: Some("whoami".into()),
             }),
             ..Default::default()
@@ -293,8 +289,8 @@ mod tests {
     fn test_allocate_missing_target() {
         let allocator = make_allocator();
         let key = RouteKey::new("default", "chal-1", "empty");
-        let spec = CTFRouteSpec {
-            backend: CTFRouteBackend {
+        let spec = RouteSpec {
+            backend: k8s_common::crd::RouteBackend {
                 service: "empty".into(),
                 port: 80,
             },

@@ -1,6 +1,6 @@
 use k8s_common::crd::{
     CTFInstance, CTFInstanceSpecRouteOverride, CTFInstanceStatusEndpoint, CTFProxyRoute,
-    CTFProxyRouteSpec, CTFProxyRouteSpecPOW, CTFRouteSpec, PatchValue,
+    CTFProxyRouteSpec, CTFProxyRouteSpecPOW, PatchValue, RouteSpec,
 };
 
 use crate::{
@@ -87,11 +87,11 @@ impl ProxyRoutePlanner {
     }
 }
 
-/// Builds a merged `CTFRouteSpec` applying optional instance-level overrides.
+/// Builds a merged `RouteSpec` applying optional instance-level overrides.
 pub fn build_merged_route_spec(
-    base: &CTFRouteSpec,
+    base: &RouteSpec,
     override_spec: Option<&CTFInstanceSpecRouteOverride>,
-) -> CTFRouteSpec {
+) -> RouteSpec {
     let mut merged = base.clone();
 
     if let Some(ov) = override_spec {
@@ -138,8 +138,8 @@ mod tests {
     use crate::test_utils::tests::{dummy_instance, dummy_resolved_template};
     use k8s_common::PortRange;
     use k8s_common::crd::{
-        CTFRouteBackend, CTFRouteSpecTCP, CTFRouteSpecTLS, CTFRouteSpecTLSPatch,
-        CTFTemplateSpecRoute,
+        CTFTemplateSpecRoute, RouteBackend, RouteSpec, RouteSpecPOW, RouteSpecTCP, RouteSpecTLS,
+        RouteSpecTLSPatch,
     };
     use std::sync::Arc;
 
@@ -159,12 +159,12 @@ mod tests {
         template.spec.routes = vec![
             CTFTemplateSpecRoute {
                 name: "web".to_string(),
-                spec: CTFRouteSpec {
-                    backend: CTFRouteBackend {
+                spec: RouteSpec {
+                    backend: RouteBackend {
                         service: "web".to_string(),
                         port: 80,
                     },
-                    tls: Some(CTFRouteSpecTLS {
+                    tls: Some(RouteSpecTLS {
                         prefix: Some("whoami".into()),
                     }),
                     logs: true,
@@ -173,13 +173,13 @@ mod tests {
             },
             CTFTemplateSpecRoute {
                 name: "pwn".to_string(),
-                spec: CTFRouteSpec {
-                    backend: CTFRouteBackend {
+                spec: RouteSpec {
+                    backend: RouteBackend {
                         service: "pwn".to_string(),
                         port: 1337,
                     },
-                    tcp: Some(CTFRouteSpecTCP { port: Some(0) }),
-                    pow: Some(k8s_common::crd::CTFRouteSpecPOW {
+                    tcp: Some(RouteSpecTCP { port: Some(0) }),
+                    pow: Some(RouteSpecPOW {
                         difficulty: 5000,
                         enable_admin_bypass: true,
                     }),
@@ -241,13 +241,13 @@ mod tests {
 
     #[test]
     fn test_build_merged_route_spec_overrides() {
-        let base_spec = CTFRouteSpec {
-            backend: CTFRouteBackend {
+        let base_spec = RouteSpec {
+            backend: RouteBackend {
                 service: "web".into(),
                 port: 8080,
             },
-            tcp: Some(CTFRouteSpecTCP { port: Some(443) }),
-            tls: Some(CTFRouteSpecTLS {
+            tcp: Some(RouteSpecTCP { port: Some(443) }),
+            tls: Some(RouteSpecTLS {
                 prefix: Some("whoami".into()),
             }),
             ..Default::default()
@@ -256,17 +256,17 @@ mod tests {
         let override_spec = CTFInstanceSpecRouteOverride {
             name: "main".into(),
             port: PatchValue::Value(8443),
-            tls: PatchValue::Value(CTFRouteSpecTLSPatch {
+            tls: PatchValue::Value(RouteSpecTLSPatch {
                 prefix: PatchValue::Value("custom-prefix".into()),
             }),
         };
 
         let merged = build_merged_route_spec(&base_spec, Some(&override_spec));
 
-        assert_eq!(merged.tcp, Some(CTFRouteSpecTCP { port: Some(8443) }));
+        assert_eq!(merged.tcp, Some(RouteSpecTCP { port: Some(8443) }));
         assert_eq!(
             merged.tls,
-            Some(CTFRouteSpecTLS {
+            Some(RouteSpecTLS {
                 prefix: Some("custom-prefix".into()),
             })
         );
@@ -285,23 +285,23 @@ mod tests {
         template.spec.routes = vec![
             k8s_common::crd::CTFTemplateSpecRoute {
                 name: "route-a".into(),
-                spec: CTFRouteSpec {
-                    backend: CTFRouteBackend {
+                spec: RouteSpec {
+                    backend: RouteBackend {
                         service: "pwn1".into(),
                         port: 1337,
                     },
-                    tcp: Some(CTFRouteSpecTCP { port: Some(20001) }),
+                    tcp: Some(RouteSpecTCP { port: Some(20001) }),
                     ..Default::default()
                 },
             },
             k8s_common::crd::CTFTemplateSpecRoute {
                 name: "route-b".into(),
-                spec: CTFRouteSpec {
-                    backend: CTFRouteBackend {
+                spec: RouteSpec {
+                    backend: RouteBackend {
                         service: "pwn2".into(),
                         port: 1338,
                     },
-                    tcp: Some(CTFRouteSpecTCP { port: Some(20001) }),
+                    tcp: Some(RouteSpecTCP { port: Some(20001) }),
                     ..Default::default()
                 },
             },

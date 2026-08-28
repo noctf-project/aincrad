@@ -12,7 +12,7 @@ use crate::labels::{
 /// Generates the ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding for CTFInstance annotations.
 pub fn generate_ctfinstance_admission_policy()
 -> (ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding) {
-    let policy_name = "ctfinstance-annotations";
+    let policy_name = "ctfinstance-metadata";
 
     let policy = ValidatingAdmissionPolicy {
         metadata: ObjectMeta {
@@ -82,7 +82,7 @@ pub fn generate_ctfinstance_admission_policy()
 /// Generates the ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding for CTFProxyRoute name format.
 pub fn generate_ctfproxyroute_admission_policy()
 -> (ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding) {
-    let policy_name = "ctfproxyroute-name-format";
+    let policy_name = "ctfproxyroute-metadata";
 
     let policy = ValidatingAdmissionPolicy {
         metadata: ObjectMeta {
@@ -136,11 +136,11 @@ mod tests {
         let (policy, binding) = generate_ctfinstance_admission_policy();
         assert_eq!(
             policy.metadata.name.as_deref(),
-            Some("ctfinstance-annotations")
+            Some("ctfinstance-metadata")
         );
         assert_eq!(
             binding.metadata.name.as_deref(),
-            Some("ctfinstance-annotations-binding")
+            Some("ctfinstance-metadata-binding")
         );
         let validations = policy.spec.unwrap().validations.unwrap();
         assert_eq!(validations.len(), 3);
@@ -151,11 +151,11 @@ mod tests {
         let (policy, binding) = generate_ctfproxyroute_admission_policy();
         assert_eq!(
             policy.metadata.name.as_deref(),
-            Some("ctfproxyroute-name-format")
+            Some("ctfproxyroute-metadata")
         );
         assert_eq!(
             binding.metadata.name.as_deref(),
-            Some("ctfproxyroute-name-format-binding")
+            Some("ctfproxyroute-metadata-binding")
         );
         let validations = policy.spec.unwrap().validations.unwrap();
         assert_eq!(validations.len(), 1);

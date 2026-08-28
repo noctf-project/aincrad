@@ -1,13 +1,11 @@
 pub mod network_policy;
 pub mod proxy_route;
 pub mod replicaset;
-pub mod route;
 pub mod service;
 
 pub use network_policy::NetworkPolicyPlanner;
 pub use proxy_route::{PlannedRoutes, ProxyRoutePlanner, build_merged_route_spec};
 pub use replicaset::ReplicaSetPlanner;
-pub use route::RoutePlanner;
 pub use service::ServicePlanner;
 
 use k8s_common::crd::CTFInstance;

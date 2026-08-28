@@ -540,8 +540,7 @@ mod tests {
         use axum::body::Body;
         use axum::http::{Response, StatusCode};
         use k8s_common::crd::{
-            CTFProxyRoute, CTFProxyRouteSpec, CTFRouteBackend, CTFRouteSpec, CTFRouteSpecTCP,
-            CTFRouteSpecTLS,
+            CTFProxyRoute, CTFProxyRouteSpec, RouteBackend, RouteSpec, RouteSpecTCP, RouteSpecTLS,
         };
         use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
         use tower::service_fn;
@@ -558,9 +557,9 @@ mod tests {
         allocator.sync(&route_key, 20001);
         assert_eq!(ports.active_ports(), vec![20001]);
 
-        let spec_fixed_2 = CTFRouteSpec {
-            tcp: Some(CTFRouteSpecTCP { port: Some(20002) }),
-            backend: CTFRouteBackend {
+        let spec_fixed_2 = RouteSpec {
+            tcp: Some(RouteSpecTCP { port: Some(20002) }),
+            backend: RouteBackend {
                 service: "pwn".into(),
                 port: 1337,
             },
@@ -652,9 +651,9 @@ mod tests {
         use k8s_common::crd::ProxyRouteKey;
 
         // --- Scenario B: Fixed(20002) -> Auto(0) ---
-        let spec_auto = CTFRouteSpec {
-            tcp: Some(CTFRouteSpecTCP { port: None }),
-            backend: CTFRouteBackend {
+        let spec_auto = RouteSpec {
+            tcp: Some(RouteSpecTCP { port: None }),
+            backend: RouteBackend {
                 service: "pwn".into(),
                 port: 1337,
             },
@@ -672,11 +671,11 @@ mod tests {
         assert_eq!(ports.active_ports(), vec![auto_p]);
 
         // --- Scenario C: TCP -> TLS ---
-        let spec_tls = CTFRouteSpec {
-            tls: Some(CTFRouteSpecTLS {
+        let spec_tls = RouteSpec {
+            tls: Some(RouteSpecTLS {
                 prefix: Some("web".into()),
             }),
-            backend: CTFRouteBackend {
+            backend: RouteBackend {
                 service: "web".into(),
                 port: 80,
             },

@@ -74,7 +74,6 @@ pub mod tests {
                         if path.ends_with("/replicasets")
                             || path.ends_with("/services")
                             || path.ends_with("/networkpolicies")
-                            || path.ends_with("/ctfroutes")
                             || path.ends_with("/ctfinstances")
                             || path.ends_with("/ctfproxyroutes")
                         {
@@ -113,8 +112,6 @@ pub mod tests {
                             ("apps/v1", "ReplicaSet")
                         } else if path.contains("ctfproxyroutes") {
                             ("aincrad.noctf.dev/v1", "CTFProxyRoute")
-                        } else if path.contains("ctfroutes") {
-                            ("aincrad.noctf.dev/v1", "CTFRoute")
                         } else if path.contains("ctfinstances") {
                             ("aincrad.noctf.dev/v1", "CTFInstance")
                         } else {
@@ -134,13 +131,6 @@ pub mod tests {
                         } else if kind == "CTFProxyRoute" {
                             body["spec"] = serde_json::json!({
                                 "backend": "web.default.svc.cluster.local:80"
-                            });
-                        } else if kind == "CTFRoute" {
-                            body["spec"] = serde_json::json!({
-                                "backend": {
-                                    "service": "web",
-                                    "port": 80
-                                }
                             });
                         }
                         let body_str = serde_json::to_string(&body).unwrap();

@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::crd::{
-    CTFRouteSpecTLSPatch, EndpointTarget,
+    EndpointTarget, RouteSpecTLSPatch,
     util::{KubeListKey, PatchValue, immutable_property_schema, list_schema},
 };
 
@@ -91,7 +91,7 @@ pub struct CTFInstanceSpecRouteOverride {
     /// - Set to `null`: Disable TLS.
     /// - Set to object: Enable and configure TLS.
     #[serde(default)]
-    pub tls: PatchValue<CTFRouteSpecTLSPatch>,
+    pub tls: PatchValue<RouteSpecTLSPatch>,
 }
 
 impl KubeListKey for CTFInstanceSpecRouteOverride {
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(override_value.port, PatchValue::Value(20001));
         assert_eq!(
             override_value.tls,
-            PatchValue::Value(CTFRouteSpecTLSPatch {
+            PatchValue::Value(RouteSpecTLSPatch {
                 prefix: PatchValue::Null
             })
         );

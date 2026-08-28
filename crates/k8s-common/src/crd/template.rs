@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::crd::{
-    CTFRouteSpec,
+    RouteSpec,
     util::{KubeListKey, default_val, embedded_resource_schema, json_patch_schema, list_schema},
 };
 
@@ -111,5 +111,5 @@ pub struct CTFTemplateSpecRoute {
         length(min = 1, max = 20)
     )]
     pub name: String,
-    pub spec: CTFRouteSpec,
+    pub spec: RouteSpec,
 }
