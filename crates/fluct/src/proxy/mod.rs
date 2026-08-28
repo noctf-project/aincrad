@@ -26,13 +26,18 @@ where
             break;
         }
         select! {
-            Ok(b) = reader.read_u8() => {
-                if b == b'\n' {
-                    valid = true;
-                    break;
-                } else {
-                    uid[r] = b;
-                    r += 1;
+            res = reader.read_u8() => {
+                match res {
+                    Ok(b) => {
+                        if b == b'\n' {
+                            valid = true;
+                            break;
+                        } else {
+                            uid[r] = b;
+                            r += 1;
+                        }
+                    }
+                    Err(e) => return Err(Box::new(e)),
                 }
             },
             _ = sleep(input_time - elapsed) => {
@@ -94,5 +99,17 @@ mod tests {
             tokio::spawn(async move { get_line(&mut server, 64, Duration::from_millis(50)).await });
         let res = handle.await.unwrap();
         assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_line_eof_immediate_error() {
+        let (client, mut server) = tokio::io::duplex(64);
+        drop(client); // Immediate EOF
+
+        let start = Instant::now();
+        let res = get_line(&mut server, 64, Duration::from_secs(10)).await;
+        assert!(res.is_err());
+        // Must return immediately on EOF without waiting for the 10s timeout
+        assert!(start.elapsed() < Duration::from_millis(500));
     }
 }

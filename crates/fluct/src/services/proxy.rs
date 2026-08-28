@@ -220,12 +220,20 @@ async fn thread_listen(
         }
     };
     loop {
-        select! {
-          Ok((socket, addr)) = listener.accept() => {
-            if let Err(err) = acceptor.send((port, socket, addr)).await {
-              info!("Error sending connection {} to acceptor thread {}", addr, err);
+        match listener.accept().await {
+            Ok((socket, addr)) => {
+                if let Err(err) = acceptor.send((port, socket, addr)).await {
+                    info!(
+                        "Error sending connection {} to acceptor thread {}",
+                        addr, err
+                    );
+                    break Ok(());
+                }
             }
-          }
+            Err(err) => {
+                error!("Error accepting connection on port {port}: {err}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
     }
 }

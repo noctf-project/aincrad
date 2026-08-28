@@ -43,7 +43,7 @@ impl FileLogger {
         Ok(())
     }
 
-    pub async fn flush(&mut self) -> Result<(), std::io::Error> {
-        self.writer.get_mut().flush().await
+    pub async fn shutdown(&mut self) -> Result<(), std::io::Error> {
+        self.writer.get_mut().shutdown().await
     }
 }

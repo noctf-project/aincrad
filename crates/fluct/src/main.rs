@@ -42,11 +42,8 @@ pub async fn run(config: ServiceConfig) -> Result<(), Error> {
     );
 
     let (tls_tx, tls_rx) = if let Some(port) = config.tproxy_port {
-        let mut ranges: Vec<std::ops::RangeInclusive<u16>> = config
-            .port_ranges
-            .iter()
-            .map(|r| r.0.clone())
-            .collect();
+        let mut ranges: Vec<std::ops::RangeInclusive<u16>> =
+            config.port_ranges.iter().map(|r| r.0.clone()).collect();
         ranges.push(config.tls_port..=config.tls_port);
 
         netfilter::configure_netfilter(port, &ranges)

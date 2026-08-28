@@ -21,7 +21,9 @@ pub enum ProxyRouteKeyError {
     InvalidPort(String),
     #[error("empty route name")]
     EmptyRouteName,
-    #[error("invalid route name '{0}': must contain only lowercase alphanumeric characters and hyphens, and cannot start or end with a hyphen")]
+    #[error(
+        "invalid route name '{0}': must contain only lowercase alphanumeric characters and hyphens, and cannot start or end with a hyphen"
+    )]
     InvalidRouteName(String),
 }
 
@@ -103,7 +105,7 @@ pub struct CTFProxyRouteSpecPOW {
     group = "aincrad.noctf.dev",
     version = "v1",
     kind = "CTFProxyRoute",
-    namespaced,
+    namespaced
 )]
 #[schemars(
     extend("x-kubernetes-validations" = [
@@ -211,7 +213,9 @@ mod tests {
         );
         assert_eq!(
             ProxyRouteKey::from_str("rWhoami_Upper"),
-            Err(ProxyRouteKeyError::InvalidRouteName("Whoami_Upper".to_string()))
+            Err(ProxyRouteKeyError::InvalidRouteName(
+                "Whoami_Upper".to_string()
+            ))
         );
     }
 
@@ -284,10 +288,7 @@ mod tests {
         });
 
         let spec: CTFProxyRouteSpec = serde_json::from_value(json).unwrap();
-        assert_eq!(
-            spec.backend,
-            "chal-1-c-web.default.svc.cluster.local:8080"
-        );
+        assert_eq!(spec.backend, "chal-1-c-web.default.svc.cluster.local:8080");
         assert_eq!(spec.flag.as_deref(), Some("CTF{test}"));
         assert!(spec.logs);
         assert_eq!(spec.pow.as_ref().unwrap().difficulty, 10000);

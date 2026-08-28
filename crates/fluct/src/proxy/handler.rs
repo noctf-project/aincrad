@@ -39,11 +39,7 @@ const MAX_INPUT_TIME_UID: Duration = Duration::from_secs(30);
 type LogMessage = (u8, Vec<u8>);
 
 impl Handler {
-    pub fn new(
-        service: Arc<ServiceContext>,
-        route: Arc<CTFProxyRoute>,
-        addr: SocketAddr,
-    ) -> Self {
+    pub fn new(service: Arc<ServiceContext>, route: Arc<CTFProxyRoute>, addr: SocketAddr) -> Self {
         Self {
             service,
             route,
@@ -151,10 +147,15 @@ impl Handler {
             )
             .0?;
         } else {
-            let _ = join!(
-                tokio::io::copy(&mut c_rx, &mut b_tx),
-                tokio::io::copy(&mut b_rx, &mut c_tx)
-            );
+            let client_to_server = async {
+                tokio::io::copy(&mut c_rx, &mut b_tx).await?;
+                b_tx.shutdown().await
+            };
+            let server_to_client = async {
+                tokio::io::copy(&mut b_rx, &mut c_tx).await?;
+                c_tx.shutdown().await
+            };
+            let _ = tokio::join!(client_to_server, server_to_client);
         }
 
         Ok(())
@@ -175,13 +176,22 @@ impl Handler {
         loop {
             select! {
               res = rx.fill_buf() => {
-                let bytes = res?;
+                let bytes = match res {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        cancel.cancel();
+                        return Err(Box::new(err));
+                    }
+                };
                 let len = bytes.len();
                 if len == 0 {
-                  cancel.cancel();
+                  let _ = tx.shutdown().await;
                   break Ok(());
                 }
-                tx.write_all(bytes).await?;
+                if let Err(err) = tx.write_all(bytes).await {
+                    cancel.cancel();
+                    return Err(Box::new(err));
+                }
                 let log_data = bytes.to_vec();
                 rx.consume(len);
                 if log.send((stream, log_data)).await.is_err() {
@@ -217,7 +227,7 @@ impl Handler {
                 trace!("Error writing to log file: {}", err);
             }
         }
-        logger.flush().await?;
+        logger.shutdown().await?;
         Ok(())
     }
 
@@ -225,7 +235,12 @@ impl Handler {
         let timestamp_nanos = (self.session.timestamp.timestamp() as u64) * 1_000_000_000
             + (self.session.timestamp.nanosecond() as u64);
         let name = self.route.metadata.name.as_deref().unwrap_or("unknown");
-        let ns = self.route.metadata.namespace.as_deref().unwrap_or("default");
+        let ns = self
+            .route
+            .metadata
+            .namespace
+            .as_deref()
+            .unwrap_or("default");
         format!("{}:{}:{}", ns, name, timestamp_nanos)
     }
 }
@@ -249,7 +264,6 @@ mod tests {
                 tls_port: 4433,
                 tls_cert: "cert.pem".into(),
                 tls_key: "key.pem".into(),
-                challenge_domain: "".into(),
                 flag_prefix: "CTF".into(),
                 logs_dir: "./data/".into(),
                 port_ranges: vec![PortRange(20000..=20999), PortRange(30000..=30999)],

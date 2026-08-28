@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-addr = "0.15"
 aes = "0.8"
 async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 base32 = "0.5"

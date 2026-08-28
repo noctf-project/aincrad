@@ -1,7 +1,6 @@
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
-use addr::parse_domain_name;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -62,7 +61,6 @@ pub struct ServiceConfig {
     pub tproxy_port: Option<u16>,
     pub tls_cert: PathBuf,
     pub tls_key: PathBuf,
-    pub challenge_domain: String,
     pub flag_prefix: String,
     pub logs_dir: String,
 }
@@ -104,10 +102,6 @@ pub struct RawServiceConfig {
     #[arg(long)]
     pub tls_key: PathBuf,
 
-    /// Optional Hostname Suffix / Challenge Domain
-    #[clap(long, default_value = "", value_parser = parse_hostname_suffix, alias = "hostname-suffix")]
-    pub challenge_domain: String,
-
     /// CTF flag prefix
     #[clap(long, default_value = "CTF")]
     pub flag_prefix: String,
@@ -133,7 +127,6 @@ impl TryFrom<RawServiceConfig> for ServiceConfig {
             tproxy_port: raw.tproxy_port,
             tls_cert: raw.tls_cert,
             tls_key: raw.tls_key,
-            challenge_domain: raw.challenge_domain,
             flag_prefix: raw.flag_prefix,
             logs_dir: raw.logs_dir,
         };
@@ -155,14 +148,6 @@ where
 {
     let raw = RawServiceConfig::try_parse_from(itr)?;
     ServiceConfig::try_from(raw)
-}
-
-fn parse_hostname_suffix(s: &str) -> Result<String, String> {
-    if s.is_empty() {
-        return Ok("".to_string());
-    }
-    let domain = parse_domain_name(s).map_err(|e| format!("invalid domain name '{s}': {e}"))?;
-    Ok(domain.as_str().trim_matches('.').to_string())
 }
 
 impl ServiceConfig {
@@ -224,8 +209,6 @@ mod tests {
             "cert.pem",
             "--tls-key",
             "key.pem",
-            "--hostname-suffix",
-            "example.com",
             "--port-range",
             "10000-19999",
             "--port-range",
@@ -236,7 +219,6 @@ mod tests {
         let cfg = parse_config_from(args).unwrap();
         assert_eq!(cfg.tls_cert, PathBuf::from("cert.pem"));
         assert_eq!(cfg.tls_key, PathBuf::from("key.pem"));
-        assert_eq!(cfg.challenge_domain, "example.com".to_string());
         assert_eq!(cfg.system_namespace, Some("aincrad-system".to_string()));
         assert_eq!(cfg.flag_prefix, "CTF");
         assert_eq!(
@@ -247,13 +229,7 @@ mod tests {
 
     #[test]
     fn test_service_config_default_port_range() {
-        let args = [
-            "fluct",
-            "--tls-cert",
-            "cert.pem",
-            "--tls-key",
-            "key.pem",
-        ];
+        let args = ["fluct", "--tls-cert", "cert.pem", "--tls-key", "key.pem"];
         let cfg = parse_config_from(args).unwrap();
         assert_eq!(cfg.port_ranges, vec![PortRange(20000..=32767)]);
         assert_eq!(cfg.system_namespace, None);
@@ -289,16 +265,5 @@ mod tests {
             "25000",
         ];
         assert!(parse_config_from(args).is_err());
-    }
-
-    #[test]
-    fn test_parse_hostname_suffix() {
-        assert_eq!(parse_hostname_suffix(""), Ok("".to_string()));
-        assert_eq!(
-            parse_hostname_suffix("example.com"),
-            Ok("example.com".to_string())
-        );
-        assert!(parse_hostname_suffix("example.com.").unwrap() == "example.com");
-        assert!(parse_hostname_suffix("invalid..domain").is_err());
     }
 }

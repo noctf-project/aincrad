@@ -103,10 +103,7 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
     fn make_store() -> ProxyStore {
-        ProxyStore::new(vec![
-            PortRange(20000..=29999),
-            PortRange(30000..=32767),
-        ])
+        ProxyStore::new(vec![PortRange(20000..=29999), PortRange(30000..=32767)])
     }
 
     #[test]
