@@ -6,7 +6,7 @@ use kube::{
     api::{ListParams, Patch, PatchParams},
 };
 use serde::{Serialize, de::DeserializeOwned};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     Error,
@@ -233,6 +233,65 @@ pub async fn cleanup_instance_routes(
     Ok(())
 }
 
+/// Deletes a batch of CTFProxyRoutes in parallel, releasing their allocator mappings.
+/// Returns a list of routes that failed to be deleted along with the last encountered error.
+pub async fn delete_proxy_routes_batch(
+    api: &Api<CTFProxyRoute>,
+    system_namespace: &str,
+    routes: Vec<CTFProxyRoute>,
+    allocator: &RouteAllocator,
+) -> (Vec<CTFProxyRoute>, Option<Error>) {
+    use futures::StreamExt;
+
+    let results: Vec<Result<(), (CTFProxyRoute, Error)>> = futures::stream::iter(routes)
+        .map(|route| {
+            let api = api.clone();
+            let system_ns = system_namespace.to_string();
+            async move {
+                if let Some(name) = route.meta().name.as_deref() {
+                    info!(
+                        name,
+                        system_namespace = %system_ns,
+                        "Pruning dangling CTFProxyRoute..."
+                    );
+
+                    match api.delete(name, &Default::default()).await {
+                        Ok(_) => {}
+                        Err(kube::Error::Api(ref e)) if e.code == 404 => {}
+                        Err(err) => return Err((route, err.into())),
+                    }
+
+                    if let Some(labels) = route.metadata.labels.as_ref()
+                        && let (Some(inst), Some(pod)) =
+                            (labels.get(INSTANCE_LABEL), labels.get(POD_LABEL))
+                    {
+                        let instance_ns = labels
+                            .get(INSTANCE_NAMESPACE_LABEL)
+                            .map(|s| s.as_str())
+                            .unwrap_or("default");
+                        let route_key = RouteKey::new(instance_ns, inst, pod);
+                        allocator.release(&route_key);
+                    }
+                }
+                Ok(())
+            }
+        })
+        .buffer_unordered(PRUNE_CONCURRENCY_LIMIT)
+        .collect()
+        .await;
+
+    let mut failed = Vec::new();
+    let mut last_error = None;
+    for res in results {
+        if let Err((route, err)) = res {
+            failed.push(route);
+            last_error = Some(err);
+        }
+    }
+
+    (failed, last_error)
+}
+
 /// Prunes dangling CTFProxyRoute resources in the system namespace that do not belong to any active CTFInstance.
 pub async fn prune_unreferenced_proxy_routes(
     client: kube::Client,
@@ -240,8 +299,6 @@ pub async fn prune_unreferenced_proxy_routes(
     live_instances: &HashSet<(String, String)>,
     allocator: &RouteAllocator,
 ) -> Result<usize, Error> {
-    use futures::StreamExt;
-
     let api: Api<CTFProxyRoute> = Api::namespaced(client, system_namespace);
     let routes = api.list(&Default::default()).await?;
 
@@ -277,40 +334,32 @@ pub async fn prune_unreferenced_proxy_routes(
         system_namespace, "Pruning dangling CTFProxyRoutes in parallel..."
     );
 
-    let results: Vec<Result<(), Error>> = futures::stream::iter(orphaned_routes)
-        .map(|route| {
-            let api = api.clone();
-            let system_ns = system_namespace.to_string();
-            async move {
-                if let Some(name) = route.meta().name.as_deref() {
-                    info!(
-                        name,
-                        system_namespace = %system_ns,
-                        "Pruning dangling CTFProxyRoute..."
-                    );
-                    api.delete(name, &Default::default()).await?;
+    let mut pending = orphaned_routes;
+    let mut delay = std::time::Duration::from_millis(200);
+    let mut attempts = 3;
 
-                    if let Some(labels) = route.metadata.labels.as_ref()
-                        && let (Some(inst), Some(pod)) =
-                            (labels.get(INSTANCE_LABEL), labels.get(POD_LABEL))
-                    {
-                        let instance_ns = labels
-                            .get(INSTANCE_NAMESPACE_LABEL)
-                            .map(|s| s.as_str())
-                            .unwrap_or("default");
-                        let route_key = RouteKey::new(instance_ns, inst, pod);
-                        allocator.release(&route_key);
-                    }
-                }
-                Ok(())
-            }
-        })
-        .buffer_unordered(PRUNE_CONCURRENCY_LIMIT)
-        .collect()
-        .await;
+    while !pending.is_empty() && attempts > 0 {
+        let (failed, last_err) =
+            delete_proxy_routes_batch(&api, system_namespace, pending, allocator).await;
+        if failed.is_empty() {
+            return Ok(total_orphans);
+        }
 
-    for res in results {
-        res?;
+        attempts -= 1;
+        pending = failed;
+
+        if attempts > 0 {
+            warn!(
+                remaining = pending.len(),
+                attempts_left = attempts,
+                "Some orphaned CTFProxyRoutes failed to delete, retrying in {:?}...",
+                delay
+            );
+            tokio::time::sleep(delay).await;
+            delay *= 2;
+        } else if let Some(err) = last_err {
+            return Err(err);
+        }
     }
 
     Ok(total_orphans)
@@ -397,6 +446,93 @@ mod tests {
         let res =
             prune_unreferenced_proxy_routes(client, "aincrad-system", &live, &allocator).await;
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delete_proxy_routes_batch_and_retry() {
+        use axum::body::Body;
+        use axum::http::{Response, StatusCode};
+        use k8s_common::crd::CTFProxyRouteSpec;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tower::service_fn;
+
+        let ports = Arc::new(PortsStore::new(
+            PortRange(20000..=20010),
+            PortRange(30000..=30010),
+        ));
+        let allocator = RouteAllocator::new(ports.clone(), "seed", "c.sk8.dog", 4433);
+        let route_key = RouteKey::new("default", "orphan-chal", "pwn");
+        allocator.sync(&route_key, 20005);
+        assert_eq!(ports.active_ports(), vec![20005]);
+
+        let delete_attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = delete_attempts.clone();
+
+        // Service returns 500 on first delete attempt, 200 on second
+        let mock_service = service_fn(move |req: axum::http::Request<kube::client::Body>| {
+            let attempts = attempts_clone.clone();
+            async move {
+                if req.method() == axum::http::Method::DELETE {
+                    let count = attempts.fetch_add(1, Ordering::SeqCst);
+                    if count == 0 {
+                        return Ok::<_, std::convert::Infallible>(
+                            Response::builder()
+                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                .body(Body::from("Transient delete failure"))
+                                .unwrap(),
+                        );
+                    }
+                }
+                let resp = serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "Status",
+                    "status": "Success"
+                });
+                let body_str = serde_json::to_string(&resp).unwrap();
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body_str))
+                    .unwrap())
+            }
+        });
+
+        let client = kube::Client::new(mock_service, "default");
+        let api = Api::<CTFProxyRoute>::namespaced(client, "aincrad-system");
+
+        let route = CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("p20005".to_string()),
+                namespace: Some("aincrad-system".to_string()),
+                labels: Some(crate::btreemap! {
+                    INSTANCE_LABEL => "orphan-chal",
+                    INSTANCE_NAMESPACE_LABEL => "default",
+                    POD_LABEL => "pwn",
+                }),
+                ..Default::default()
+            },
+            spec: CTFProxyRouteSpec {
+                backend: "orphan-chal-pwn.default.svc.cluster.local:1337".to_string(),
+                ..Default::default()
+            },
+        };
+
+        // First batch run fails because of the 500
+        let (failed, err) =
+            delete_proxy_routes_batch(&api, "aincrad-system", vec![route.clone()], &allocator)
+                .await;
+        assert_eq!(failed.len(), 1);
+        assert!(err.is_some());
+
+        // Second batch run with the failed route succeeds
+        let (failed_second, err_second) =
+            delete_proxy_routes_batch(&api, "aincrad-system", failed, &allocator).await;
+        assert!(failed_second.is_empty());
+        assert!(err_second.is_none());
+
+        // Port 20005 released from allocator
+        assert!(ports.active_ports().is_empty());
     }
 
     #[tokio::test]

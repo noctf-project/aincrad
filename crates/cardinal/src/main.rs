@@ -112,7 +112,7 @@ async fn main() -> Result<(), Error> {
                             opts.cluster_domain.clone(),
                         ) => {
                             if let Err(err) = res {
-                                error!("Fatal controller error: {err}");
+                                error!("atal controller error: {err}");
                                 return Err(err);
                             }
                             info!("Controller loop finished.");
