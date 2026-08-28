@@ -22,7 +22,11 @@ tracing-subscriber = "0.3"
 thiserror = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 base32 = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+siphasher = { workspace = true }
 tokio-rustls = { workspace = true }
 
 [dev-dependencies]

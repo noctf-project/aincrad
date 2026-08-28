@@ -4,6 +4,7 @@ pub mod controller;
 pub mod error;
 pub mod planners;
 pub mod reconcilers;
+pub mod routing;
 #[cfg(test)]
 pub mod test_utils;
 pub mod utils;
