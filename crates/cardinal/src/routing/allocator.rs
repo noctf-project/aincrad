@@ -10,6 +10,7 @@ use thiserror::Error;
 use super::ports_store::{PortError, PortsStore};
 
 const HOSTNAME_ID_LEN: usize = 14;
+const MAX_PREFIX_LEN: usize = 56 - HOSTNAME_ID_LEN - 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RouteKey {
@@ -181,7 +182,6 @@ impl RouteAllocator {
 
 fn sanitize_prefix(input: &str) -> String {
     static RE_INVALID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9-]+").unwrap());
-    const MAX_PREFIX_LEN: usize = 63 - HOSTNAME_ID_LEN - 1; // 48
 
     let lowered = input.to_lowercase();
     let replaced = RE_INVALID.replace_all(&lowered, "-");
@@ -318,7 +318,7 @@ mod tests {
 
         let long_input = "a".repeat(100);
         let sanitized = sanitize_prefix(&long_input);
-        assert_eq!(sanitized.len(), 48);
-        assert_eq!(sanitized, "a".repeat(48));
+        assert_eq!(sanitized.len(), MAX_PREFIX_LEN);
+        assert_eq!(sanitized, "a".repeat(MAX_PREFIX_LEN));
     }
 }

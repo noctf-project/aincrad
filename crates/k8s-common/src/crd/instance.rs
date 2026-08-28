@@ -21,7 +21,7 @@ pub struct CTFInstanceStatusEndpoint {
 }
 
 impl KubeListKey for CTFInstanceStatusEndpoint {
-    const KEYS: &'static [&'static str] = &["name", "type"];
+    const KEYS: &'static [&'static str] = &["name"];
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
@@ -45,8 +45,8 @@ pub struct CTFInstanceStatus {
 pub struct CTFInstanceSpecParam {
     /// Name of the parameter to set or override.
     #[schemars(
-        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
-        length(min = 1, max = 24)
+        regex(pattern = r"^[_a-z0-9]([-_a-z0-9]*[a-z0-9])?$"),
+        length(min = 1, max = 32)
     )]
     pub name: String,
     /// Parameter value override:
@@ -64,7 +64,7 @@ impl KubeListKey for CTFInstanceSpecParam {
 #[serde(rename_all = "camelCase")]
 pub struct CTFInstanceSpecPodOverride {
     /// Name of the template pod specification to override replicas for.
-    #[schemars(length(min = 1, max = 20))]
+    #[schemars(length(min = 1, max = 24))]
     pub name: String,
     /// Replica count override for this pod.
     pub replicas: i32,
@@ -78,7 +78,7 @@ impl KubeListKey for CTFInstanceSpecPodOverride {
 #[serde(rename_all = "camelCase")]
 pub struct CTFInstanceSpecRouteOverride {
     /// Name of the template route to override.
-    #[schemars(length(min = 1, max = 20))]
+    #[schemars(length(min = 1, max = 24))]
     pub name: String,
     /// Dedicated TCP port override for this route:
     /// - Omitted: Inherit port from CTFTemplate.

@@ -24,9 +24,9 @@ spec:
                 items:
                   properties:
                     name:
-                      maxLength: 24
+                      maxLength: 32
                       minLength: 1
-                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      pattern: ^[_a-z0-9]([-_a-z0-9]*[a-z0-9])?$
                       type: string
                     value:
                       type: string
@@ -48,7 +48,7 @@ spec:
                       default: false
                       type: boolean
                     name:
-                      maxLength: 20
+                      maxLength: 24
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
@@ -79,7 +79,7 @@ spec:
                 items:
                   properties:
                     name:
-                      maxLength: 20
+                      maxLength: 24
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
@@ -255,9 +255,9 @@ spec:
                   properties:
                     name:
                       description: Name of the parameter to set or override.
-                      maxLength: 24
+                      maxLength: 32
                       minLength: 1
-                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      pattern: ^[_a-z0-9]([-_a-z0-9]*[a-z0-9])?$
                       type: string
                     value:
                       description: |-
@@ -425,7 +425,6 @@ spec:
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
-                - type
                 x-kubernetes-list-type: map
               observedGeneration:
                 format: int64

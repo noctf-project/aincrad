@@ -20,8 +20,8 @@ pub struct CTFTemplateStatus {
 #[serde(rename_all = "camelCase")]
 pub struct CTFTemplateSpecParam {
     #[schemars(
-        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
-        length(min = 1, max = 24)
+        regex(pattern = r"^[_a-z0-9]([-_a-z0-9]*[a-z0-9])?$"),
+        length(min = 1, max = 32)
     )]
     pub name: String,
     pub value: String,
@@ -77,7 +77,7 @@ pub struct CTFTemplateSpec {
 pub struct CTFTemplateSpecPod {
     #[schemars(
         regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
-        length(min = 1, max = 20)
+        length(min = 1, max = 24)
     )]
     pub name: String,
     #[serde(default)]
@@ -108,7 +108,7 @@ pub struct CTFTemplateSpecPod {
 pub struct CTFTemplateSpecRoute {
     #[schemars(
         regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
-        length(min = 1, max = 20)
+        length(min = 1, max = 24)
     )]
     pub name: String,
     pub spec: RouteSpec,
