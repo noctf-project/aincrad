@@ -79,6 +79,54 @@ pub fn generate_ctfinstance_admission_policy()
     (policy, binding)
 }
 
+/// Generates the ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding for CTFProxyRoute name format.
+pub fn generate_ctfproxyroute_admission_policy()
+-> (ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding) {
+    let policy_name = "ctfproxyroute-name-format";
+
+    let policy = ValidatingAdmissionPolicy {
+        metadata: ObjectMeta {
+            name: Some(policy_name.to_string()),
+            ..Default::default()
+        },
+        spec: Some(ValidatingAdmissionPolicySpec {
+            match_constraints: Some(MatchResources {
+                resource_rules: Some(vec![NamedRuleWithOperations {
+                    api_groups: Some(vec!["aincrad.noctf.dev".to_string()]),
+                    api_versions: Some(vec!["v1".to_string()]),
+                    operations: Some(vec!["CREATE".to_string(), "UPDATE".to_string()]),
+                    resources: Some(vec!["ctfproxyroutes".to_string()]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            validations: Some(vec![
+                Validation {
+                    expression: "(object.metadata.name.matches('^p[1-9][0-9]{0,4}$') && int(object.metadata.name.substring(1)) <= 65535) || object.metadata.name.matches('^r[a-z0-9]([-a-z0-9]*[a-z0-9])?$')".to_string(),
+                    message: Some("metadata.name must be 'p<1-65535>' for TCP routes or 'r<route-name>' for hostname routes".to_string()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        }),
+        status: None,
+    };
+
+    let binding = ValidatingAdmissionPolicyBinding {
+        metadata: ObjectMeta {
+            name: Some(format!("{policy_name}-binding")),
+            ..Default::default()
+        },
+        spec: ValidatingAdmissionPolicyBindingSpec {
+            policy_name: policy_name.to_string(),
+            validation_actions: vec!["Deny".to_string()],
+            ..Default::default()
+        },
+    };
+
+    (policy, binding)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +144,20 @@ mod tests {
         );
         let validations = policy.spec.unwrap().validations.unwrap();
         assert_eq!(validations.len(), 3);
+    }
+
+    #[test]
+    fn test_generate_ctfproxyroute_admission_policy() {
+        let (policy, binding) = generate_ctfproxyroute_admission_policy();
+        assert_eq!(
+            policy.metadata.name.as_deref(),
+            Some("ctfproxyroute-name-format")
+        );
+        assert_eq!(
+            binding.metadata.name.as_deref(),
+            Some("ctfproxyroute-name-format-binding")
+        );
+        let validations = policy.spec.unwrap().validations.unwrap();
+        assert_eq!(validations.len(), 1);
     }
 }

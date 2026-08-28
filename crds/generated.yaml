@@ -616,6 +616,77 @@ spec:
     subresources:
       status: {}
 ---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: ctfproxyroutes.aincrad.noctf.dev
+spec:
+  group: aincrad.noctf.dev
+  names:
+    kind: CTFProxyRoute
+    plural: ctfproxyroutes
+    singular: ctfproxyroute
+  scope: Namespaced
+  versions:
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for CTFProxyRouteSpec via `CustomResource`
+        properties:
+          spec:
+            description: Internal data-plane route configuration managed exclusively by Cardinal.
+            properties:
+              availableAt:
+                description: Optional UTC timestamp after which this route becomes active and accessible to players.
+                format: date-time
+                nullable: true
+                type: string
+              backend:
+                description: Target backend address (host:port or IP:port).
+                type: string
+              flag:
+                description: Flag string or template string for dynamic flag generation.
+                nullable: true
+                type: string
+              logs:
+                default: false
+                description: When true, enables logging of player TCP/TLS session traffic.
+                type: boolean
+              pow:
+                description: Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
+                nullable: true
+                properties:
+                  difficulty:
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  enableAdminBypass:
+                    default: false
+                    type: boolean
+                required:
+                - difficulty
+                type: object
+              requestUid:
+                default: false
+                description: Request the team's id in the TCP tunnel.
+                type: boolean
+              secret:
+                description: Cryptographic secret used for Proof-of-Work verification and AES flag encryption.
+                nullable: true
+                type: string
+            required:
+            - backend
+            type: object
+            x-kubernetes-validations:
+            - message: backend must be in 'host:port' format
+              rule: self.backend.matches('^.+:[0-9]+$')
+        required:
+        - spec
+        title: CTFProxyRoute
+        type: object
+    served: true
+    storage: true
+---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -646,6 +717,35 @@ metadata:
   name: ctfinstance-annotations-binding
 spec:
   policyName: ctfinstance-annotations
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ctfproxyroute-name-format
+spec:
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - aincrad.noctf.dev
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - ctfproxyroutes
+  validations:
+  - expression: (object.metadata.name.matches('^p[1-9][0-9]{0,4}$') && int(object.metadata.name.substring(1)) <= 65535) || object.metadata.name.matches('^r[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+    message: metadata.name must be 'p<1-65535>' for TCP routes or 'r<route-name>' for hostname routes
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ctfproxyroute-name-format-binding
+spec:
+  policyName: ctfproxyroute-name-format
   validationActions:
   - Deny
 ---

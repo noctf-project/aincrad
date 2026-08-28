@@ -1,20 +1,35 @@
-use k8s_common::{Error, crd::*, generate_ctfinstance_admission_policy};
+use k8s_common::{
+    Error, crd::*, generate_ctfinstance_admission_policy, generate_ctfproxyroute_admission_policy,
+};
 use kube::CustomResourceExt;
 
 fn main() -> Result<(), Error> {
-    let crds = [CTFRoute::crd(), CTFTemplate::crd(), CTFInstance::crd()];
+    let crds = [
+        CTFRoute::crd(),
+        CTFTemplate::crd(),
+        CTFInstance::crd(),
+        CTFProxyRoute::crd(),
+    ];
     for crd in crds {
         println!("{}---", generate_crd("yaml", crd)?);
     }
 
-    let (policy, binding) = generate_ctfinstance_admission_policy();
-    let policy_yaml = serde_yaml::to_string(&policy)
-        .map_err(|e| Error::Custom(format!("failed to serialize policy: {e}")))?;
-    let binding_yaml = serde_yaml::to_string(&binding)
-        .map_err(|e| Error::Custom(format!("failed to serialize binding: {e}")))?;
+    let (instance_policy, instance_binding) = generate_ctfinstance_admission_policy();
+    let instance_policy_yaml = serde_yaml::to_string(&instance_policy)
+        .map_err(|e| Error::Custom(format!("failed to serialize instance policy: {e}")))?;
+    let instance_binding_yaml = serde_yaml::to_string(&instance_binding)
+        .map_err(|e| Error::Custom(format!("failed to serialize instance binding: {e}")))?;
 
-    println!("{policy_yaml}---");
-    println!("{binding_yaml}---");
+    let (proxy_policy, proxy_binding) = generate_ctfproxyroute_admission_policy();
+    let proxy_policy_yaml = serde_yaml::to_string(&proxy_policy)
+        .map_err(|e| Error::Custom(format!("failed to serialize proxy policy: {e}")))?;
+    let proxy_binding_yaml = serde_yaml::to_string(&proxy_binding)
+        .map_err(|e| Error::Custom(format!("failed to serialize proxy binding: {e}")))?;
+
+    println!("{instance_policy_yaml}---");
+    println!("{instance_binding_yaml}---");
+    println!("{proxy_policy_yaml}---");
+    println!("{proxy_binding_yaml}---");
 
     Ok(())
 }

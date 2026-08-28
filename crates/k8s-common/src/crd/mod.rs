@@ -3,6 +3,7 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomRe
 use crate::Error;
 
 pub mod instance;
+pub mod proxy;
 pub mod route;
 pub mod template;
 
@@ -10,6 +11,7 @@ pub mod util;
 
 pub use aincrad_macros::PatchValue;
 pub use instance::*;
+pub use proxy::*;
 pub use route::*;
 pub use template::*;
 pub use util::PatchValue;
