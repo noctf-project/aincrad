@@ -419,7 +419,7 @@ mod tests {
         match res.unwrap_err() {
             Error::ApplyResource { kind, name, source } => {
                 assert_eq!(kind, "ReplicaSet");
-                assert!(name.starts_with("chal-1-c-web"));
+                assert!(name.starts_with("chal-1-web"));
                 assert!(source.to_string().contains("webhook rejected"));
             }
             other => panic!("Expected ApplyResource, got: {:?}", other),

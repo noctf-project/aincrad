@@ -292,7 +292,7 @@ mod tests {
 
         let desired = NetworkPolicyPlanner::plan(&instance, &template).unwrap();
         assert_eq!(desired.len(), 1);
-        assert_eq!(desired[0].metadata.name.as_deref(), Some("chal-1-c-np"));
+        assert_eq!(desired[0].metadata.name.as_deref(), Some("chal-1-np"));
         assert_eq!(
             desired[0].metadata.owner_references.as_ref().unwrap().len(),
             1

@@ -273,7 +273,7 @@ mod tests {
                 .name
                 .as_ref()
                 .unwrap()
-                .starts_with("chal-1-c-web-")
+                .starts_with("chal-1-web-")
         );
         assert_eq!(rs.metadata.owner_references.as_ref().unwrap().len(), 1);
     }
@@ -422,7 +422,7 @@ mod tests {
             web_pod_spec.containers[0].env.as_ref().unwrap()[0]
                 .value
                 .as_deref(),
-            Some("chal-web-c-db")
+            Some("chal-web-db")
         );
     }
 }

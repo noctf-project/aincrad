@@ -212,7 +212,7 @@ mod tests {
         );
         assert_eq!(
             tls_route.spec.backend,
-            "chal-1-c-web.default.svc.cluster.local:80"
+            "chal-1-web.default.svc.cluster.local:80"
         );
         assert!(tls_route.spec.logs);
 
@@ -228,7 +228,7 @@ mod tests {
         );
         assert_eq!(
             tcp_route.spec.backend,
-            "chal-1-c-pwn.default.svc.cluster.local:1337"
+            "chal-1-pwn.default.svc.cluster.local:1337"
         );
         assert_eq!(tcp_route.spec.pow.as_ref().unwrap().difficulty, 5000);
 

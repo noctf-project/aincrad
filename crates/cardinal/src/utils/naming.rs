@@ -4,23 +4,15 @@ pub const HASH_LEN: usize = 8;
 
 /// Generates a DNS-1123 compliant Kubernetes resource name (<= 63 chars).
 ///
-/// Automatically prepends `c-` to non-empty suffixes to ensure namespace isolation (`name-c-suffix`).
-/// If `name-c-suffix.len() > 63`: preserves `c-suffix` 100% intact, truncates `name`,
-/// and appends an `HASH_LEN`-character Crockford Base32 hash directly (`prefixhash-c-suffix`).
+/// Joins `name` and non-empty `suffix` (`name-suffix`).
+/// If `name-suffix.len() > 63`: preserves `suffix` 100% intact, truncates `name`,
+/// and appends an `HASH_LEN`-character Crockford Base32 hash directly (`prefixhash-suffix`).
 pub fn resource_name(name: &str, suffix: &str) -> String {
     const MAX_LEN: usize = 63;
     let name = name.trim_matches('-');
     let suffix = suffix.trim_matches('-');
 
-    let effective_suffix = if suffix.is_empty() {
-        String::new()
-    } else if suffix.starts_with("c-") {
-        suffix.to_string()
-    } else {
-        format!("c-{suffix}")
-    };
-
-    if effective_suffix.is_empty() {
+    if suffix.is_empty() {
         if name.len() <= MAX_LEN {
             return name.to_string();
         }
@@ -37,16 +29,16 @@ pub fn resource_name(name: &str, suffix: &str) -> String {
         return format!("{prefix}{hash}");
     }
 
-    let out = format!("{name}-{effective_suffix}");
+    let out = format!("{name}-{suffix}");
     if out.len() <= MAX_LEN {
         out
     } else {
         let full_hash = hash_str_crockford(name);
         let hash = &full_hash[..HASH_LEN]; // 8-character Crockford Base32 hash slice
 
-        // Available space for prefix while preserving effective_suffix 100% intact:
-        // MAX_LEN - HASH_LEN - 1 (dash before suffix) - effective_suffix.len()
-        let max_prefix_len = MAX_LEN.saturating_sub(HASH_LEN + 1 + effective_suffix.len());
+        // Available space for prefix while preserving suffix intact:
+        // MAX_LEN - HASH_LEN - 1 (dash before suffix) - suffix.len()
+        let max_prefix_len = MAX_LEN.saturating_sub(HASH_LEN + 1 + suffix.len());
 
         let safe_prefix_len = name
             .char_indices()
@@ -58,9 +50,9 @@ pub fn resource_name(name: &str, suffix: &str) -> String {
         let prefix = name[..safe_prefix_len].trim_end_matches('-');
 
         if prefix.is_empty() {
-            format!("{hash}-{effective_suffix}")
+            format!("{hash}-{suffix}")
         } else {
-            format!("{prefix}{hash}-{effective_suffix}")
+            format!("{prefix}{hash}-{suffix}")
         }
     }
 }
@@ -71,32 +63,27 @@ mod tests {
 
     #[test]
     fn test_resource_name_short() {
-        assert_eq!(resource_name("team-alpha", "web"), "team-alpha-c-web");
-        assert_eq!(resource_name("team-alpha", "np"), "team-alpha-c-np");
-    }
-
-    #[test]
-    fn test_resource_name_idempotent_c_prefix() {
-        assert_eq!(resource_name("team-alpha", "c-web"), "team-alpha-c-web");
+        assert_eq!(resource_name("team-alpha", "web"), "team-alpha-web");
+        assert_eq!(resource_name("team-alpha", "np"), "team-alpha-np");
     }
 
     #[test]
     fn test_resource_name_exact_63() {
-        let name_56_chars = "a".repeat(56);
-        let res = resource_name(&name_56_chars, "1234"); // 56 + 1 (dash) + 2 (c-) + 4 (1234) = 63
+        let name_58_chars = "a".repeat(58);
+        let res = resource_name(&name_58_chars, "1234"); // 58 + 1 (dash) + 4 (1234) = 63
         assert_eq!(res.len(), 63);
-        assert_eq!(res, format!("{name_56_chars}-c-1234"));
+        assert_eq!(res, format!("{name_58_chars}-1234"));
     }
 
     #[test]
-    fn test_resource_name_long_truncation_preserves_c_suffix() {
+    fn test_resource_name_long_truncation_preserves_suffix() {
         let long_name = "my-super-long-ctf-challenge-instance-name-for-team-alpha-group-123456789";
         let suffix = "web";
         let res = resource_name(long_name, suffix);
 
         assert!(res.len() <= 63);
         assert!(
-            res.ends_with("-c-web"),
+            res.ends_with("-web"),
             "Suffix must be preserved 100% intact"
         );
     }
