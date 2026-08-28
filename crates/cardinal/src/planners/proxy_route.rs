@@ -134,7 +134,6 @@ pub fn build_merged_route_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::routing::PortsStore;
     use crate::test_utils::tests::{dummy_instance, dummy_resolved_template};
     use k8s_common::PortRange;
@@ -142,6 +141,7 @@ mod tests {
         CTFRouteBackend, CTFRouteSpecTCP, CTFRouteSpecTLS, CTFRouteSpecTLSPatch,
         CTFTemplateSpecRoute,
     };
+    use std::sync::Arc;
 
     fn make_test_allocator() -> RouteAllocator {
         let ports = Arc::new(PortsStore::new(
@@ -230,10 +230,7 @@ mod tests {
             tcp_route.spec.backend,
             "chal-1-c-pwn.default.svc.cluster.local:1337"
         );
-        assert_eq!(
-            tcp_route.spec.pow.as_ref().unwrap().difficulty,
-            5000
-        );
+        assert_eq!(tcp_route.spec.pow.as_ref().unwrap().difficulty, 5000);
 
         // Endpoints
         assert_eq!(planned.endpoints[0].name, "pwn");

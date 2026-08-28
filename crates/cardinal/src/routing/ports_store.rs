@@ -192,7 +192,10 @@ impl PortsStore {
 
     /// Gets the RouteKey bound to a port if present.
     pub fn get_route(&self, port: u16) -> Option<RouteKey> {
-        self.inner.read().expect(LOCK_POISONED_ERROR).get_route(port)
+        self.inner
+            .read()
+            .expect(LOCK_POISONED_ERROR)
+            .get_route(port)
     }
 
     /// Returns a list of all currently allocated ports.

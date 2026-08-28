@@ -98,7 +98,9 @@ pub fn build_ctfroute_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_common::crd::{CTFRouteBackend, CTFRouteSpecTCP, CTFRouteSpecTLS, CTFRouteSpecTLSPatch};
+    use k8s_common::crd::{
+        CTFRouteBackend, CTFRouteSpecTCP, CTFRouteSpecTLS, CTFRouteSpecTLSPatch,
+    };
 
     #[test]
     fn test_build_ctfroute_spec_port_and_tls_overrides() {

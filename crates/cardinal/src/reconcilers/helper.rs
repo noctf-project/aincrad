@@ -184,7 +184,8 @@ pub async fn apply_proxy_routes(
     let patch_params = PatchParams::apply("cardinal").force();
     for route in desired_routes {
         if let Some(name) = route.meta().name.as_deref() {
-            api.patch(name, &patch_params, &Patch::Apply(&route)).await?;
+            api.patch(name, &patch_params, &Patch::Apply(&route))
+                .await?;
         }
     }
 
@@ -318,12 +319,12 @@ pub async fn prune_unreferenced_proxy_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::planners::ReplicaSetPlanner;
     use crate::routing::PortsStore;
     use crate::test_utils::tests::{dummy_instance, dummy_kube_client, dummy_resolved_template};
     use k8s_common::PortRange;
     use k8s_openapi::api::apps::v1::ReplicaSet;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_apply_planner_success() {
@@ -393,13 +394,8 @@ mod tests {
         let mut live = HashSet::new();
         live.insert(("default".to_string(), "chal-1".to_string()));
 
-        let res = prune_unreferenced_proxy_routes(
-            client,
-            "aincrad-system",
-            &live,
-            &allocator,
-        )
-        .await;
+        let res =
+            prune_unreferenced_proxy_routes(client, "aincrad-system", &live, &allocator).await;
         assert!(res.is_ok());
     }
 

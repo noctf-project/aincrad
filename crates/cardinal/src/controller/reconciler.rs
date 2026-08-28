@@ -288,7 +288,7 @@ pub async fn handle_instance_watcher_init_done(
     system_ns: &str,
     store: &store::Store<CTFInstance>,
     allocator: &crate::routing::RouteAllocator,
-) {
+) -> Result<(), Error> {
     let live_instances: std::collections::HashSet<(String, String)> = store
         .state()
         .into_iter()
@@ -304,17 +304,15 @@ pub async fn handle_instance_watcher_init_done(
         live_count = live_instances.len(),
         "CTFInstance init done; checking and pruning dangling proxy routes..."
     );
-    if let Err(e) = crate::reconcilers::helper::prune_unreferenced_proxy_routes(
+    crate::reconcilers::helper::prune_unreferenced_proxy_routes(
         client,
         system_ns,
         &live_instances,
         allocator,
     )
-    .await
-    {
-        error!("fatal controller error: {e}");
-        std::process::exit(1);
-    }
+    .await?;
+
+    Ok(())
 }
 
 /// Handles watcher events for `CTFInstance` to update or clear the in-memory index.
@@ -446,6 +444,8 @@ pub async fn run(
     let allocator_init_done = allocator.clone();
     let instance_store_init_done = instance_store.clone();
 
+    let (fatal_tx, mut fatal_rx) = tokio::sync::broadcast::channel::<String>(1);
+
     let instance_watcher_stream = watcher(instances, Config::default())
         .default_backoff()
         .then(move |res| {
@@ -454,18 +454,19 @@ pub async fn run(
             let allocator = allocator_init_done.clone();
             let store = instance_store_init_done.clone();
             let cache = instance_cache_task.clone();
+            let fatal_tx = fatal_tx.clone();
 
             async move {
                 if let Ok(ref event) = res {
                     handle_instance_watcher_event(event, &cache);
-                    if let Event::InitDone = event {
-                        handle_instance_watcher_init_done(
-                            client,
-                            &system_ns,
-                            &store,
-                            &allocator,
+                    if let Event::InitDone = event
+                        && let Err(e) = handle_instance_watcher_init_done(
+                            client, &system_ns, &store, &allocator,
                         )
-                        .await;
+                        .await
+                    {
+                        error!("fatal controller error: {e}");
+                        let _ = fatal_tx.send(e.to_string());
                     }
                 }
                 res
@@ -480,29 +481,33 @@ pub async fn run(
 
     info!("Starting CTFInstance controller with Template tracking");
 
-    Controller::for_stream(controller_instance_stream, instance_store)
-        .watches_stream(template_stream, move |template| {
-            let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
-            info!(
-                template_name = tmpl_name,
-                "CTFTemplate updated, evaluating synced CTFInstances to retrigger"
-            );
-            instance_cache.find_synced_instances(&template)
-        })
-        .run(reconcile, error_policy, context)
-        .for_each(|res| async {
-            match res {
-                Ok((object, _action)) => {
-                    info!(name = %object.name, "Successfully reconciled CTFInstance");
+    tokio::select! {
+        Ok(err_msg) = fatal_rx.recv() => {
+            Err(Error::Custom(err_msg))
+        }
+        _ = Controller::for_stream(controller_instance_stream, instance_store)
+            .watches_stream(template_stream, move |template| {
+                let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
+                info!(
+                    template_name = tmpl_name,
+                    "CTFTemplate updated, evaluating synced CTFInstances to retrigger"
+                );
+                instance_cache.find_synced_instances(&template)
+            })
+            .run(reconcile, error_policy, context)
+            .for_each(|res| async {
+                match res {
+                    Ok((object, _action)) => {
+                        info!(name = %object.name, "Successfully reconciled CTFInstance");
+                    }
+                    Err(err) => {
+                        warn!(%err, "Controller error occurred");
+                    }
                 }
-                Err(err) => {
-                    warn!(%err, "Controller error occurred");
-                }
+            }) => {
+                Ok(())
             }
-        })
-        .await;
-
-    Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -689,5 +694,90 @@ mod tests {
 
         let action = reconcile(instance, ctx).await.unwrap();
         assert_eq!(action, Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_handle_instance_watcher_init_done_success() {
+        use crate::test_utils::tests::dummy_instance;
+
+        let client = dummy_kube_client();
+        let (instance_store, mut instance_writer) = store();
+        let mut inst = dummy_instance("chal-1", None);
+        inst.metadata.namespace = Some("team-1".into());
+        instance_writer.apply_watcher_event(&Event::Apply(inst));
+
+        let ports = Arc::new(PortsStore::new(
+            PortRange(20000..=20010),
+            PortRange(30000..=30010),
+        ));
+        let allocator = RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433);
+
+        let res = handle_instance_watcher_init_done(
+            client,
+            "aincrad-system",
+            &instance_store,
+            &allocator,
+        )
+        .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_instance_watcher_init_done_failure() {
+        use tower::service_fn;
+        let mock_service = service_fn(|_req: axum::http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(
+                axum::http::Response::builder()
+                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(axum::body::Body::from("Internal Server Error"))
+                    .unwrap(),
+            )
+        });
+        let client = kube::Client::new(mock_service, "default");
+        let (instance_store, _) = store();
+
+        let ports = Arc::new(PortsStore::new(
+            PortRange(20000..=20010),
+            PortRange(30000..=30010),
+        ));
+        let allocator = RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433);
+
+        let res = handle_instance_watcher_init_done(
+            client,
+            "aincrad-system",
+            &instance_store,
+            &allocator,
+        )
+        .await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_controller_run_fatal_list_error() {
+        use tower::service_fn;
+        let mock_service = service_fn(|_req: axum::http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(
+                axum::http::Response::builder()
+                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(axum::body::Body::from("Internal Server Error"))
+                    .unwrap(),
+            )
+        });
+        let client = kube::Client::new(mock_service, "default");
+
+        let ports = Arc::new(PortsStore::new(
+            PortRange(20000..=20010),
+            PortRange(30000..=30010),
+        ));
+        let allocator = Arc::new(RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433));
+
+        let res = run(
+            client,
+            allocator,
+            "aincrad-system".into(),
+            "cluster.local".into(),
+        )
+        .await;
+        assert!(res.is_err());
     }
 }

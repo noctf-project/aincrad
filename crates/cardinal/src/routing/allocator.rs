@@ -283,10 +283,7 @@ mod tests {
         match res.proxy_key {
             ProxyRouteKey::Route(hostname) => {
                 assert!(hostname.starts_with("whoami-"));
-                assert_eq!(
-                    res.endpoint.target.host,
-                    format!("{hostname}.c.sk8.dog")
-                );
+                assert_eq!(res.endpoint.target.host, format!("{hostname}.c.sk8.dog"));
             }
             _ => panic!("expected ProxyRouteKey::Route"),
         }
