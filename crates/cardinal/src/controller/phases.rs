@@ -152,10 +152,7 @@ pub mod prepare {
         let evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
         if evaluation.is_ready()
             && is_observed(instance)
-            && !crate::utils::versions::requires_template_upgrade(
-                template.metadata.generation,
-                instance,
-            )
+            && !crate::utils::versions::requires_template_upgrade(&template.metadata, instance)
         {
             info!(name, ns, "Instance ready, skipping reconciliation");
             return Ok(Step::Finish(completed_action(flow)));

@@ -584,3 +584,32 @@ spec:
   validationActions:
   - Deny
 ---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ctftemplate-metadata
+spec:
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - aincrad.noctf.dev
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - ctftemplates
+  validations:
+  - expression: '!has(object.metadata.annotations) || !(''aincrad.noctf.dev/minTemplateGeneration'' in object.metadata.annotations) || object.metadata.annotations[''aincrad.noctf.dev/minTemplateGeneration''].matches(r''^[1-9][0-9]*$'')'
+    message: annotation 'aincrad.noctf.dev/minTemplateGeneration' must be a positive integer
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ctftemplate-metadata-binding
+spec:
+  policyName: ctftemplate-metadata
+  validationActions:
+  - Deny
+---

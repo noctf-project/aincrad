@@ -93,14 +93,14 @@ impl InstanceCache {
             instance: String::new(),
         };
 
-        let template_gen = template.metadata.generation;
-
         let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         lock.index
             .range(start_key..)
             .take_while(|(k, _)| k.namespace == tmpl_ns && k.template == tmpl_name)
             .map(|(_, val)| val.clone())
-            .filter(|inst| crate::utils::versions::requires_template_upgrade(template_gen, inst))
+            .filter(|inst| {
+                crate::utils::versions::requires_template_upgrade(&template.metadata, inst)
+            })
             .collect()
     }
 

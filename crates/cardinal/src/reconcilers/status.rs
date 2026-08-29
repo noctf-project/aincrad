@@ -293,9 +293,17 @@ mod tests {
             resources: Default::default(),
         });
 
-        let template_gen = current_template_generation(&synced, &ctx);
+        let template_meta = ctx
+            .template_cache
+            .as_ref()
+            .unwrap()
+            .get("default", "whoami-template")
+            .unwrap()
+            .template
+            .metadata
+            .clone();
         assert!(
-            !crate::utils::versions::requires_template_upgrade(template_gen, &synced),
+            !crate::utils::versions::requires_template_upgrade(&template_meta, &synced),
             "synced instance at the current template generation must not require an upgrade"
         );
 
@@ -314,9 +322,17 @@ mod tests {
         };
         ctx.template_cache.as_ref().unwrap().update(&bump_tmpl);
 
-        let template_gen = current_template_generation(&synced, &ctx);
+        let template_meta = ctx
+            .template_cache
+            .as_ref()
+            .unwrap()
+            .get("default", "whoami-template")
+            .unwrap()
+            .template
+            .metadata
+            .clone();
         assert!(
-            crate::utils::versions::requires_template_upgrade(template_gen, &synced),
+            crate::utils::versions::requires_template_upgrade(&template_meta, &synced),
             "a template generation bump surfaces as an upgrade so children get re-applied"
         );
 
@@ -328,9 +344,8 @@ mod tests {
             conditions: vec![],
             resources: Default::default(),
         });
-        let template_gen = current_template_generation(&caught_up, &ctx);
         assert!(
-            !crate::utils::versions::requires_template_upgrade(template_gen, &caught_up),
+            !crate::utils::versions::requires_template_upgrade(&template_meta, &caught_up),
             "after the applied template generation is recorded, the upgrade is no longer required"
         );
     }

@@ -1,5 +1,6 @@
 use k8s_common::{
     Error, crd::*, generate_ctfinstance_admission_policy, generate_ctfproxyroute_admission_policy,
+    generate_ctftemplate_admission_policy,
 };
 use kube::CustomResourceExt;
 
@@ -21,10 +22,18 @@ fn main() -> Result<(), Error> {
     let proxy_binding_yaml = serde_yaml::to_string(&proxy_binding)
         .map_err(|e| Error::Custom(format!("failed to serialize proxy binding: {e}")))?;
 
+    let (template_policy, template_binding) = generate_ctftemplate_admission_policy();
+    let template_policy_yaml = serde_yaml::to_string(&template_policy)
+        .map_err(|e| Error::Custom(format!("failed to serialize template policy: {e}")))?;
+    let template_binding_yaml = serde_yaml::to_string(&template_binding)
+        .map_err(|e| Error::Custom(format!("failed to serialize template binding: {e}")))?;
+
     println!("{instance_policy_yaml}---");
     println!("{instance_binding_yaml}---");
     println!("{proxy_policy_yaml}---");
     println!("{proxy_binding_yaml}---");
+    println!("{template_policy_yaml}---");
+    println!("{template_binding_yaml}---");
 
     Ok(())
 }

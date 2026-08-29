@@ -79,6 +79,56 @@ pub fn generate_ctfinstance_admission_policy()
     (policy, binding)
 }
 
+/// Generates the ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding for CTFTemplate annotations.
+pub fn generate_ctftemplate_admission_policy()
+-> (ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding) {
+    let policy_name = "ctftemplate-metadata";
+
+    let policy = ValidatingAdmissionPolicy {
+        metadata: ObjectMeta {
+            name: Some(policy_name.to_string()),
+            ..Default::default()
+        },
+        spec: Some(ValidatingAdmissionPolicySpec {
+            match_constraints: Some(MatchResources {
+                resource_rules: Some(vec![NamedRuleWithOperations {
+                    api_groups: Some(vec!["aincrad.noctf.dev".to_string()]),
+                    api_versions: Some(vec!["v1".to_string()]),
+                    operations: Some(vec!["CREATE".to_string(), "UPDATE".to_string()]),
+                    resources: Some(vec!["ctftemplates".to_string()]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            validations: Some(vec![Validation {
+                expression: format!(
+                    "!has(object.metadata.annotations) || !('{MIN_TEMPLATE_GENERATION_ANNOTATION}' in object.metadata.annotations) || object.metadata.annotations['{MIN_TEMPLATE_GENERATION_ANNOTATION}'].matches(r'^[1-9][0-9]*$')"
+                ),
+                message: Some(format!(
+                    "annotation '{MIN_TEMPLATE_GENERATION_ANNOTATION}' must be a positive integer"
+                )),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        status: None,
+    };
+
+    let binding = ValidatingAdmissionPolicyBinding {
+        metadata: ObjectMeta {
+            name: Some(format!("{policy_name}-binding")),
+            ..Default::default()
+        },
+        spec: ValidatingAdmissionPolicyBindingSpec {
+            policy_name: policy_name.to_string(),
+            validation_actions: vec!["Deny".to_string()],
+            ..Default::default()
+        },
+    };
+
+    (policy, binding)
+}
+
 /// Generates the ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding for CTFProxyRoute name format.
 pub fn generate_ctfproxyroute_admission_policy()
 -> (ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding) {
@@ -144,6 +194,21 @@ mod tests {
         );
         let validations = policy.spec.unwrap().validations.unwrap();
         assert_eq!(validations.len(), 3);
+    }
+
+    #[test]
+    fn test_generate_ctftemplate_admission_policy() {
+        let (policy, binding) = generate_ctftemplate_admission_policy();
+        assert_eq!(
+            policy.metadata.name.as_deref(),
+            Some("ctftemplate-metadata")
+        );
+        assert_eq!(
+            binding.metadata.name.as_deref(),
+            Some("ctftemplate-metadata-binding")
+        );
+        let validations = policy.spec.unwrap().validations.unwrap();
+        assert_eq!(validations.len(), 1);
     }
 
     #[test]

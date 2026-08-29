@@ -231,9 +231,10 @@ pub async fn run(
         });
 
     let template_reflector = reflector(template_writer, template_watcher_stream);
-    let template_stream = template_reflector
-        .touched_objects()
-        .predicate_filter(predicates::generation, Default::default());
+    let template_stream = template_reflector.touched_objects().predicate_filter(
+        predicates::generation.combine(predicates::annotations),
+        Default::default(),
+    );
 
     // Initialize in-memory CTFInstance reflector store cache for watches mapping
     let (instance_store, instance_writer) = store();
