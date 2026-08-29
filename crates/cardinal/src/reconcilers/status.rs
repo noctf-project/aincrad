@@ -241,6 +241,7 @@ pub async fn reconcile_failure(
             "TemplateNotFound".to_string(),
             format!("Template \"{tmpl}\" not found"),
         ),
+        Error::InvalidOverride(msg) => ("InvalidOverride".to_string(), msg.clone()),
         Error::TemplateBuildError(msg) => ("TemplateBuildError".to_string(), msg.clone()),
         Error::RouteAllocationError(e) => ("RouteAllocationError".to_string(), e.to_string()),
         Error::ApplyResource { kind, name, source } => (
@@ -263,7 +264,7 @@ pub async fn reconcile_failure(
         reason,
         message,
         last_transition_time: now,
-        observed_generation,
+        observed_generation: instance.metadata.generation,
     };
 
     let status_patch = serde_json::json!({

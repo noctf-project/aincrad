@@ -16,6 +16,9 @@ pub enum Error {
     TemplateNotFound(String),
 
     #[error("{0}")]
+    InvalidOverride(String),
+
+    #[error("{0}")]
     TemplateBuildError(String),
 
     #[error("Failed to apply {kind} \"{name}\": {source}")]

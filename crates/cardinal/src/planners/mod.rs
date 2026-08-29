@@ -5,6 +5,7 @@ pub mod replicaset;
 pub mod service;
 
 pub use helpers::apply_condition;
+pub use helpers::validate_overrides;
 pub use network_policy::NetworkPolicyPlanner;
 pub use proxy_route::ProxyRoutePlanner;
 pub use replicaset::ReplicaSetPlanner;

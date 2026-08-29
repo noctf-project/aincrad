@@ -151,6 +151,10 @@ pub mod prepare {
         // Resolve the CTFTemplate referenced by instance.spec.template.
         let template = reconcilers::template::reconcile(instance, ctx).await?;
 
+        // Reject overrides that name template entries which do not exist,
+        // rather than silently ignoring them.
+        crate::planners::validate_overrides(instance, &template)?;
+
         // A non-numeric or non-positive minTemplateGeneration is rewritten to the
         // template's current generation, short-circuiting the reconcile.
         if let Some(raw_val) = instance
