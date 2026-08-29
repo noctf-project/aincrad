@@ -60,11 +60,11 @@ impl Handler {
         let mut c_rx = BufReader::with_capacity(BUF_SIZE, c_rx);
         let spec = &self.route.spec;
 
-        let secret = spec.secret.as_deref().unwrap_or("notsecret");
+        let secret = spec.policy.secret.as_deref().unwrap_or("notsecret");
 
         let mut request_pow: Option<ChallengeSolveState> = None;
-        let pow = spec.pow.as_ref();
-        if let Some(available_at) = spec.available_at
+        let pow = spec.policy.pow.as_ref();
+        if let Some(available_at) = spec.policy.available_at
             && available_at > self.session.timestamp
         {
             c_tx.write_all(b"== info: This challenge is not currently available ==\n")
@@ -109,7 +109,7 @@ impl Handler {
             }
         }
 
-        if spec.request_uid {
+        if spec.policy.request_uid {
             c_tx.write_all(b"== input: competitor id (max 64 chars) ==\n")
                 .await?;
             self.session.uid = get_line(&mut c_rx, MAX_UID_SIZE, MAX_INPUT_TIME_UID).await?;
@@ -117,7 +117,7 @@ impl Handler {
 
         let secret = derive_key("flag", secret);
 
-        if let Some(ref flag_prefix) = spec.flag {
+        if let Some(ref flag_prefix) = spec.policy.flag {
             self.flag = V1FlagGenerator::generate(
                 &self.service.config.flag_prefix,
                 flag_prefix,
@@ -132,13 +132,13 @@ impl Handler {
         let mut socket = TcpStream::connect(addr).await?;
         let (b_rx, mut b_tx) = socket.split();
         let mut b_rx = BufReader::with_capacity(BUF_SIZE, b_rx);
-        if spec.flag.is_some() {
+        if spec.policy.flag.is_some() {
             let mut buf = Vec::<u8>::with_capacity(self.flag.len() + 1);
             writeln!(buf, "{}", self.flag)?;
             b_tx.write_all(&buf).await?;
         }
 
-        if spec.logs {
+        if spec.policy.logs {
             let cancel = CancellationToken::new();
             let (tx, rx) = mpsc::channel(64);
             join!(
@@ -253,7 +253,7 @@ mod tests {
     use crate::services::routes::RoutesService;
     use crate::store::resolver::{Resolver, ResolverExpiryPolicy};
     use chrono::{Duration as ChronoDuration, Utc};
-    use k8s_common::crd::{CTFProxyRouteSpec, CTFProxyRouteSpecPOW};
+    use k8s_common::crd::{CTFProxyRouteSpec, RoutePolicySpec, RouteSpecPOW};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::net::{IpAddr, Ipv4Addr};
     use tokio::io::AsyncReadExt;
@@ -286,9 +286,11 @@ mod tests {
     async fn test_handler_get_log_filename() {
         let ctx = create_test_service_context();
         let spec = CTFProxyRouteSpec {
-            flag: Some("test_flag".into()),
+            policy: RoutePolicySpec {
+                flag: Some("test_flag".into()),
+                ..Default::default()
+            },
             backend: "127.0.0.1:8080".into(),
-            ..Default::default()
         };
         let challenge = Arc::new(CTFProxyRoute {
             metadata: ObjectMeta {
@@ -356,13 +358,15 @@ mod tests {
         let ctx = create_test_service_context();
         let future_time = Utc::now() + ChronoDuration::hours(24);
         let spec = CTFProxyRouteSpec {
+            policy: RoutePolicySpec {
+                available_at: Some(future_time),
+                pow: Some(RouteSpecPOW {
+                    difficulty: 0,
+                    enable_admin_bypass: false,
+                }),
+                ..Default::default()
+            },
             backend: "127.0.0.1:8080".into(),
-            available_at: Some(future_time),
-            pow: Some(CTFProxyRouteSpecPOW {
-                difficulty: 0,
-                enable_admin_bypass: false,
-            }),
-            ..Default::default()
         };
         let challenge = Arc::new(CTFProxyRoute {
             metadata: ObjectMeta {
@@ -396,13 +400,15 @@ mod tests {
         let ctx = create_test_service_context();
         let future_time = Utc::now() + ChronoDuration::hours(24);
         let spec = CTFProxyRouteSpec {
+            policy: RoutePolicySpec {
+                available_at: Some(future_time),
+                pow: Some(RouteSpecPOW {
+                    difficulty: 0,
+                    enable_admin_bypass: true,
+                }),
+                ..Default::default()
+            },
             backend: "127.0.0.1:8080".into(),
-            available_at: Some(future_time),
-            pow: Some(CTFProxyRouteSpecPOW {
-                difficulty: 0,
-                enable_admin_bypass: true,
-            }),
-            ..Default::default()
         };
         let challenge = Arc::new(CTFProxyRoute {
             metadata: ObjectMeta {

@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::crd::util::KubeListKey;
+
 fn clamp_u64<'de, D>(d: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
@@ -63,8 +65,8 @@ pub enum RouteTarget<'a> {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
-/// Specification for dynamic L4 TCP/TLS routing and traffic inspection.
-pub struct RouteSpec {
+/// Policy applied to player traffic for the route.
+pub struct RoutePolicySpec {
     /// Flag string or template string for the challenge route.
     #[serde(default)]
     pub flag: Option<String>,
@@ -80,12 +82,41 @@ pub struct RouteSpec {
     /// When true, enables logging of player TCP/TLS session traffic.
     #[serde(default)]
     pub logs: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
+#[schemars(
+    extend("x-kubernetes-validations" = [
+        {
+            "rule": "has(self.tcp) != has(self.tls)",
+            "message": "Route must specify either 'tcp' or 'tls', but not both"
+        },
+        {
+            "rule": "!has(self.tcp) || !has(self.tcp.port) || self.tcp.port == 0",
+            "message": "Explicit external ports cannot be set; port must be omitted or set to 0"
+        }
+    ])
+)]
+#[serde(rename_all = "camelCase")]
+/// Specification for dynamic L4 TCP/TLS routing and traffic inspection.
+pub struct RouteSpec {
+    #[schemars(
+        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
+        length(min = 1, max = 24)
+    )]
+    pub name: String,
+    #[serde(default)]
+    pub policy: RoutePolicySpec,
     /// Target backend Kubernetes service name and port.
     pub backend: RouteBackend,
     /// TCP routing configuration (mutually exclusive with 'tls').
     pub tcp: Option<RouteSpecTCP>,
     /// TLS routing configuration (mutually exclusive with 'tcp').
     pub tls: Option<RouteSpecTLS>,
+}
+
+impl KubeListKey for RouteSpec {
+    const KEYS: &'static [&'static str] = &["name"];
 }
 
 impl RouteSpec {
@@ -114,6 +145,7 @@ mod tests {
     #[test]
     fn test_challenge_spec_deserialization() {
         let json_tcp = serde_json::json!({
+            "name": "pwn",
             "backend": {
                 "service": "127.0.0.1",
                 "port": 8080
@@ -121,18 +153,21 @@ mod tests {
             "tcp": {
                 "port": 20001
             },
-            "flag": "my_flag"
+            "policy": {
+                "flag": "my_flag"
+            }
         });
         let spec_tcp: RouteSpec = serde_json::from_value(json_tcp).unwrap();
         assert_eq!(spec_tcp.backend.service, "127.0.0.1");
         assert_eq!(spec_tcp.backend.port, 8080);
-        assert_eq!(spec_tcp.flag, Some("my_flag".to_string()));
+        assert_eq!(spec_tcp.policy.flag, Some("my_flag".to_string()));
         assert_eq!(
             spec_tcp.target(),
             Some(RouteTarget::Tcp(&RouteSpecTCP { port: Some(20001) }))
         );
 
         let json_tls = serde_json::json!({
+            "name": "web",
             "backend": {
                 "service": "127.0.0.1",
                 "port": 8080

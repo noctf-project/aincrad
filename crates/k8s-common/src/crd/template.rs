@@ -35,10 +35,6 @@ impl KubeListKey for CTFTemplateSpecPod {
     const KEYS: &'static [&'static str] = &["name"];
 }
 
-impl KubeListKey for CTFTemplateSpecRoute {
-    const KEYS: &'static [&'static str] = &["name"];
-}
-
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[kube(
     group = "aincrad.noctf.dev",
@@ -48,13 +44,13 @@ impl KubeListKey for CTFTemplateSpecRoute {
     status = CTFTemplateStatus,
 )]
 #[schemars(
-    extend("x-kubernetes-validations" = [
-        {
-            "rule": "self.routes.all(r, self.pods.exists(p, p.name == r.spec.backend.service))",
-            "message": "Each route backend service must match a valid pod name defined in 'spec.pods'"
-        },
-    ])
-)]
+        extend("x-kubernetes-validations" = [
+            {
+                "rule": "self.routes.all(r, self.pods.exists(p, p.name == r.backend.service))",
+                "message": "Each route backend service must match a valid pod name defined in 'spec.pods'"
+            },
+        ])
+    )]
 #[serde(rename_all = "camelCase")]
 /// Specification for a reusable CTF challenge workload template.
 pub struct CTFTemplateSpec {
@@ -66,10 +62,10 @@ pub struct CTFTemplateSpec {
     #[serde(default)]
     #[schemars(schema_with = "list_schema::<CTFTemplateSpecPod>")]
     pub pods: Vec<CTFTemplateSpecPod>,
-    /// List of CTFRoute definitions that expose backend services.
+    /// List of RouteSpec definitions that expose backend services.
     #[serde(default)]
-    #[schemars(schema_with = "list_schema::<CTFTemplateSpecRoute>")]
-    pub routes: Vec<CTFTemplateSpecRoute>,
+    #[schemars(schema_with = "list_schema::<RouteSpec>")]
+    pub routes: Vec<RouteSpec>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
@@ -86,30 +82,7 @@ pub struct CTFTemplateSpecPod {
     pub replicas: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "json_patch_schema")]
-    pub patch: Option<json_patch::Patch>,
+    pub patch_spec: Option<json_patch::Patch>,
     #[schemars(schema_with = "embedded_resource_schema::<PodSpec>")]
     pub spec: PodSpec,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
-#[schemars(
-    extend("x-kubernetes-validations" = [
-        {
-            "rule": "has(self.spec.tcp) != has(self.spec.tls)",
-            "message": "Route must specify either 'tcp' or 'tls', but not both"
-        },
-        {
-            "rule": "!has(self.spec.tcp) || !has(self.spec.tcp.port) || self.spec.tcp.port == 0",
-            "message": "Explicit external ports cannot be set; port must be omitted or set to 0"
-        }
-    ])
-)]
-#[serde(rename_all = "camelCase")]
-pub struct CTFTemplateSpecRoute {
-    #[schemars(
-        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
-        length(min = 1, max = 24)
-    )]
-    pub name: String,
-    pub spec: RouteSpec,
 }

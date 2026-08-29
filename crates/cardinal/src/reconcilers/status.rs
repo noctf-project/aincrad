@@ -229,18 +229,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluate_synced_instance_is_ready() {
-        use k8s_common::crd::{CTFTemplateSpecRoute, RouteBackend, RouteSpec, RouteSpecTCP};
+        use k8s_common::crd::{RouteBackend, RouteSpec, RouteSpecTCP};
 
-        let tcp_route = CTFTemplateSpecRoute {
+        let tcp_route = RouteSpec {
             name: "chal".to_string(),
-            spec: RouteSpec {
-                backend: RouteBackend {
-                    service: "web".into(),
-                    port: 80,
-                },
-                tcp: Some(RouteSpecTCP { port: Some(0) }),
-                ..Default::default()
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 80,
             },
+            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            ..Default::default()
         };
         let (_store, ctx) = dummy_context_with_routes(vec![tcp_route]);
 
@@ -267,18 +265,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_requires_upgrade_detects_template_bump() {
-        use k8s_common::crd::{CTFTemplateSpecRoute, RouteBackend, RouteSpec, RouteSpecTCP};
+        use k8s_common::crd::{RouteBackend, RouteSpec, RouteSpecTCP};
 
-        let tcp_route = CTFTemplateSpecRoute {
+        let tcp_route = RouteSpec {
             name: "chal".to_string(),
-            spec: RouteSpec {
-                backend: RouteBackend {
-                    service: "web".into(),
-                    port: 80,
-                },
-                tcp: Some(RouteSpecTCP { port: Some(0) }),
-                ..Default::default()
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 80,
             },
+            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            ..Default::default()
         };
         let (_store, ctx) = dummy_context_with_routes(vec![tcp_route.clone()]);
 

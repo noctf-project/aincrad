@@ -338,8 +338,7 @@ mod tests {
     use futures::StreamExt;
     use k8s_common::PortRange;
     use k8s_common::crd::{
-        CTFInstanceSpec, CTFInstanceStatus, CTFTemplateSpecRoute, RouteBackend, RouteSpec,
-        RouteSpecTCP,
+        CTFInstanceSpec, CTFInstanceStatus, RouteBackend, RouteSpec, RouteSpecTCP,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -520,16 +519,14 @@ mod tests {
     #[tokio::test]
     async fn test_spec_change_after_ready_reapplies_children() {
         let (client, log) = recording_kube_client();
-        let tcp_route = CTFTemplateSpecRoute {
+        let tcp_route = RouteSpec {
             name: "chal".to_string(),
-            spec: RouteSpec {
-                backend: RouteBackend {
-                    service: "web".into(),
-                    port: 80,
-                },
-                tcp: Some(RouteSpecTCP { port: Some(0) }),
-                ..Default::default()
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 80,
             },
+            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            ..Default::default()
         };
         let (_store, ctx) = dummy_ctx(client, vec![tcp_route]);
 
@@ -579,16 +576,14 @@ mod tests {
     #[tokio::test]
     async fn test_restart_annotation_after_ready_reapplies_children() {
         let (client, log) = recording_kube_client();
-        let tcp_route = CTFTemplateSpecRoute {
+        let tcp_route = RouteSpec {
             name: "chal".to_string(),
-            spec: RouteSpec {
-                backend: RouteBackend {
-                    service: "web".into(),
-                    port: 80,
-                },
-                tcp: Some(RouteSpecTCP { port: Some(0) }),
-                ..Default::default()
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 80,
             },
+            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            ..Default::default()
         };
         let (_store, ctx) = dummy_ctx(client, vec![tcp_route]);
 
@@ -633,16 +628,14 @@ mod tests {
     #[tokio::test]
     async fn test_synced_instance_stamps_template_generation_after_apply() {
         let (client, log) = recording_kube_client();
-        let tcp_route = CTFTemplateSpecRoute {
+        let tcp_route = RouteSpec {
             name: "chal".to_string(),
-            spec: RouteSpec {
-                backend: RouteBackend {
-                    service: "web".into(),
-                    port: 80,
-                },
-                tcp: Some(RouteSpecTCP { port: Some(0) }),
-                ..Default::default()
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 80,
             },
+            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            ..Default::default()
         };
         let (_store, ctx) = dummy_ctx(client, vec![tcp_route.clone()]);
 

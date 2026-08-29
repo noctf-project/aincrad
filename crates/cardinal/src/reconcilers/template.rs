@@ -175,7 +175,7 @@ mod tests {
 
         let pod_tmpl = CTFTemplateSpecPod {
             name: "web".into(),
-            patch: Some(patch.clone()),
+            patch_spec: Some(patch.clone()),
             spec: PodSpec {
                 containers: vec![Container {
                     name: "web".into(),
@@ -263,7 +263,7 @@ mod tests {
         let patch: json_patch::Patch = serde_json::from_value(patch_json).unwrap();
         let pod_tmpl = CTFTemplateSpecPod {
             name: "web".into(),
-            patch: Some(patch),
+            patch_spec: Some(patch),
             ..Default::default()
         };
         let tmpl = k8s_common::crd::CTFTemplate {

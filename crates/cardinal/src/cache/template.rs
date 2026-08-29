@@ -94,7 +94,7 @@ impl TemplateCache {
 pub fn compile_pod_patchers(pods: &[CTFTemplateSpecPod]) -> Result<PodPatchersMap, String> {
     let mut pod_patchers = HashMap::new();
     for pod in pods {
-        let patcher = if let Some(patch) = &pod.patch {
+        let patcher = if let Some(patch) = &pod.patch_spec {
             Some(SpecPatcher::new(&POD_PATCH_BLACKLIST, patch.clone())?)
         } else {
             None
@@ -126,7 +126,7 @@ mod tests {
             name: "web".into(),
             allow_internet: false,
             replicas: 1,
-            patch: Some(valid_patch),
+            patch_spec: Some(valid_patch),
             spec: PodSpec {
                 containers: vec![Container {
                     name: "web".into(),
@@ -178,7 +178,7 @@ mod tests {
             name: "web".into(),
             allow_internet: false,
             replicas: 1,
-            patch: Some(invalid_patch),
+            patch_spec: Some(invalid_patch),
             spec: PodSpec::default(),
         };
 

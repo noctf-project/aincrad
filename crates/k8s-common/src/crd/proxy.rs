@@ -1,17 +1,11 @@
 use std::{fmt, str::FromStr};
 
-use chrono::{DateTime, Utc};
 use kube::CustomResource;
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-fn clamp_u64<'de, D>(d: D) -> Result<u64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    i64::deserialize(d).map(|v| v.max(0) as u64)
-}
+use crate::crd::RoutePolicySpec;
 
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum ProxyRouteKeyError {
@@ -91,15 +85,6 @@ impl fmt::Display for ProxyRouteKey {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CTFProxyRouteSpecPOW {
-    #[serde(deserialize_with = "clamp_u64")]
-    pub difficulty: u64,
-    #[serde(default)]
-    pub enable_admin_bypass: bool,
-}
-
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[kube(
     group = "aincrad.noctf.dev",
@@ -120,24 +105,8 @@ pub struct CTFProxyRouteSpecPOW {
 pub struct CTFProxyRouteSpec {
     /// Target backend address (host:port or IP:port).
     pub backend: String,
-    /// Flag string or template string for dynamic flag generation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flag: Option<String>,
-    /// Cryptographic secret used for Proof-of-Work verification and AES flag encryption.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret: Option<String>,
-    /// Request the team's id in the TCP tunnel.
     #[serde(default)]
-    pub request_uid: bool,
-    /// Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pow: Option<CTFProxyRouteSpecPOW>,
-    /// When true, enables logging of player TCP/TLS session traffic.
-    #[serde(default)]
-    pub logs: bool,
-    /// Optional UTC timestamp after which this route becomes active and accessible to players.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub available_at: Option<DateTime<Utc>>,
+    pub policy: RoutePolicySpec,
 }
 
 impl CTFProxyRoute {
@@ -279,19 +248,21 @@ mod tests {
     fn test_ctf_proxy_route_spec_deserialization() {
         let json = serde_json::json!({
             "backend": "chal-1-c-web.default.svc.cluster.local:8080",
-            "flag": "CTF{test}",
-            "logs": true,
-            "pow": {
-                "difficulty": 10000,
-                "enableAdminBypass": true
+            "policy": {
+                "flag": "CTF{test}",
+                "logs": true,
+                "pow": {
+                    "difficulty": 10000,
+                    "enableAdminBypass": true
+                }
             }
         });
 
         let spec: CTFProxyRouteSpec = serde_json::from_value(json).unwrap();
         assert_eq!(spec.backend, "chal-1-c-web.default.svc.cluster.local:8080");
-        assert_eq!(spec.flag.as_deref(), Some("CTF{test}"));
-        assert!(spec.logs);
-        assert_eq!(spec.pow.as_ref().unwrap().difficulty, 10000);
-        assert!(spec.pow.as_ref().unwrap().enable_admin_bypass);
+        assert_eq!(spec.policy.flag.as_deref(), Some("CTF{test}"));
+        assert!(spec.policy.logs);
+        assert_eq!(spec.policy.pow.as_ref().unwrap().difficulty, 10000);
+        assert!(spec.policy.pow.as_ref().unwrap().enable_admin_bypass);
     }
 }

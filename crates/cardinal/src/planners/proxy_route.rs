@@ -2,7 +2,7 @@ use k8s_common::{
     ROUTE_LABEL,
     crd::{
         CTFInstance, CTFInstanceSpecRouteOverride, CTFInstanceStatusEndpoint, CTFProxyRoute,
-        CTFProxyRouteSpec, CTFProxyRouteSpecPOW, RouteSpec,
+        CTFProxyRouteSpec, RouteSpec,
     },
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
@@ -53,7 +53,7 @@ impl Planner for ProxyRoutePlanner {
                 .iter()
                 .find(|r| r.name == route_tmpl.name);
 
-            let merged_spec = build_merged_route_spec(&route_tmpl.spec, route_override);
+            let merged_spec = build_merged_route_spec(route_tmpl, route_override);
             let route_key = RouteKey::new(ns, instance_name, &route_tmpl.name);
 
             let allocated: AllocatedRoute = allocator.allocate(&route_key, &merged_spec)?;
@@ -73,15 +73,7 @@ impl Planner for ProxyRoutePlanner {
 
             let proxy_spec = CTFProxyRouteSpec {
                 backend: backend_addr,
-                flag: merged_spec.flag,
-                secret: merged_spec.secret,
-                request_uid: merged_spec.request_uid,
-                pow: merged_spec.pow.map(|p| CTFProxyRouteSpecPOW {
-                    difficulty: p.difficulty,
-                    enable_admin_bypass: p.enable_admin_bypass,
-                }),
-                logs: merged_spec.logs,
-                available_at: merged_spec.available_at,
+                policy: merged_spec.policy,
             };
 
             let mut proxy_route = CTFProxyRoute::new(&allocated.proxy_key.to_string(), proxy_spec);
@@ -133,7 +125,7 @@ impl Planner for ProxyRoutePlanner {
                 .routes
                 .iter()
                 .find(|r| r.name == route_tmpl.name);
-            let merged_spec = build_merged_route_spec(&route_tmpl.spec, route_override);
+            let merged_spec = build_merged_route_spec(route_tmpl, route_override);
             let route_key = RouteKey::new(instance_ns, instance_name, &route_tmpl.name);
 
             if let Some(allocator) = allocator {
@@ -221,7 +213,7 @@ mod tests {
         dummy_context, dummy_context_with_routes, dummy_instance, dummy_resolved_template,
     };
     use k8s_common::crd::{
-        CTFTemplateSpecRoute, RouteBackend, RouteSpec, RouteSpecPOW, RouteSpecTCP, RouteSpecTLS,
+        RouteBackend, RoutePolicySpec, RouteSpec, RouteSpecPOW, RouteSpecTCP, RouteSpecTLS,
     };
 
     #[tokio::test]
@@ -230,34 +222,36 @@ mod tests {
         let instance = dummy_instance("chal-1", None);
         let mut template = dummy_resolved_template(1);
         template.spec.routes = vec![
-            CTFTemplateSpecRoute {
+            RouteSpec {
                 name: "web".to_string(),
-                spec: RouteSpec {
-                    backend: RouteBackend {
-                        service: "web".to_string(),
-                        port: 80,
-                    },
-                    tls: Some(RouteSpecTLS {
-                        prefix: Some("whoami".into()),
-                    }),
+                backend: RouteBackend {
+                    service: "web".to_string(),
+                    port: 80,
+                },
+                tls: Some(RouteSpecTLS {
+                    prefix: Some("whoami".into()),
+                }),
+                policy: RoutePolicySpec {
                     logs: true,
                     ..Default::default()
                 },
+                ..Default::default()
             },
-            CTFTemplateSpecRoute {
+            RouteSpec {
                 name: "pwn".to_string(),
-                spec: RouteSpec {
-                    backend: RouteBackend {
-                        service: "pwn".to_string(),
-                        port: 1337,
-                    },
-                    tcp: Some(RouteSpecTCP { port: Some(0) }),
+                backend: RouteBackend {
+                    service: "pwn".to_string(),
+                    port: 1337,
+                },
+                tcp: Some(RouteSpecTCP { port: Some(0) }),
+                policy: RoutePolicySpec {
                     pow: Some(RouteSpecPOW {
                         difficulty: 5000,
                         enable_admin_bypass: true,
                     }),
                     ..Default::default()
                 },
+                ..Default::default()
             },
         ];
 
@@ -276,7 +270,7 @@ mod tests {
             tls_route.spec.backend,
             "chal-1-web.default.svc.cluster.local:80"
         );
-        assert!(tls_route.spec.logs);
+        assert!(tls_route.spec.policy.logs);
 
         let tcp_route = routes
             .iter()
@@ -290,7 +284,7 @@ mod tests {
             tcp_route.spec.backend,
             "chal-1-pwn.default.svc.cluster.local:1337"
         );
-        assert_eq!(tcp_route.spec.pow.as_ref().unwrap().difficulty, 5000);
+        assert_eq!(tcp_route.spec.policy.pow.as_ref().unwrap().difficulty, 5000);
     }
 
     #[tokio::test]
@@ -300,18 +294,16 @@ mod tests {
         let (_store, ctx) = dummy_context();
         let instance = dummy_instance("chal-1", None);
         let mut template = dummy_resolved_template(1);
-        template.spec.routes = vec![CTFTemplateSpecRoute {
+        template.spec.routes = vec![RouteSpec {
             name: "web".to_string(),
-            spec: RouteSpec {
-                backend: RouteBackend {
-                    service: "web".into(),
-                    port: 80,
-                },
-                tls: Some(RouteSpecTLS {
-                    prefix: Some("whoami".into()),
-                }),
-                ..Default::default()
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 80,
             },
+            tls: Some(RouteSpecTLS {
+                prefix: Some("whoami".into()),
+            }),
+            ..Default::default()
         }];
 
         let routes = ProxyRoutePlanner::plan(&instance, &template, &ctx).unwrap();
@@ -405,20 +397,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_tls_route_sets_endpoint_and_marks_routes_allocated() {
-        use k8s_common::crd::{CTFTemplateSpecRoute, RouteSpecTLS};
-
-        let tls_route = CTFTemplateSpecRoute {
+        let tls_route = RouteSpec {
             name: "web".to_string(),
-            spec: RouteSpec {
-                backend: RouteBackend {
-                    service: "web".into(),
-                    port: 80,
-                },
-                tls: Some(RouteSpecTLS {
-                    prefix: Some("web".into()),
-                }),
-                ..Default::default()
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 80,
             },
+            tls: Some(RouteSpecTLS {
+                prefix: Some("web".into()),
+            }),
+            ..Default::default()
         };
         let (_store, ctx) = dummy_context_with_routes(vec![tls_route]);
 

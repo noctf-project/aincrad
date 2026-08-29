@@ -60,8 +60,8 @@ mod tests {
     use super::*;
     use crate::test_utils::tests::{dummy_instance, dummy_resolved_template};
     use k8s_common::crd::{
-        CTFInstanceSpecPodOverride, CTFInstanceSpecRouteOverride, CTFTemplateSpecRoute,
-        RouteBackend, RouteSpec, RouteSpecTCP,
+        CTFInstanceSpecPodOverride, CTFInstanceSpecRouteOverride, RouteBackend, RouteSpec,
+        RouteSpecTCP,
     };
 
     #[test]
@@ -79,16 +79,14 @@ mod tests {
 
         let mut template = dummy_resolved_template(1);
         template.spec.pods[0].name = "web".into();
-        template.spec.routes = vec![CTFTemplateSpecRoute {
+        template.spec.routes = vec![RouteSpec {
             name: "chal".into(),
-            spec: RouteSpec {
-                backend: RouteBackend {
-                    service: "web".into(),
-                    port: 80,
-                },
-                tcp: Some(RouteSpecTCP { port: Some(0) }),
-                ..Default::default()
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 80,
             },
+            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            ..Default::default()
         }];
 
         assert!(validate_overrides(&instance, &template).is_ok());

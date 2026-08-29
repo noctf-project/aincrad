@@ -75,36 +75,44 @@ spec:
                 x-kubernetes-list-type: map
               routes:
                 default: []
-                description: List of CTFRoute definitions that expose backend services.
+                description: List of RouteSpec definitions that expose backend services.
                 items:
+                  description: Specification for dynamic L4 TCP/TLS routing and traffic inspection.
                   properties:
+                    backend:
+                      description: Target backend Kubernetes service name and port.
+                      properties:
+                        port:
+                          format: uint16
+                          maximum: 65535.0
+                          minimum: 0.0
+                          type: integer
+                        service:
+                          type: string
+                      required:
+                      - port
+                      - service
+                      type: object
                     name:
                       maxLength: 24
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
-                    spec:
-                      description: Specification for dynamic L4 TCP/TLS routing and traffic inspection.
+                    policy:
+                      default:
+                        availableAt: null
+                        flag: null
+                        logs: false
+                        pow: null
+                        requestUid: false
+                        secret: null
+                      description: Policy applied to player traffic for the route.
                       properties:
                         availableAt:
                           description: Optional UTC timestamp after which this route becomes active and accessible to players.
                           format: date-time
                           nullable: true
                           type: string
-                        backend:
-                          description: Target backend Kubernetes service name and port.
-                          properties:
-                            port:
-                              format: uint16
-                              maximum: 65535.0
-                              minimum: 0.0
-                              type: integer
-                            service:
-                              type: string
-                          required:
-                          - port
-                          - service
-                          type: object
                         flag:
                           description: Flag string or template string for the challenge route.
                           nullable: true
@@ -135,41 +143,39 @@ spec:
                           description: Cryptographic secret used for Proof-of-Work verification and AES flag encryption.
                           nullable: true
                           type: string
-                        tcp:
-                          description: TCP routing configuration (mutually exclusive with 'tls').
+                      type: object
+                    tcp:
+                      description: TCP routing configuration (mutually exclusive with 'tls').
+                      nullable: true
+                      properties:
+                        port:
+                          description: Dedicated TCP port (0 or omitted for auto-allocation, or fixed port in reserved range).
+                          format: uint16
+                          maximum: 65535.0
+                          minimum: 0.0
                           nullable: true
-                          properties:
-                            port:
-                              description: Dedicated TCP port (0 or omitted for auto-allocation, or fixed port in reserved range).
-                              format: uint16
-                              maximum: 65535.0
-                              minimum: 0.0
-                              nullable: true
-                              type: integer
-                          type: object
-                        tls:
-                          description: TLS routing configuration (mutually exclusive with 'tcp').
+                          type: integer
+                      type: object
+                    tls:
+                      description: TLS routing configuration (mutually exclusive with 'tcp').
+                      nullable: true
+                      properties:
+                        prefix:
+                          description: Subdomain prefix for the derived TLS hostname (e.g. 'web' in 'web-xxxx.c.noctf.dev'). Defaults to the route metadata name if omitted.
+                          maxLength: 48
                           nullable: true
-                          properties:
-                            prefix:
-                              description: Subdomain prefix for the derived TLS hostname (e.g. 'web' in 'web-xxxx.c.noctf.dev'). Defaults to the route metadata name if omitted.
-                              maxLength: 48
-                              nullable: true
-                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                              type: string
-                          type: object
-                      required:
-                      - backend
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
                       type: object
                   required:
+                  - backend
                   - name
-                  - spec
                   type: object
                   x-kubernetes-validations:
                   - message: Route must specify either 'tcp' or 'tls', but not both
-                    rule: has(self.spec.tcp) != has(self.spec.tls)
+                    rule: has(self.tcp) != has(self.tls)
                   - message: Explicit external ports cannot be set; port must be omitted or set to 0
-                    rule: '!has(self.spec.tcp) || !has(self.spec.tcp.port) || self.spec.tcp.port == 0'
+                    rule: '!has(self.tcp) || !has(self.tcp.port) || self.tcp.port == 0'
                 maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
@@ -178,7 +184,7 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: Each route backend service must match a valid pod name defined in 'spec.pods'
-              rule: self.routes.all(r, self.pods.exists(p, p.name == r.spec.backend.service))
+              rule: self.routes.all(r, self.pods.exists(p, p.name == r.backend.service))
           status:
             nullable: true
             properties:
@@ -471,44 +477,55 @@ spec:
           spec:
             description: Internal data-plane route configuration managed exclusively by Cardinal.
             properties:
-              availableAt:
-                description: Optional UTC timestamp after which this route becomes active and accessible to players.
-                format: date-time
-                nullable: true
-                type: string
               backend:
                 description: Target backend address (host:port or IP:port).
                 type: string
-              flag:
-                description: Flag string or template string for dynamic flag generation.
-                nullable: true
-                type: string
-              logs:
-                default: false
-                description: When true, enables logging of player TCP/TLS session traffic.
-                type: boolean
-              pow:
-                description: Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
-                nullable: true
+              policy:
+                default:
+                  availableAt: null
+                  flag: null
+                  logs: false
+                  pow: null
+                  requestUid: false
+                  secret: null
+                description: Policy applied to player traffic for the route.
                 properties:
-                  difficulty:
-                    format: uint64
-                    minimum: 0.0
-                    type: integer
-                  enableAdminBypass:
+                  availableAt:
+                    description: Optional UTC timestamp after which this route becomes active and accessible to players.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  flag:
+                    description: Flag string or template string for the challenge route.
+                    nullable: true
+                    type: string
+                  logs:
                     default: false
+                    description: When true, enables logging of player TCP/TLS session traffic.
                     type: boolean
-                required:
-                - difficulty
+                  pow:
+                    description: Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
+                    nullable: true
+                    properties:
+                      difficulty:
+                        format: uint64
+                        minimum: 0.0
+                        type: integer
+                      enableAdminBypass:
+                        default: false
+                        type: boolean
+                    required:
+                    - difficulty
+                    type: object
+                  requestUid:
+                    default: false
+                    description: Request the team's id in the TCP tunnel.
+                    type: boolean
+                  secret:
+                    description: Cryptographic secret used for Proof-of-Work verification and AES flag encryption.
+                    nullable: true
+                    type: string
                 type: object
-              requestUid:
-                default: false
-                description: Request the team's id in the TCP tunnel.
-                type: boolean
-              secret:
-                description: Cryptographic secret used for Proof-of-Work verification and AES flag encryption.
-                nullable: true
-                type: string
             required:
             - backend
             type: object

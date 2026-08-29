@@ -232,7 +232,7 @@ pub mod tests {
                     name: "web".to_string(),
                     allow_internet: false,
                     replicas: 1,
-                    patch: None,
+                    patch_spec: None,
                     spec: k8s_openapi::api::core::v1::PodSpec {
                         containers: vec![k8s_openapi::api::core::v1::Container {
                             name: "app".to_string(),
@@ -261,7 +261,7 @@ pub mod tests {
 
     /// Creates a dummy Context whose template includes the given routes.
     pub fn dummy_context_with_routes(
-        routes: Vec<k8s_common::crd::CTFTemplateSpecRoute>,
+        routes: Vec<k8s_common::crd::RouteSpec>,
     ) -> (
         kube::runtime::reflector::Store<CTFTemplate>,
         Arc<crate::Context>,
@@ -272,7 +272,7 @@ pub mod tests {
     /// Builds a dummy Context using a caller-provided kube client and template routes.
     pub fn dummy_ctx(
         client: kube::Client,
-        routes: Vec<k8s_common::crd::CTFTemplateSpecRoute>,
+        routes: Vec<k8s_common::crd::RouteSpec>,
     ) -> (
         kube::runtime::reflector::Store<CTFTemplate>,
         Arc<crate::Context>,
@@ -308,7 +308,7 @@ pub mod tests {
                     name: "web".into(),
                     allow_internet: false,
                     replicas: 1,
-                    patch: None,
+                    patch_spec: None,
                     spec: k8s_openapi::api::core::v1::PodSpec {
                         containers: vec![k8s_openapi::api::core::v1::Container {
                             name: "web".into(),
