@@ -1,4 +1,4 @@
-use k8s_common::crd::{CTFInstance, CTFInstanceStatus};
+use k8s_common::crd::CTFInstance;
 use k8s_openapi::jiff::Timestamp;
 use k8s_openapi::{
     api::networking::v1::{
@@ -13,7 +13,7 @@ use k8s_openapi::{
 
 use crate::{
     Context, Error, btreemap,
-    planners::{Planner, apply_condition, set_owner_ref},
+    planners::{Planner, set_owner_ref},
     reconcilers::template::ResolvedTemplate,
     utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL},
     utils::naming::resource_name,
@@ -71,13 +71,12 @@ impl Planner for NetworkPolicyPlanner {
 
         let egress_rules = {
             let mut rules = Vec::new();
-            let mut udp_egress: Vec<NetworkPolicyPort> = Vec::new();
 
-            udp_egress.push(NetworkPolicyPort {
+            let udp_egress = vec![NetworkPolicyPort {
                 port: Some(IntOrString::Int(53)),
                 protocol: Some("UDP".to_string()),
                 end_port: None,
-            });
+            }];
 
             rules.push(NetworkPolicyEgressRule {
                 ports: Some(vec![NetworkPolicyPort {
@@ -155,7 +154,6 @@ impl Planner for NetworkPolicyPlanner {
                 egress: Some(egress_rules),
                 ingress: Some(vec![]),
             }),
-            ..Default::default()
         };
         set_owner_ref(&mut np, instance);
 
@@ -163,23 +161,21 @@ impl Planner for NetworkPolicyPlanner {
     }
 
     fn check_status(
-        _instance: &CTFInstance,
-        status: &mut CTFInstanceStatus,
+        instance: &CTFInstance,
         _ctx: &Context,
-    ) -> Result<(), Error> {
-        apply_condition(
-            status,
+    ) -> Result<(Condition, Option<k8s_common::crd::CTFInstanceResources>), Error> {
+        Ok((
             Condition {
                 type_: Self::KIND.to_string(),
-                status: "True".to_string(),
-                reason: "Ready".to_string(),
-                message: "Applied".to_string(),
+                status: "Unknown".to_string(),
+                reason: "ResourceManaged".to_string(),
+                message: "Resource applied".to_string(),
                 last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                     Timestamp::now(),
                 ),
-                observed_generation: None,
+                observed_generation: instance.metadata.generation,
             },
-        );
-        Ok(())
+            None,
+        ))
     }
 }

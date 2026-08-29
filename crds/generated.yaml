@@ -281,7 +281,7 @@ spec:
                   properties:
                     name:
                       description: Name of the template pod specification to override replicas for.
-                      maxLength: 20
+                      maxLength: 24
                       minLength: 1
                       type: string
                     replicas:
@@ -304,26 +304,25 @@ spec:
                   properties:
                     name:
                       description: Name of the template route to override.
-                      maxLength: 20
+                      maxLength: 24
                       minLength: 1
                       type: string
-                    port:
+                    tcp:
                       description: |-
-                        Dedicated TCP port override for this route:
-                        - Omitted: Inherit port from CTFTemplate.
-                        - Set to `null`: Disable TCP.
-                        - Set to integer (e.g. `20001`): Force a specific fixed TCP port.
-                      format: uint16
-                      maximum: 65535.0
-                      minimum: 0.0
+                        TCP route override (explicit port or auto). Omitted: inherit from
+                        CTFTemplate.
                       nullable: true
-                      type: integer
+                      properties:
+                        port:
+                          description: Dedicated TCP port (0 or omitted for auto-allocation, or fixed port in reserved range).
+                          format: uint16
+                          maximum: 65535.0
+                          minimum: 0.0
+                          nullable: true
+                          type: integer
+                      type: object
                     tls:
-                      description: |-
-                        TLS configuration override for this route:
-                        - Omitted: Inherit TLS configuration from CTFTemplate.
-                        - Set to `null`: Disable TLS.
-                        - Set to object: Enable and configure TLS.
+                      description: 'TLS route override. Omitted: inherit from CTFTemplate.'
                       nullable: true
                       properties:
                         prefix:
@@ -336,6 +335,9 @@ spec:
                   required:
                   - name
                   type: object
+                  x-kubernetes-validations:
+                  - message: Route override must not specify both 'tcp' and 'tls'; inherit from the template for the default route type
+                    rule: '!(has(self.tcp) && has(self.tls))'
                 maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
@@ -393,43 +395,45 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              endpoints:
-                items:
-                  properties:
-                    name:
-                      description: Endpoint or route name.
-                      type: string
-                    target:
-                      description: Host and port target details.
-                      properties:
-                        host:
-                          type: string
-                        port:
-                          format: uint16
-                          maximum: 65535.0
-                          minimum: 0.0
-                          type: integer
-                      required:
-                      - host
-                      - port
-                      type: object
-                    type:
-                      description: Protocol type (e.g. 'tls' or 'tcp').
-                      type: string
-                  required:
-                  - name
-                  - target
-                  - type
-                  type: object
-                maxItems: 32
-                type: array
-                x-kubernetes-list-map-keys:
-                - name
-                x-kubernetes-list-type: map
               observedGeneration:
                 format: int64
                 nullable: true
                 type: integer
+              resources:
+                default: {}
+                description: Per-instance typed status resources exposed to downstream consumers.
+                properties:
+                  endpoints:
+                    items:
+                      properties:
+                        name:
+                          description: Endpoint or route name.
+                          type: string
+                        target:
+                          description: Host and port target details.
+                          properties:
+                            host:
+                              type: string
+                            port:
+                              format: uint16
+                              maximum: 65535.0
+                              minimum: 0.0
+                              type: integer
+                          required:
+                          - host
+                          - port
+                          type: object
+                        type:
+                          description: Protocol type (e.g. 'tls' or 'tcp').
+                          type: string
+                      required:
+                      - name
+                      - target
+                      - type
+                      type: object
+                    nullable: true
+                    type: array
+                type: object
               restartedAt:
                 nullable: true
                 type: string

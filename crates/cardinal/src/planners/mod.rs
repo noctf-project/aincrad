@@ -10,7 +10,7 @@ pub use proxy_route::ProxyRoutePlanner;
 pub use replicaset::ReplicaSetPlanner;
 pub use service::ServicePlanner;
 
-use k8s_common::crd::{CTFInstance, CTFInstanceStatus};
+use k8s_common::crd::CTFInstance;
 use kube::{Resource, core::NamespaceResourceScope};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -36,13 +36,21 @@ pub trait Planner {
         ctx: &Context,
     ) -> Result<Vec<Self::Resource>, Error>;
 
-    /// Writes readiness information into `status`. A condition with status "True"
-    /// indicates the child is healthy; "False" or "Unknown" means not ready.
+    /// Evaluates this resource's readiness and any status payload it contributes.
+    ///
+    /// Returns the resource's condition (status "True"/"False"/"Unknown"), plus an
+    /// optional typed `CTFInstanceResources` in which the planner sets only its own
+    /// fields. `None` means the resource owns no extra status data.
     fn check_status(
         instance: &CTFInstance,
-        status: &mut CTFInstanceStatus,
         ctx: &Context,
-    ) -> Result<(), Error>;
+    ) -> Result<
+        (
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition,
+            Option<k8s_common::crd::CTFInstanceResources>,
+        ),
+        Error,
+    >;
 }
 
 /// Sets controller owner reference on a resource pointing to the CTFInstance.

@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::crd::{
-    EndpointTarget, RouteSpecTLSPatch,
+    EndpointTarget, RouteSpecTCP, RouteSpecTLS,
     util::{KubeListKey, PatchValue, immutable_property_schema, list_schema},
 };
 
@@ -24,6 +24,22 @@ impl KubeListKey for CTFInstanceStatusEndpoint {
     const KEYS: &'static [&'static str] = &["name"];
 }
 
+/// Per-instance typed status resources exposed to downstream consumers.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CTFInstanceResources {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoints: Option<Vec<CTFInstanceStatusEndpoint>>,
+}
+
+impl CTFInstanceResources {
+    pub fn overlay(&mut self, from: CTFInstanceResources) {
+        if from.endpoints.is_some() {
+            self.endpoints = from.endpoints;
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFInstanceStatus {
@@ -32,9 +48,8 @@ pub struct CTFInstanceStatus {
     pub template_generation: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restarted_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schemars(schema_with = "list_schema::<CTFInstanceStatusEndpoint>")]
-    pub endpoints: Vec<CTFInstanceStatusEndpoint>,
+    #[serde(default)]
+    pub resources: CTFInstanceResources,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(schema_with = "list_schema::<Condition>")]
     pub conditions: Vec<Condition>,
@@ -75,23 +90,26 @@ impl KubeListKey for CTFInstanceSpecPodOverride {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
+#[schemars(
+    extend("x-kubernetes-validations" = [
+        {
+            "rule": "!(has(self.tcp) && has(self.tls))",
+            "message": "Route override must not specify both 'tcp' and 'tls'; inherit from the template for the default route type"
+        }
+    ])
+)]
 #[serde(rename_all = "camelCase")]
 pub struct CTFInstanceSpecRouteOverride {
     /// Name of the template route to override.
     #[schemars(length(min = 1, max = 24))]
     pub name: String,
-    /// Dedicated TCP port override for this route:
-    /// - Omitted: Inherit port from CTFTemplate.
-    /// - Set to `null`: Disable TCP.
-    /// - Set to integer (e.g. `20001`): Force a specific fixed TCP port.
+    /// TCP route override (explicit port or auto). Omitted: inherit from
+    /// CTFTemplate.
     #[serde(default)]
-    pub port: PatchValue<u16>,
-    /// TLS configuration override for this route:
-    /// - Omitted: Inherit TLS configuration from CTFTemplate.
-    /// - Set to `null`: Disable TLS.
-    /// - Set to object: Enable and configure TLS.
+    pub tcp: Option<RouteSpecTCP>,
+    /// TLS route override. Omitted: inherit from CTFTemplate.
     #[serde(default)]
-    pub tls: PatchValue<RouteSpecTLSPatch>,
+    pub tls: Option<RouteSpecTLS>,
 }
 
 impl KubeListKey for CTFInstanceSpecRouteOverride {
@@ -134,26 +152,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_nullable_deserialization() {
-        let json_unset = r#"{"name": "pwn-tcp"}"#;
-        let override_unset: CTFInstanceSpecRouteOverride =
-            serde_json::from_str(json_unset).unwrap();
-        assert_eq!(override_unset.port, PatchValue::Unset);
-        assert_eq!(override_unset.tls, PatchValue::Unset);
+    fn test_route_override_deserialization() {
+        let json_inherit = r#"{"name": "pwn-tcp"}"#;
+        let inherit: CTFInstanceSpecRouteOverride = serde_json::from_str(json_inherit).unwrap();
+        assert_eq!(inherit.tcp, None);
+        assert_eq!(inherit.tls, None);
 
-        let json_null = r#"{"name": "pwn-tcp", "port": null, "tls": null}"#;
-        let override_null: CTFInstanceSpecRouteOverride = serde_json::from_str(json_null).unwrap();
-        assert_eq!(override_null.port, PatchValue::Null);
-        assert_eq!(override_null.tls, PatchValue::Null);
+        let json_tcp = r#"{"name": "pwn-tcp", "tcp": {"port": 20001}}"#;
+        let tcp_override: CTFInstanceSpecRouteOverride = serde_json::from_str(json_tcp).unwrap();
+        assert_eq!(tcp_override.tcp, Some(RouteSpecTCP { port: Some(20001) }));
+        assert_eq!(tcp_override.tls, None);
 
-        let json_value = r#"{"name": "pwn-tcp", "port": 20001, "tls": {"prefix": null}}"#;
-        let override_value: CTFInstanceSpecRouteOverride =
-            serde_json::from_str(json_value).unwrap();
-        assert_eq!(override_value.port, PatchValue::Value(20001));
+        let json_tls = r#"{"name": "web", "tls": {"prefix": "custom"}}"#;
+        let tls_override: CTFInstanceSpecRouteOverride = serde_json::from_str(json_tls).unwrap();
+        assert_eq!(tls_override.tcp, None);
         assert_eq!(
-            override_value.tls,
-            PatchValue::Value(RouteSpecTLSPatch {
-                prefix: PatchValue::Null
+            tls_override.tls,
+            Some(RouteSpecTLS {
+                prefix: Some("custom".to_string())
             })
         );
     }

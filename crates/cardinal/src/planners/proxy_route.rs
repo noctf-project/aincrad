@@ -1,13 +1,13 @@
 use k8s_common::crd::{
-    CTFInstance, CTFInstanceSpecRouteOverride, CTFInstanceStatus, CTFInstanceStatusEndpoint,
-    CTFProxyRoute, CTFProxyRouteSpec, CTFProxyRouteSpecPOW, PatchValue, RouteSpec,
+    CTFInstance, CTFInstanceSpecRouteOverride, CTFInstanceStatusEndpoint, CTFProxyRoute,
+    CTFProxyRouteSpec, CTFProxyRouteSpecPOW, RouteSpec,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use k8s_openapi::jiff::Timestamp;
 
 use crate::{
     Context, Error, btreemap,
-    planners::{Planner, apply_condition, set_owner_ref},
+    planners::Planner,
     reconcilers::template::ResolvedTemplate,
     routing::{AllocatedRoute, RouteKey},
     utils::labels::{
@@ -86,7 +86,6 @@ impl Planner for ProxyRoutePlanner {
             let mut proxy_route = CTFProxyRoute::new(&allocated.proxy_key.to_string(), proxy_spec);
             proxy_route.metadata.namespace = Some(system_namespace.to_string());
             proxy_route.metadata.labels = Some(labels);
-            set_owner_ref(&mut proxy_route, instance);
 
             routes.push(proxy_route);
         }
@@ -96,9 +95,8 @@ impl Planner for ProxyRoutePlanner {
 
     fn check_status(
         instance: &CTFInstance,
-        status: &mut CTFInstanceStatus,
         ctx: &Context,
-    ) -> Result<(), Error> {
+    ) -> Result<(Condition, Option<k8s_common::crd::CTFInstanceResources>), Error> {
         let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
         let instance_ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
@@ -108,8 +106,7 @@ impl Planner for ProxyRoutePlanner {
             .and_then(|cache| cache.get(instance_ns, &instance.spec.template));
 
         let Some(entry) = entry else {
-            apply_condition(
-                status,
+            return Ok((
                 Condition {
                     type_: Self::KIND.to_string(),
                     status: "Unknown".to_string(),
@@ -120,8 +117,8 @@ impl Planner for ProxyRoutePlanner {
                     ),
                     observed_generation: None,
                 },
-            );
-            return Ok(());
+                None,
+            ));
         };
         let template = &entry.template;
 
@@ -154,40 +151,39 @@ impl Planner for ProxyRoutePlanner {
             }
         }
 
+        let now: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time =
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Timestamp::now());
+
         if unallocated.is_empty() {
             endpoints.sort_by(|a, b| (&a.name, &a.type_).cmp(&(&b.name, &b.type_)));
-            status.endpoints = endpoints;
-
-            apply_condition(
-                status,
+            return Ok((
                 Condition {
                     type_: Self::KIND.to_string(),
                     status: "True".to_string(),
                     reason: "RoutesAllocated".to_string(),
                     message: format!("{} proxy route(s) allocated", template.spec.routes.len()),
-                    last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                        Timestamp::now(),
-                    ),
-                    observed_generation: None,
+                    last_transition_time: now.clone(),
+                    observed_generation: instance.metadata.generation,
                 },
-            );
-            return Ok(());
+                Some(k8s_common::crd::CTFInstanceResources {
+                    endpoints: Some(endpoints),
+                }),
+            ));
         }
 
-        apply_condition(
-            status,
+        Ok((
             Condition {
                 type_: Self::KIND.to_string(),
-                status: "Unknown".to_string(),
+                status: "False".to_string(),
                 reason: "RoutesNotAllocated".to_string(),
                 message: format!("Proxy route(s) not allocated: {}", unallocated.join(", ")),
-                last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                    Timestamp::now(),
-                ),
-                observed_generation: None,
+                last_transition_time: now,
+                observed_generation: instance.metadata.generation,
             },
-        );
-        Ok(())
+            Some(k8s_common::crd::CTFInstanceResources {
+                endpoints: Some(endpoints),
+            }),
+        ))
     }
 }
 
@@ -199,36 +195,18 @@ pub fn build_merged_route_spec(
     let mut merged = base.clone();
 
     if let Some(ov) = override_spec {
-        match ov.port {
-            PatchValue::Value(port) => {
-                let mut tcp = merged.tcp.unwrap_or_default();
-                tcp.port = Some(port);
-                merged.tcp = Some(tcp);
+        // The override always wins on conflict. An explicit tcp turns the route
+        // into a TCP route (clearing any template tls) and vice versa.
+        if let Some(tcp) = &ov.tcp {
+            let mut tcp_cfg = merged.tcp.unwrap_or_default();
+            if let Some(port) = tcp.port {
+                tcp_cfg.port = Some(port);
             }
-            PatchValue::Null => {
-                merged.tcp = None;
-            }
-            PatchValue::Unset => {}
-        }
-
-        match &ov.tls {
-            PatchValue::Value(tls_patch) => {
-                let mut tls = merged.tls.unwrap_or_default();
-                match &tls_patch.prefix {
-                    PatchValue::Value(prefix) => {
-                        tls.prefix = Some(prefix.clone());
-                    }
-                    PatchValue::Null => {
-                        tls.prefix = None;
-                    }
-                    PatchValue::Unset => {}
-                }
-                merged.tls = Some(tls);
-            }
-            PatchValue::Null => {
-                merged.tls = None;
-            }
-            PatchValue::Unset => {}
+            merged.tcp = Some(tcp_cfg);
+            merged.tls = None;
+        } else if let Some(tls) = &ov.tls {
+            merged.tls = Some(tls.clone());
+            merged.tcp = None;
         }
     }
 
@@ -243,7 +221,6 @@ mod tests {
     };
     use k8s_common::crd::{
         CTFTemplateSpecRoute, RouteBackend, RouteSpec, RouteSpecPOW, RouteSpecTCP, RouteSpecTLS,
-        RouteSpecTLSPatch,
     };
 
     #[tokio::test]
@@ -315,8 +292,37 @@ mod tests {
         assert_eq!(tcp_route.spec.pow.as_ref().unwrap().difficulty, 5000);
     }
 
+    #[tokio::test]
+    async fn test_plan_proxy_routes_do_not_set_owner_ref() {
+        // Cross-namespace owner refs are invalid and would GC the route.
+        // Its lifecycle is governed by the finalizer + label pruning instead.
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let mut template = dummy_resolved_template(1);
+        template.spec.routes = vec![CTFTemplateSpecRoute {
+            name: "web".to_string(),
+            spec: RouteSpec {
+                backend: RouteBackend {
+                    service: "web".into(),
+                    port: 80,
+                },
+                tls: Some(RouteSpecTLS {
+                    prefix: Some("whoami".into()),
+                }),
+                ..Default::default()
+            },
+        }];
+
+        let routes = ProxyRoutePlanner::plan(&instance, &template, &ctx).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert!(
+            routes[0].metadata.owner_references.is_none(),
+            "CTFProxyRoute must not reference a cross-namespace owner"
+        );
+    }
+
     #[test]
-    fn test_build_merged_route_spec_overrides() {
+    fn test_build_merged_route_spec_tcp_override_wins() {
         let base_spec = RouteSpec {
             backend: RouteBackend {
                 service: "web".into(),
@@ -331,20 +337,69 @@ mod tests {
 
         let override_spec = CTFInstanceSpecRouteOverride {
             name: "main".into(),
-            port: PatchValue::Value(8443),
-            tls: PatchValue::Value(RouteSpecTLSPatch {
-                prefix: PatchValue::Value("custom-prefix".into()),
-            }),
+            tcp: Some(RouteSpecTCP { port: Some(8443) }),
+            tls: None,
         };
 
         let merged = build_merged_route_spec(&base_spec, Some(&override_spec));
         assert_eq!(merged.tcp, Some(RouteSpecTCP { port: Some(8443) }));
+        assert_eq!(
+            merged.tls, None,
+            "an explicit tcp override must clear a conflicting template tls"
+        );
+    }
+
+    #[test]
+    fn test_build_merged_route_spec_tls_override_wins() {
+        let base_spec = RouteSpec {
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 8080,
+            },
+            tcp: Some(RouteSpecTCP { port: Some(443) }),
+            ..Default::default()
+        };
+
+        let override_spec = CTFInstanceSpecRouteOverride {
+            name: "main".into(),
+            tcp: None,
+            tls: Some(RouteSpecTLS {
+                prefix: Some("custom-prefix".into()),
+            }),
+        };
+
+        let merged = build_merged_route_spec(&base_spec, Some(&override_spec));
         assert_eq!(
             merged.tls,
             Some(RouteSpecTLS {
                 prefix: Some("custom-prefix".into())
             })
         );
+        assert_eq!(
+            merged.tcp, None,
+            "an explicit tls override must clear a conflicting template tcp"
+        );
+    }
+
+    #[test]
+    fn test_build_merged_route_spec_inherits_when_no_override() {
+        let base_spec = RouteSpec {
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 80,
+            },
+            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            ..Default::default()
+        };
+        let override_spec = CTFInstanceSpecRouteOverride {
+            name: "main".into(),
+            tcp: None,
+            tls: None,
+        };
+
+        let merged = build_merged_route_spec(&base_spec, Some(&override_spec));
+        assert_eq!(merged.tcp, Some(RouteSpecTCP { port: Some(0) }));
+        assert_eq!(merged.tls, None);
     }
 
     #[tokio::test]
@@ -366,26 +421,23 @@ mod tests {
         };
         let (_store, ctx) = dummy_context_with_routes(vec![tls_route]);
 
-        let mut status = CTFInstanceStatus::default();
-        ProxyRoutePlanner::check_status(&dummy_instance("chal-1", None), &mut status, &ctx)
-            .unwrap();
+        let (cond, payload) =
+            ProxyRoutePlanner::check_status(&dummy_instance("chal-1", None), &ctx).unwrap();
 
+        let endpoints = payload
+            .expect("endpoints payload present")
+            .endpoints
+            .expect("endpoints list present");
         assert!(
-            !status.endpoints.is_empty(),
+            !endpoints.is_empty(),
             "TLS endpoint must appear in instance status"
         );
-        let tls_ep = status
-            .endpoints
+        let tls_ep = endpoints
             .iter()
             .find(|e| e.type_ == "tls")
             .expect("TLS endpoint present");
         assert_eq!(tls_ep.name, "web");
 
-        let cond = status
-            .conditions
-            .iter()
-            .find(|c| c.type_ == ProxyRoutePlanner::KIND)
-            .unwrap();
         assert_eq!(cond.status, "True");
         assert_eq!(cond.reason, "RoutesAllocated");
     }
@@ -394,19 +446,18 @@ mod tests {
     async fn test_no_routes_marks_condition_true() {
         let (_store, ctx) = dummy_context();
 
-        let mut status = CTFInstanceStatus::default();
-        ProxyRoutePlanner::check_status(&dummy_instance("chal-1", None), &mut status, &ctx)
-            .unwrap();
+        let (cond, payload) =
+            ProxyRoutePlanner::check_status(&dummy_instance("chal-1", None), &ctx).unwrap();
 
         assert!(
-            status.endpoints.is_empty(),
+            payload.is_none()
+                || payload
+                    .unwrap()
+                    .endpoints
+                    .as_ref()
+                    .is_none_or(|e| e.is_empty()),
             "no routes means no endpoints"
         );
-        let cond = status
-            .conditions
-            .iter()
-            .find(|c| c.type_ == ProxyRoutePlanner::KIND)
-            .unwrap();
         assert_eq!(cond.status, "True");
         assert_eq!(cond.reason, "RoutesAllocated");
     }

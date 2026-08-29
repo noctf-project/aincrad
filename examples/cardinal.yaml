@@ -34,8 +34,6 @@ spec:
 apiVersion: aincrad.noctf.dev/v1
 kind: CTFInstance
 metadata:
-  annotations:
-    aincrad.noctf.dev/expiresAt: "2026-08-28T12:00:00Z"
   name: whoami-instance
   namespace: kubectf-challenges
 spec:

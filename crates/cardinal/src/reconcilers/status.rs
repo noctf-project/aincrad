@@ -12,43 +12,91 @@ use crate::{
     },
 };
 
-/// Outcome of a status reconciliation pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Readiness {
-    Ready,
-    NotReady,
+/// The outcome of evaluating an instance's readiness. Produced by `evaluate_status`
+/// without touching the API server and consumed by `commit`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Evaluation {
+    pub conditions: Vec<Condition>,
+    pub template_generation: Option<i64>,
+    pub resources: k8s_common::crd::CTFInstanceResources,
 }
 
-/// Synchronously evaluates the instance's readiness by collecting conditions from each
-/// child resource planner and the template cache. Writes all conditions to the API server.
+impl Evaluation {
+    /// True when every child condition reports success.
+    pub fn is_ready(&self) -> bool {
+        self.conditions
+            .iter()
+            .all(|c| c.status == "True" || c.status == "Unknown")
+    }
+}
+
+/// Evaluates the instance's readiness by collecting each resource's condition and
+/// status payload. Purely reads in-memory state and writes nothing to the API
+/// server, so it can be run before deciding whether to apply children.
+pub fn evaluate_status(instance: &CTFInstance, ctx: &Context) -> Result<Evaluation, Error> {
+    let mut evaluation = Evaluation::default();
+
+    let (template_condition, template_gen) = evaluate_template_condition(instance, ctx);
+    evaluation.conditions.push(template_condition);
+
+    fold_planner::<ReplicaSetPlanner>(instance, ctx, &mut evaluation)?;
+    fold_planner::<NetworkPolicyPlanner>(instance, ctx, &mut evaluation)?;
+    fold_planner::<ServicePlanner>(instance, ctx, &mut evaluation)?;
+    fold_planner::<ProxyRoutePlanner>(instance, ctx, &mut evaluation)?;
+
+    evaluation.template_generation = template_gen;
+
+    Ok(evaluation)
+}
+
+/// Calls a planner's `check_status`, collecting its condition and merging any
+/// typed status payload it contributes into `Evaluation::resources`.
+fn fold_planner<P: Planner>(
+    instance: &CTFInstance,
+    ctx: &Context,
+    evaluation: &mut Evaluation,
+) -> Result<(), Error> {
+    let (condition, resources) =
+        P::check_status(instance, ctx).map_err(|e| Error::StatusReconciliationError {
+            kind: P::KIND.to_string(),
+            source: Box::new(e),
+        })?;
+    evaluation.conditions.push(condition);
+
+    if let Some(resources) = resources {
+        evaluation.resources.overlay(resources);
+    }
+
+    Ok(())
+}
+
+/// Commits the evaluated state to the instance status in a single patch. Only
+/// called after children have been applied, so the recorded observed generation
+/// and applied template generation are truthful.
 ///
-/// Returns `Ready` if all conditions have status "True" and writes `Ready=True` + observed
-/// generations. Returns `NotReady` otherwise, writing only the conditions without Ready.
-#[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
-pub async fn reconcile(instance: &CTFInstance, ctx: &Context) -> Result<Readiness, Error> {
+/// The skip path never reaches this function; it writes nothing.
+pub async fn commit(
+    instance: &CTFInstance,
+    evaluation: &Evaluation,
+    ctx: &Context,
+) -> Result<(), Error> {
     let name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
-    let mut status = instance.status.clone().unwrap_or_default();
-    // Clear existing conditions so we write fresh ones
-    status.conditions.clear();
-
-    let (template_condition, template_gen) = evaluate_template_condition(instance, ctx);
-    apply_condition(&mut status, template_condition);
-    reconcile_child_statuses(instance, &mut status, ctx)?;
-
-    let all_true = status.conditions.iter().all(|c| c.status == "True");
-
-    if all_true {
-        status.observed_generation = instance.metadata.generation;
-        status.template_generation = template_gen;
-        status.restarted_at = instance
+    let mut status = CTFInstanceStatus {
+        observed_generation: instance.metadata.generation,
+        template_generation: evaluation.template_generation,
+        restarted_at: instance
             .metadata
             .annotations
             .as_ref()
             .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
-            .cloned();
+            .cloned(),
+        resources: evaluation.resources.clone(),
+        conditions: evaluation.conditions.clone(),
+    };
 
+    if evaluation.is_ready() {
         apply_condition(
             &mut status,
             Condition {
@@ -62,21 +110,8 @@ pub async fn reconcile(instance: &CTFInstance, ctx: &Context) -> Result<Readines
                 observed_generation: instance.metadata.generation,
             },
         );
-
-        let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
-        instances
-            .patch_status(
-                name,
-                &kube::api::PatchParams::default(),
-                &kube::api::Patch::Merge(serde_json::json!({ "status": &status })),
-            )
-            .await?;
-
-        return Ok(Readiness::Ready);
     }
 
-    // Don't stamp observed_generation, only set when fully Ready.
-    // Patch the full status so endpoint updates from check_status are preserved.
     let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
     instances
         .patch_status(
@@ -85,41 +120,6 @@ pub async fn reconcile(instance: &CTFInstance, ctx: &Context) -> Result<Readines
             &kube::api::Patch::Merge(serde_json::json!({ "status": &status })),
         )
         .await?;
-
-    Ok(Readiness::NotReady)
-}
-
-/// Reconciles child resource status conditions, propagating the first failure
-/// wrapped with the resource kind.
-fn reconcile_child_statuses(
-    instance: &CTFInstance,
-    status: &mut CTFInstanceStatus,
-    ctx: &Context,
-) -> Result<(), Error> {
-    ReplicaSetPlanner::check_status(instance, status, ctx).map_err(|e| {
-        Error::StatusReconciliationError {
-            kind: ReplicaSetPlanner::KIND.to_string(),
-            source: Box::new(e),
-        }
-    })?;
-    NetworkPolicyPlanner::check_status(instance, status, ctx).map_err(|e| {
-        Error::StatusReconciliationError {
-            kind: NetworkPolicyPlanner::KIND.to_string(),
-            source: Box::new(e),
-        }
-    })?;
-    ServicePlanner::check_status(instance, status, ctx).map_err(|e| {
-        Error::StatusReconciliationError {
-            kind: ServicePlanner::KIND.to_string(),
-            source: Box::new(e),
-        }
-    })?;
-    ProxyRoutePlanner::check_status(instance, status, ctx).map_err(|e| {
-        Error::StatusReconciliationError {
-            kind: ProxyRoutePlanner::KIND.to_string(),
-            source: Box::new(e),
-        }
-    })?;
 
     Ok(())
 }
@@ -157,8 +157,7 @@ fn evaluate_template_condition(instance: &CTFInstance, ctx: &Context) -> (Condit
     // of the template generation becomes the observed template generation once it
     // is reconciled, so an absent observed generation is treated as "in sync".
     if instance.spec.sync {
-        let observed_tmpl_gen = instance.status.as_ref()
-            .and_then(|s| s.template_generation);
+        let observed_tmpl_gen = instance.status.as_ref().and_then(|s| s.template_generation);
         if let (Some(observed), Some(current)) = (observed_tmpl_gen, template_gen)
             && observed < current
         {
@@ -203,7 +202,7 @@ fn evaluate_template_condition(instance: &CTFInstance, ctx: &Context) -> (Condit
             type_: "Template".to_string(),
             status: "True".to_string(),
             reason: "TemplateResolved".to_string(),
-            message: format!("Template gen {:?}", template_gen),
+            message: format!("Template gen {}", template_gen.unwrap_or(0)),
             last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                 Timestamp::now(),
             ),
@@ -231,10 +230,10 @@ pub async fn reconcile_failure(
         .status
         .as_ref()
         .and_then(|s| s.restarted_at.clone());
-    let endpoints = instance
+    let resources = instance
         .status
         .as_ref()
-        .map(|s| s.endpoints.clone())
+        .map(|s| s.resources.clone())
         .unwrap_or_default();
 
     let (reason, message) = match err {
@@ -273,7 +272,7 @@ pub async fn reconcile_failure(
             template_generation,
             restarted_at,
             conditions: vec![ready_condition],
-            endpoints,
+            resources,
         }
     });
 
@@ -294,20 +293,19 @@ mod tests {
     use crate::test_utils::tests::{
         dummy_context, dummy_context_with_routes, dummy_instance, dummy_kube_client,
     };
-    use k8s_common::crd::CTFInstanceStatusEndpoint;
-
     #[tokio::test]
-    async fn test_reconcile_status() {
+    async fn test_commit_status() {
         let (_store, ctx) = dummy_context();
         let mut instance = dummy_instance("chal-1", None);
         instance.metadata.generation = Some(1);
 
-        let res = reconcile(&instance, &ctx).await;
+        let evaluation = evaluate_status(&instance, &ctx).unwrap();
+        let res = commit(&instance, &evaluation, &ctx).await;
         assert!(res.is_ok());
     }
 
     #[tokio::test]
-    async fn test_synced_instance_reaches_ready() {
+    async fn test_evaluate_synced_instance_is_ready() {
         use k8s_common::crd::{CTFTemplateSpecRoute, RouteBackend, RouteSpec, RouteSpecTCP};
 
         let tcp_route = CTFTemplateSpecRoute {
@@ -331,18 +329,21 @@ mod tests {
             template_generation: None,
             restarted_at: None,
             conditions: vec![],
-            endpoints: vec![],
+            resources: Default::default(),
         });
 
-        assert_eq!(
-            reconcile(&synced, &ctx).await.unwrap(),
-            Readiness::Ready,
-            "synced instance at current template generation must become Ready"
+        let evaluation = evaluate_status(&synced, &ctx).unwrap();
+        assert!(
+            evaluation.is_ready(),
+            "synced instance at current template generation must evaluate ready"
         );
+        commit(&synced, &evaluation, &ctx)
+            .await
+            .expect("commit succeeds");
     }
 
     #[tokio::test]
-    async fn test_synced_instance_returns_to_ready_after_template_bump() {
+    async fn test_evaluate_synced_instance_returns_to_ready_after_template_bump() {
         use k8s_common::crd::{CTFTemplateSpecRoute, RouteBackend, RouteSpec, RouteSpecTCP};
 
         let tcp_route = CTFTemplateSpecRoute {
@@ -366,9 +367,9 @@ mod tests {
             template_generation: Some(1),
             restarted_at: None,
             conditions: vec![],
-            endpoints: vec![],
+            resources: Default::default(),
         });
-        assert_eq!(reconcile(&synced, &ctx).await.unwrap(), Readiness::Ready);
+        assert!(evaluate_status(&synced, &ctx).unwrap().is_ready());
 
         let bump_tmpl = k8s_common::crd::CTFTemplate {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
@@ -391,12 +392,11 @@ mod tests {
             template_generation: Some(1),
             restarted_at: None,
             conditions: vec![],
-            endpoints: vec![],
+            resources: Default::default(),
         });
-        assert_eq!(
-            reconcile(&bumped, &ctx).await.unwrap(),
-            Readiness::NotReady,
-            "template bump surfaces as NotReady so children get re-applied"
+        assert!(
+            !evaluate_status(&bumped, &ctx).unwrap().is_ready(),
+            "template bump surfaces as not ready so children get re-applied"
         );
 
         let mut caught_up = bumped.clone();
@@ -405,12 +405,11 @@ mod tests {
             template_generation: Some(2),
             restarted_at: None,
             conditions: vec![],
-            endpoints: vec![],
+            resources: Default::default(),
         });
-        assert_eq!(
-            reconcile(&caught_up, &ctx).await.unwrap(),
-            Readiness::Ready,
-            "after the applied template generation is recorded, the instance returns to Ready"
+        assert!(
+            evaluate_status(&caught_up, &ctx).unwrap().is_ready(),
+            "after the applied template generation is recorded, the instance returns to ready"
         );
     }
 
@@ -435,20 +434,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reconcile_failure_preserves_existing_endpoints() {
+    async fn test_reconcile_failure_preserves_existing_resources() {
         let client = dummy_kube_client();
         let ctx = crate::Context::new(client);
 
         let mut instance = dummy_instance("chal-1", None);
         instance.status = Some(CTFInstanceStatus {
-            endpoints: vec![CTFInstanceStatusEndpoint {
-                name: "pwn".to_string(),
-                type_: "tcp".to_string(),
-                target: k8s_common::crd::EndpointTarget {
-                    host: "chal.domain.com".to_string(),
-                    port: 30005,
-                },
-            }],
+            resources: k8s_common::crd::CTFInstanceResources {
+                endpoints: Some(vec![k8s_common::crd::CTFInstanceStatusEndpoint {
+                    name: "pwn".to_string(),
+                    type_: "tcp".to_string(),
+                    target: k8s_common::crd::EndpointTarget {
+                        host: "chal.domain.com".to_string(),
+                        port: 30005,
+                    },
+                }]),
+            },
             ..Default::default()
         });
 

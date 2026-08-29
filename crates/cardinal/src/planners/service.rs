@@ -1,11 +1,11 @@
-use k8s_common::crd::{CTFInstance, CTFInstanceStatus};
+use k8s_common::crd::CTFInstance;
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta};
 use k8s_openapi::jiff::Timestamp;
 
 use crate::{
     Context, Error, btreemap,
-    planners::{Planner, apply_condition, set_owner_ref},
+    planners::{Planner, set_owner_ref},
     reconcilers::template::ResolvedTemplate,
     utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL},
     utils::naming::resource_name,
@@ -64,23 +64,21 @@ impl Planner for ServicePlanner {
     }
 
     fn check_status(
-        _instance: &CTFInstance,
-        status: &mut CTFInstanceStatus,
+        instance: &CTFInstance,
         _ctx: &Context,
-    ) -> Result<(), Error> {
-        apply_condition(
-            status,
+    ) -> Result<(Condition, Option<k8s_common::crd::CTFInstanceResources>), Error> {
+        Ok((
             Condition {
                 type_: Self::KIND.to_string(),
-                status: "True".to_string(),
+                status: "Unknown".to_string(),
                 reason: "ResourceManaged".to_string(),
-                message: "TODO: Sync status".to_string(),
+                message: "Resource applied".to_string(),
                 last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                     Timestamp::now(),
                 ),
-                observed_generation: None,
+                observed_generation: instance.metadata.generation,
             },
-        );
-        Ok(())
+            None,
+        ))
     }
 }

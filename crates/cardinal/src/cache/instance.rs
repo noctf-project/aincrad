@@ -329,7 +329,7 @@ mod tests {
         inst.status = Some(k8s_common::crd::CTFInstanceStatus {
             observed_generation: Some(1),
             conditions: vec![],
-            endpoints: vec![],
+            resources: Default::default(),
             ..Default::default()
         });
         cache.update(&inst);

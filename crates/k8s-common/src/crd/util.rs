@@ -16,7 +16,6 @@ impl KubeListKey for Condition {
 
 pub fn list_schema<T: JsonSchema + KubeListKey>(r: &mut SchemaGenerator) -> Schema {
     let mut schema = <Vec<T>>::json_schema(r);
-
     let obj = schema.ensure_object();
     obj.insert(
         "x-kubernetes-list-type".to_string(),

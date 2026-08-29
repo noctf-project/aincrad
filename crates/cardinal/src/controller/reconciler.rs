@@ -14,218 +14,18 @@ use kube::{
 };
 use tracing::{error, info, instrument, warn};
 
-use crate::{
-    Context, Error, reconcilers,
-    utils::ttl::{calculate_remaining_ttl, is_expired, parse_expires_at},
-};
-
-const EXPIRES_REQUEUE_BUFFER: Duration = Duration::from_secs(5);
+use crate::{Context, Error, reconcilers};
 
 /// Reconciles a single `CTFInstance` resource state.
 #[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
 pub async fn reconcile(instance: Arc<CTFInstance>, ctx: Arc<Context>) -> Result<Action, Error> {
-    match reconcile_inner(&instance, &ctx).await {
+    match crate::controller::phases::run(&instance, &ctx).await {
         Ok(action) => Ok(action),
         Err(err) => {
             let _ = reconcilers::status::reconcile_failure(&instance, &ctx, &err).await;
             Err(err)
         }
     }
-}
-
-async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action, Error> {
-    let name = instance.metadata.name.as_deref().unwrap_or("unknown");
-    let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
-
-    info!(name, ns, "Reconciling CTFInstance");
-
-    // Ensure routes finalizer is attached to manage cross-namespace cleanup
-    if instance.metadata.deletion_timestamp.is_none() {
-        reconcilers::helper::ensure_finalizer(ctx.client.clone(), instance).await?;
-    }
-
-    // Handle finalizer cleanup if instance is marked for deletion
-    if instance.metadata.deletion_timestamp.is_some() {
-        info!(
-            name,
-            ns, "CTFInstance marked for deletion, cleaning up cross-namespace routes..."
-        );
-        reconcilers::helper::cleanup_instance_routes(
-            ctx.client.clone(),
-            &ctx.system_namespace,
-            instance,
-            ctx.route_allocator.as_deref(),
-        )
-        .await?;
-        return Ok(Action::await_change());
-    }
-
-    let expires_at = parse_expires_at(instance);
-
-    // Check if instance has expired
-    if is_expired(expires_at) {
-        info!(name, ns, "CTFInstance has expired, deleting resource...");
-        let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
-        instances.delete(name, &Default::default()).await?;
-        return Ok(Action::await_change());
-    }
-
-    // This evaluates all child conditions (Template, ReplicaSet, NetworkPolicy, Service, CTFProxyRoute)
-    // and writes them to the instance status. Only when all are True and nothing has changed
-    // since the last ready pass can we skip the child reconciliation entirely.
-    let ready = reconcilers::status::reconcile(instance, ctx).await?;
-    if matches!(ready, reconcilers::status::Readiness::Ready) && is_observed(instance) {
-        info!(name, ns, "Instance ready, skipping reconciliation");
-        if let Some(remaining) = calculate_remaining_ttl(expires_at) {
-            return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
-        }
-        return Ok(Action::await_change());
-    }
-
-    info!(name, ns, "Instance not ready, reconciling children");
-
-    // Resolve CTFTemplate referenced by `instance.spec.template`.
-    let template = reconcilers::template::reconcile(instance, ctx).await?;
-
-    // Rewrite invalid minTemplateGeneration annotation (non-numeric or <= 0)
-    let raw_min_tmpl_gen = instance
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION));
-
-    let min_tmpl_gen_annotation = match raw_min_tmpl_gen {
-        Some(raw_val) => match raw_val.parse::<i64>() {
-            Ok(parsed_gen) if parsed_gen > 0 => Some(parsed_gen),
-            _ => {
-                let valid_gen = template.metadata.generation.unwrap_or(1);
-                info!(
-                    name,
-                    ns, raw_val, valid_gen, "Rewriting invalid minTemplateGeneration annotation"
-                );
-                return patch_min_template_annotation(ctx, name, ns, valid_gen).await;
-            }
-        },
-        None => None,
-    };
-
-    // Check if requested minTemplateGeneration annotation exceeds the template's current generation
-    if let (Some(req_gen), Some(tmpl_gen)) = (min_tmpl_gen_annotation, template.metadata.generation)
-        && req_gen > tmpl_gen
-    {
-        info!(
-            name,
-            ns, req_gen, tmpl_gen, "Capping minTemplateGeneration annotation"
-        );
-        return patch_min_template_annotation(ctx, name, ns, tmpl_gen).await;
-    }
-
-    reconcile_children(instance, &template, ctx).await?;
-
-    // A synced instance only reports Ready once status.template_generation catches
-    // up with the template, and that field is written in status::reconcile's Ready
-    // branch. Record the generation actually applied here so a template bump can
-    // transition back to Ready instead of deadlocking in TemplateOutOfSync.
-    if instance.spec.sync
-        && let Some(applied_gen) = template.metadata.generation
-        && instance.status.as_ref().and_then(|s| s.template_generation) != Some(applied_gen)
-    {
-        reconcilers::helper::PartialStatusTemplateGeneration {
-            template_generation: applied_gen,
-        }
-        .apply(ctx.client.clone(), name, ns)
-        .await?;
-    }
-
-    if let Some(remaining) = calculate_remaining_ttl(expires_at) {
-        return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
-    }
-
-    Ok(Action::await_change())
-}
-
-/// Returns true when the instance's status has observed the current spec generation
-/// and restart annotation, meaning this reconcile pass found nothing new to apply.
-fn is_observed(instance: &CTFInstance) -> bool {
-    match (
-        instance.status.as_ref().and_then(|s| s.observed_generation),
-        instance.metadata.generation,
-    ) {
-        (Some(observed), Some(current)) if observed < current => return false,
-        (None, Some(_)) => return false,
-        _ => {}
-    }
-
-    // restartedAt doesn't bump metadata.generation, so it must be checked
-    // separately or restart requests would be swallowed by the Ready gate.
-    let status_restarted_at = instance
-        .status
-        .as_ref()
-        .and_then(|s| s.restarted_at.as_deref());
-    let annotation_restarted_at = instance
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
-        .map(|s| s.as_str());
-
-    status_restarted_at == annotation_restarted_at
-}
-
-/// Helper function to patch minTemplateGeneration annotation on a CTFInstance and requeue reconciliation.
-async fn patch_min_template_annotation(
-    ctx: &Context,
-    name: &str,
-    ns: &str,
-    target_gen: i64,
-) -> Result<Action, Error> {
-    let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
-    let patch = serde_json::json!({
-        "metadata": {
-            "annotations": {
-                crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION: target_gen.to_string()
-            }
-        }
-    });
-    instances
-        .patch(
-            name,
-            &kube::api::PatchParams::default(),
-            &kube::api::Patch::Merge(patch),
-        )
-        .await?;
-    Ok(Action::requeue(Duration::from_millis(100)))
-}
-
-/// Reconciles all child resources (workloads, network policies, services, proxy routes) for a CTFInstance.
-async fn reconcile_children(
-    instance: &CTFInstance,
-    template: &reconcilers::template::ResolvedTemplate,
-    ctx: &Context,
-) -> Result<(), Error> {
-    use crate::planners::{
-        NetworkPolicyPlanner, ProxyRoutePlanner, ReplicaSetPlanner, ServicePlanner,
-    };
-    use crate::reconcilers::helper::{apply_planner, apply_proxy_routes};
-
-    apply_planner::<ReplicaSetPlanner>(ctx.client.clone(), instance, template, ctx).await?;
-    apply_planner::<NetworkPolicyPlanner>(ctx.client.clone(), instance, template, ctx).await?;
-    apply_planner::<ServicePlanner>(ctx.client.clone(), instance, template, ctx).await?;
-
-    if let Some(allocator) = &ctx.route_allocator {
-        use crate::planners::Planner;
-        let routes = ProxyRoutePlanner::plan(instance, template, ctx)?;
-        apply_proxy_routes(
-            ctx.client.clone(),
-            &ctx.system_namespace,
-            instance,
-            routes,
-            allocator,
-        )
-        .await?;
-    }
-
-    Ok(())
 }
 
 pub fn error_policy(instance: Arc<CTFInstance>, error: &Error, _ctx: Arc<Context>) -> Action {
@@ -752,7 +552,7 @@ mod tests {
             template_generation: Some(1),
             restarted_at: None,
             conditions: vec![],
-            endpoints: vec![],
+            resources: Default::default(),
         });
 
         reconcile(instance.clone(), ctx.clone()).await.unwrap();
@@ -811,7 +611,7 @@ mod tests {
             template_generation: Some(1),
             restarted_at: None,
             conditions: vec![],
-            endpoints: vec![],
+            resources: Default::default(),
         });
 
         reconcile(instance.clone(), ctx.clone()).await.unwrap();
@@ -873,7 +673,7 @@ mod tests {
             template_generation: Some(1),
             restarted_at: None,
             conditions: vec![],
-            endpoints: vec![],
+            resources: Default::default(),
         });
 
         reconcile(instance, ctx).await.unwrap();

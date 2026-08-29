@@ -1,4 +1,3 @@
-use aincrad_macros::PatchValue;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -40,7 +39,7 @@ impl RouteBackend {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq, PatchValue)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteSpecTCP {
     /// Dedicated TCP port (0 or omitted for auto-allocation, or fixed port in reserved range).
@@ -48,7 +47,7 @@ pub struct RouteSpecTCP {
     pub port: Option<u16>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq, PatchValue)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteSpecTLS {
     /// Subdomain prefix for the derived TLS hostname (e.g. 'web' in 'web-xxxx.c.noctf.dev'). Defaults to the route metadata name if omitted.

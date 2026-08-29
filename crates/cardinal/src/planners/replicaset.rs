@@ -3,7 +3,7 @@ use std::fmt::Write;
 use std::sync::LazyLock;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use k8s_common::crd::{CTFInstance, CTFInstanceStatus, CTFTemplateSpecPod};
+use k8s_common::crd::{CTFInstance, CTFTemplateSpecPod};
 use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetSpec};
 use k8s_openapi::api::core::v1::{PodSpec, PodTemplateSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector, ObjectMeta};
@@ -14,7 +14,7 @@ use crate::utils::HashWriter;
 use crate::utils::naming::resource_name;
 use crate::{
     Context, Error, btreemap,
-    planners::{Planner, apply_condition, set_owner_ref},
+    planners::{Planner, set_owner_ref},
     reconcilers::template::ResolvedTemplate,
     utils::labels::{
         INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL, RESTARTED_AT_ANNOTATION,
@@ -129,25 +129,23 @@ impl Planner for ReplicaSetPlanner {
     }
 
     fn check_status(
-        _instance: &CTFInstance,
-        status: &mut CTFInstanceStatus,
+        instance: &CTFInstance,
         _ctx: &Context,
-    ) -> Result<(), Error> {
+    ) -> Result<(Condition, Option<k8s_common::crd::CTFInstanceResources>), Error> {
         // TODO: Query ReplicaSet cache to verify ready_replicas >= desired_replicas
-        apply_condition(
-            status,
+        Ok((
             Condition {
                 type_: Self::KIND.to_string(),
-                status: "True".to_string(),
+                status: "Unknown".to_string(),
                 reason: "ResourceManaged".to_string(),
-                message: "TODO: Sync status".to_string(),
+                message: "Resource applied".to_string(),
                 last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                     Timestamp::now(),
                 ),
-                observed_generation: None,
+                observed_generation: instance.metadata.generation,
             },
-        );
-        Ok(())
+            None,
+        ))
     }
 }
 

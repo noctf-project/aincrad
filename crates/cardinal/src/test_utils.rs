@@ -319,7 +319,6 @@ pub mod tests {
                 }],
                 routes,
                 params: vec![],
-                ..Default::default()
             },
             status: None,
         };
