@@ -292,6 +292,7 @@ pub mod tests {
             allocator,
             "aincrad-system",
             "cluster.local",
+            std::collections::BTreeMap::new(),
         );
 
         // Populate template cache with a default template

@@ -40,7 +40,7 @@ impl Planner for ReplicaSetPlanner {
     fn plan(
         instance: &CTFInstance,
         template: &ResolvedTemplate,
-        _ctx: &Context,
+        ctx: &Context,
     ) -> Result<Vec<ReplicaSet>, Error> {
         let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
@@ -71,6 +71,8 @@ impl Planner for ReplicaSetPlanner {
                 .unwrap_or(pod_tmpl.replicas);
 
             let patched_pod_spec = template.get_patched_pod_spec(pod_tmpl, &context_map)?;
+            let mut patched_pod_spec = patched_pod_spec;
+            apply_image_aliases(&mut patched_pod_spec, &ctx.image_aliases);
 
             let rs_spec = build_replicaset_spec(
                 instance_name,
@@ -171,6 +173,73 @@ fn apply_pod_defaults(pod_spec: &mut PodSpec) {
             .or_insert_with(|| {
                 k8s_openapi::apimachinery::pkg::api::resource::Quantity("256Mi".to_string())
             });
+    }
+}
+
+/// Rewrites each container's image reference in place by resolving its leading
+/// segment against the configured image aliases.
+///
+/// An alias maps a short repository key (e.g. `_challenges`) to a registry
+/// prefix. Any image whose first path segment matches a key is rewritten to the
+/// registry prefix followed by the remainder of the reference:
+/// `_challenges/foo:tag` becomes `australia.se-registry.example/foo:tag`.
+/// Images without a slash, or whose first segment is not aliased, are left
+/// untouched. Applied to regular, init and ephemeral containers.
+fn apply_image_aliases(pod_spec: &mut PodSpec, aliases: &BTreeMap<String, String>) {
+    if aliases.is_empty() {
+        return;
+    }
+    for container in pod_spec.containers.iter_mut() {
+        rewrite_container_image(container, aliases);
+    }
+    if let Some(containers) = pod_spec.init_containers.as_mut() {
+        for container in containers.iter_mut() {
+            rewrite_container_image(container, aliases);
+        }
+    }
+    if let Some(containers) = pod_spec.ephemeral_containers.as_mut() {
+        for container in containers.iter_mut() {
+            rewrite_container_image(container, aliases);
+        }
+    }
+}
+
+fn rewrite_container_image<T: ImageReference>(
+    container: &mut T,
+    aliases: &BTreeMap<String, String>,
+) {
+    let Some(image) = container.image() else {
+        return;
+    };
+    rewrite_image(image, aliases);
+}
+
+fn rewrite_image(image: &mut String, aliases: &BTreeMap<String, String>) {
+    let Some((key, rest)) = image.split_once('/') else {
+        return;
+    };
+    if let Some(prefix) = aliases.get(key) {
+        // Values are normalized (trailing slash stripped) at parse time, so the
+        // prefix is always a clean registry prefix.
+        *image = format!("{prefix}/{rest}");
+    }
+}
+
+/// Trait for types exposing a mutable image reference (regular, init and
+/// ephemeral containers).
+trait ImageReference {
+    fn image(&mut self) -> Option<&mut String>;
+}
+
+impl ImageReference for k8s_openapi::api::core::v1::Container {
+    fn image(&mut self) -> Option<&mut String> {
+        self.image.as_mut()
+    }
+}
+
+impl ImageReference for k8s_openapi::api::core::v1::EphemeralContainer {
+    fn image(&mut self) -> Option<&mut String> {
+        self.image.as_mut()
     }
 }
 
@@ -370,6 +439,99 @@ mod tests {
         assert_eq!(custom_pod_spec.automount_service_account_token, Some(true));
         assert_eq!(custom_pod_spec.enable_service_links, Some(true));
         assert_eq!(custom_pod_spec.termination_grace_period_seconds, Some(30));
+    }
+
+    #[test]
+    fn test_apply_image_aliases_containers_and_init() {
+        let mut aliases = BTreeMap::new();
+        aliases.insert("_challenges".to_string(), "reg.example/infra".to_string());
+        aliases.insert("_infra".to_string(), "reg.example/chal".to_string());
+
+        let mut pod_spec = PodSpec {
+            containers: vec![
+                k8s_openapi::api::core::v1::Container {
+                    name: "web".into(),
+                    image: Some("_challenges/foo:tag".into()),
+                    ..Default::default()
+                },
+                k8s_openapi::api::core::v1::Container {
+                    name: "plain".into(),
+                    image: Some("nginx:latest".into()),
+                    ..Default::default()
+                },
+            ],
+            init_containers: Some(vec![k8s_openapi::api::core::v1::Container {
+                name: "init".into(),
+                image: Some("_infra/setup:v1".into()),
+                ..Default::default()
+            }]),
+            ephemeral_containers: Some(vec![k8s_openapi::api::core::v1::EphemeralContainer {
+                name: "debug".into(),
+                image: Some("_challenges/sidecar:1".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        apply_image_aliases(&mut pod_spec, &aliases);
+
+        assert_eq!(
+            pod_spec.containers[0].image.as_deref(),
+            Some("reg.example/infra/foo:tag")
+        );
+        assert_eq!(
+            pod_spec.containers[1].image.as_deref(),
+            Some("nginx:latest")
+        );
+        assert_eq!(
+            pod_spec.init_containers.as_ref().unwrap()[0]
+                .image
+                .as_deref(),
+            Some("reg.example/chal/setup:v1")
+        );
+        assert_eq!(
+            pod_spec.ephemeral_containers.as_ref().unwrap()[0]
+                .image
+                .as_deref(),
+            Some("reg.example/infra/sidecar:1")
+        );
+    }
+
+    #[test]
+    fn test_apply_image_aliases_unmatched_key_untouched() {
+        let mut aliases = BTreeMap::new();
+        aliases.insert("_challenges".to_string(), "reg.example/infra".to_string());
+
+        let mut pod_spec = PodSpec {
+            containers: vec![k8s_openapi::api::core::v1::Container {
+                name: "web".into(),
+                image: Some("_other/foo:tag".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        apply_image_aliases(&mut pod_spec, &aliases);
+        assert_eq!(
+            pod_spec.containers[0].image.as_deref(),
+            Some("_other/foo:tag")
+        );
+    }
+
+    #[test]
+    fn test_apply_image_aliases_empty_map_noop() {
+        let mut pod_spec = PodSpec {
+            containers: vec![k8s_openapi::api::core::v1::Container {
+                name: "web".into(),
+                image: Some("_challenges/foo:tag".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        apply_image_aliases(&mut pod_spec, &BTreeMap::new());
+        assert_eq!(
+            pod_spec.containers[0].image.as_deref(),
+            Some("_challenges/foo:tag")
+        );
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use k8s_common::crd::CTFTemplate;
@@ -17,6 +18,7 @@ pub struct Context {
     pub route_allocator: Option<Arc<RouteAllocator>>,
     pub system_namespace: String,
     pub cluster_domain: String,
+    pub image_aliases: BTreeMap<String, String>,
 }
 
 impl Context {
@@ -31,6 +33,7 @@ impl Context {
             route_allocator: None,
             system_namespace: system_ns,
             cluster_domain: "cluster.local".to_string(),
+            image_aliases: BTreeMap::new(),
         }
     }
 
@@ -41,6 +44,7 @@ impl Context {
         allocator: Arc<RouteAllocator>,
         system_namespace: impl Into<String>,
         cluster_domain: impl Into<String>,
+        image_aliases: BTreeMap<String, String>,
     ) -> Self {
         let template_cache = TemplateCache::new(template_store.clone());
         Self {
@@ -51,6 +55,7 @@ impl Context {
             route_allocator: Some(allocator),
             system_namespace: system_namespace.into(),
             cluster_domain: cluster_domain.into(),
+            image_aliases,
         }
     }
 
@@ -66,6 +71,7 @@ impl Context {
             route_allocator: None,
             system_namespace: system_ns,
             cluster_domain: "cluster.local".to_string(),
+            image_aliases: BTreeMap::new(),
         }
     }
 }

@@ -154,6 +154,7 @@ pub async fn run(
     allocator: Arc<crate::routing::RouteAllocator>,
     system_namespace: String,
     cluster_domain: String,
+    image_aliases: std::collections::BTreeMap<String, String>,
 ) -> Result<(), Error> {
     let instances = Api::<CTFInstance>::all(client.clone());
     let templates = Api::<CTFTemplate>::all(client.clone());
@@ -207,6 +208,7 @@ pub async fn run(
         allocator.clone(),
         system_namespace.clone(),
         cluster_domain,
+        image_aliases,
     ));
     let template_cache = context.template_cache.clone().unwrap();
     let template_cache_task = template_cache.clone();
@@ -791,6 +793,7 @@ mod tests {
             allocator,
             "aincrad-system".into(),
             "cluster.local".into(),
+            std::collections::BTreeMap::new(),
         )
         .await;
         assert!(res.is_err());
