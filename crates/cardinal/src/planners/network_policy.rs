@@ -172,8 +172,8 @@ impl Planner for NetworkPolicyPlanner {
             Condition {
                 type_: Self::KIND.to_string(),
                 status: "True".to_string(),
-                reason: "ResourceManaged".to_string(),
-                message: "NetworkPolicy managed by SSA reconciliation".to_string(),
+                reason: "Ready".to_string(),
+                message: "Applied".to_string(),
                 last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                     Timestamp::now(),
                 ),

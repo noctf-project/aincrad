@@ -71,22 +71,18 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
     }
 
     // This evaluates all child conditions (Template, ReplicaSet, NetworkPolicy, Service, CTFProxyRoute)
-    // and writes them to the instance status. If all are True, it patches Ready=True and we skip.
-    match reconcilers::status::reconcile(instance, ctx).await? {
-        reconcilers::status::Readiness::Ready => {
-            info!(name, ns, "Instance ready, skipping reconciliation");
-            if let Some(remaining) = calculate_remaining_ttl(expires_at) {
-                return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
-            }
-            return Ok(Action::await_change());
+    // and writes them to the instance status. Only when all are True and nothing has changed
+    // since the last ready pass can we skip the child reconciliation entirely.
+    let ready = reconcilers::status::reconcile(instance, ctx).await?;
+    if matches!(ready, reconcilers::status::Readiness::Ready) && is_observed(instance) {
+        info!(name, ns, "Instance ready, skipping reconciliation");
+        if let Some(remaining) = calculate_remaining_ttl(expires_at) {
+            return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
         }
-        reconcilers::status::Readiness::NotReady => {
-            info!(
-                name,
-                ns, "Instance not ready, proceeding with reconciliation"
-            );
-        }
+        return Ok(Action::await_change());
     }
+
+    info!(name, ns, "Instance not ready, reconciling children");
 
     // Resolve CTFTemplate referenced by `instance.spec.template`.
     let template = reconcilers::template::reconcile(instance, ctx).await?;
@@ -126,11 +122,54 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
 
     reconcile_children(instance, &template, ctx).await?;
 
+    // A synced instance only reports Ready once status.template_generation catches
+    // up with the template, and that field is written in status::reconcile's Ready
+    // branch. Record the generation actually applied here so a template bump can
+    // transition back to Ready instead of deadlocking in TemplateOutOfSync.
+    if instance.spec.sync
+        && let Some(applied_gen) = template.metadata.generation
+        && instance.status.as_ref().and_then(|s| s.template_generation) != Some(applied_gen)
+    {
+        reconcilers::helper::PartialStatusTemplateGeneration {
+            template_generation: applied_gen,
+        }
+        .apply(ctx.client.clone(), name, ns)
+        .await?;
+    }
+
     if let Some(remaining) = calculate_remaining_ttl(expires_at) {
         return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
     }
 
     Ok(Action::await_change())
+}
+
+/// Returns true when the instance's status has observed the current spec generation
+/// and restart annotation, meaning this reconcile pass found nothing new to apply.
+fn is_observed(instance: &CTFInstance) -> bool {
+    match (
+        instance.status.as_ref().and_then(|s| s.observed_generation),
+        instance.metadata.generation,
+    ) {
+        (Some(observed), Some(current)) if observed < current => return false,
+        (None, Some(_)) => return false,
+        _ => {}
+    }
+
+    // restartedAt doesn't bump metadata.generation, so it must be checked
+    // separately or restart requests would be swallowed by the Ready gate.
+    let status_restarted_at = instance
+        .status
+        .as_ref()
+        .and_then(|s| s.restarted_at.as_deref());
+    let annotation_restarted_at = instance
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
+        .map(|s| s.as_str());
+
+    status_restarted_at == annotation_restarted_at
 }
 
 /// Helper function to patch minTemplateGeneration annotation on a CTFInstance and requeue reconciliation.
@@ -232,6 +271,15 @@ pub fn find_synced_instances(
         })
         .map(|inst| ObjectRef::from_obj(&**inst))
         .collect()
+}
+
+/// Predicate for streaming CTFInstances into the controller. Includes deletion
+/// state so finalizer cleanup reconciles (deletionTimestamp changes) are delivered
+/// even when generation and annotations are untouched.
+fn instance_predicate() -> impl Predicate<CTFInstance> {
+    predicates::generation
+        .combine(predicates::annotations)
+        .combine(|obj: &CTFInstance| Some(u64::from(obj.metadata.deletion_timestamp.is_some())))
 }
 
 /// Handles instance watcher `InitDone` event by pruning unreferenced proxy routes in the cluster.
@@ -370,11 +418,11 @@ pub async fn run(
     let template_cache = context.template_cache.clone().unwrap();
     let template_cache_task = template_cache.clone();
 
-    let template_ready_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let template_ready_notify = Arc::new(tokio::sync::Notify::new());
-
-    let template_flag_task = template_ready_flag.clone();
-    let template_notify_task = template_ready_notify.clone();
+    // Used to gate instance events on the initial CTFTemplate sync. A watch
+    // channel (rather than flag + Notify) because notify_waiters() loses the
+    // wakeup if it fires before a waiter registers: a watch stores the value.
+    let (template_ready_tx, template_ready_rx) = tokio::sync::watch::channel(false);
+    let template_ready_tx_task = template_ready_tx.clone();
 
     // Template watch stream updates template cache before populating the template store
     let template_watcher_stream = watcher(templates.clone(), Config::default())
@@ -384,8 +432,7 @@ pub async fn run(
                 handle_template_watcher_event(event, &template_cache_task);
                 if let Event::InitDone = event {
                     info!("CTFTemplate initial sync complete");
-                    template_flag_task.store(true, std::sync::atomic::Ordering::SeqCst);
-                    template_notify_task.notify_waiters();
+                    let _ = template_ready_tx_task.send(true);
                 }
             }
         });
@@ -407,8 +454,7 @@ pub async fn run(
     let allocator_init_done = allocator.clone();
     let instance_store_init_done = instance_store.clone();
 
-    let instance_template_flag = template_ready_flag.clone();
-    let instance_template_notify = template_ready_notify.clone();
+    let instance_template_rx = template_ready_rx.clone();
 
     let (fatal_tx, mut fatal_rx) = tokio::sync::broadcast::channel::<String>(1);
 
@@ -421,12 +467,15 @@ pub async fn run(
             let store = instance_store_init_done.clone();
             let cache = instance_cache_task.clone();
             let fatal_tx = fatal_tx.clone();
-            let template_flag = instance_template_flag.clone();
-            let template_notify = instance_template_notify.clone();
+            let mut template_rx = instance_template_rx.clone();
 
             async move {
-                if !template_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                    template_notify.notified().await;
+                // Race-free wait for the initial CTFTemplate sync: watch stores
+                // the latest value, so a send racing this check cannot be lost.
+                while !*template_rx.borrow() {
+                    if template_rx.changed().await.is_err() {
+                        break;
+                    }
                 }
 
                 if let Ok(ref event) = res {
@@ -446,10 +495,9 @@ pub async fn run(
         });
 
     let instance_reflector = reflector(instance_writer, instance_watcher_stream);
-    let predicate = predicates::generation.combine(predicates::annotations);
     let controller_instance_stream = instance_reflector
         .touched_objects()
-        .predicate_filter(predicate, Default::default());
+        .predicate_filter(instance_predicate(), Default::default());
 
     info!("Starting CTFInstance controller with Template tracking");
 
@@ -486,12 +534,57 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::routing::{PortsStore, RouteAllocator};
-    use crate::test_utils::tests::{dummy_context, dummy_kube_client};
+    use crate::test_utils::tests::{
+        dummy_context, dummy_ctx, dummy_instance, dummy_kube_client, recording_kube_client,
+    };
     use chrono::{Duration as ChronoDuration, Utc};
+    use futures::StreamExt;
     use k8s_common::PortRange;
-    use k8s_common::crd::{CTFInstanceSpec, CTFInstanceStatus};
+    use k8s_common::crd::{
+        CTFInstanceSpec, CTFInstanceStatus, CTFTemplateSpecRoute, RouteBackend, RouteSpec,
+        RouteSpecTCP,
+    };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use kube::runtime::WatchStreamExt;
+    use kube::runtime::watcher::Error as WatcherError;
+
+    #[tokio::test]
+    async fn test_template_ready_wait_delivers_concurrent_send() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+
+        let task = tokio::spawn(async move {
+            while !*rx.borrow() {
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tx.send(true).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("template ready wait must not deadlock when send races the check")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_template_ready_wait_returns_immediately_when_already_ready() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        tx.send(true).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async move {
+            while !*rx.borrow() {
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("template ready wait must return immediately when already ready");
+    }
 
     #[tokio::test]
     async fn test_reconcile_no_expiration() {
@@ -595,6 +688,209 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_deletion_timestamp_instances_are_delivered_to_controller() {
+        let mut inst = dummy_instance("chal-1", None);
+        inst.metadata.uid = Some("uid-1".to_string());
+        inst.metadata.generation = Some(1);
+        inst.metadata.resource_version = Some("1".to_string());
+        inst.metadata.finalizers = Some(vec![crate::utils::labels::ROUTES_FINALIZER.to_string()]);
+
+        let mut dying = inst.clone();
+        dying.metadata.deletion_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            ));
+        dying.metadata.resource_version = Some("2".to_string());
+
+        let events: Vec<Result<CTFInstance, WatcherError>> = vec![Ok(inst), Ok(dying)];
+        let filtered = futures::stream::iter(events)
+            .predicate_filter(instance_predicate(), Default::default());
+
+        let items: Vec<CTFInstance> = filtered.map(|r| r.unwrap()).collect().await;
+        assert_eq!(
+            items.len(),
+            2,
+            "finalizer cleanup reconcile for the deleted instance must be delivered"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| i.metadata.deletion_timestamp.is_some()),
+            "deleted instance must reach the reconcile loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spec_change_after_ready_reapplies_children() {
+        let (client, log) = recording_kube_client();
+        let tcp_route = CTFTemplateSpecRoute {
+            name: "chal".to_string(),
+            spec: RouteSpec {
+                backend: RouteBackend {
+                    service: "web".into(),
+                    port: 80,
+                },
+                tcp: Some(RouteSpecTCP { port: Some(0) }),
+                ..Default::default()
+            },
+        };
+        let (_store, ctx) = dummy_ctx(client, vec![tcp_route]);
+
+        let count_rs_patches = |log: &std::sync::Mutex<Vec<String>>| {
+            log.lock()
+                .unwrap()
+                .iter()
+                .filter(|s| s.starts_with("PATCH") && s.contains("/replicasets"))
+                .count()
+        };
+
+        let mut instance = Arc::new(dummy_instance("chal-1", None));
+        let inst = Arc::get_mut(&mut instance).unwrap();
+        inst.metadata.generation = Some(1);
+        inst.status = Some(CTFInstanceStatus {
+            observed_generation: Some(1),
+            template_generation: Some(1),
+            restarted_at: None,
+            conditions: vec![],
+            endpoints: vec![],
+        });
+
+        reconcile(instance.clone(), ctx.clone()).await.unwrap();
+        assert_eq!(
+            count_rs_patches(&log),
+            0,
+            "ready + observed instance must not re-apply children"
+        );
+
+        log.lock().unwrap().clear();
+        let inst = Arc::get_mut(&mut instance).unwrap();
+        inst.metadata.generation = Some(2);
+        inst.spec
+            .params
+            .push(k8s_common::crd::CTFInstanceSpecParam {
+                name: "FLAG".into(),
+                value: k8s_common::crd::PatchValue::Value("CTF{rotated}".into()),
+            });
+
+        reconcile(instance, ctx).await.unwrap();
+        assert!(
+            count_rs_patches(&log) > 0,
+            "children must be re-applied after the spec generation changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_restart_annotation_after_ready_reapplies_children() {
+        let (client, log) = recording_kube_client();
+        let tcp_route = CTFTemplateSpecRoute {
+            name: "chal".to_string(),
+            spec: RouteSpec {
+                backend: RouteBackend {
+                    service: "web".into(),
+                    port: 80,
+                },
+                tcp: Some(RouteSpecTCP { port: Some(0) }),
+                ..Default::default()
+            },
+        };
+        let (_store, ctx) = dummy_ctx(client, vec![tcp_route]);
+
+        let count_rs_patches = |log: &std::sync::Mutex<Vec<String>>| {
+            log.lock()
+                .unwrap()
+                .iter()
+                .filter(|s| s.starts_with("PATCH") && s.contains("/replicasets"))
+                .count()
+        };
+
+        let mut instance = Arc::new(dummy_instance("chal-1", None));
+        let inst = Arc::get_mut(&mut instance).unwrap();
+        inst.metadata.generation = Some(1);
+        inst.status = Some(CTFInstanceStatus {
+            observed_generation: Some(1),
+            template_generation: Some(1),
+            restarted_at: None,
+            conditions: vec![],
+            endpoints: vec![],
+        });
+
+        reconcile(instance.clone(), ctx.clone()).await.unwrap();
+        log.lock().unwrap().clear();
+
+        let inst = Arc::get_mut(&mut instance).unwrap();
+        inst.metadata
+            .annotations
+            .get_or_insert_with(Default::default)
+            .insert(
+                crate::utils::labels::RESTARTED_AT_ANNOTATION.to_string(),
+                "2026-08-29T12:00:00Z".to_string(),
+            );
+
+        reconcile(instance, ctx).await.unwrap();
+        assert!(
+            count_rs_patches(&log) > 0,
+            "children must be re-applied when restartedAt changes without a generation bump"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_synced_instance_stamps_template_generation_after_apply() {
+        let (client, log) = recording_kube_client();
+        let tcp_route = CTFTemplateSpecRoute {
+            name: "chal".to_string(),
+            spec: RouteSpec {
+                backend: RouteBackend {
+                    service: "web".into(),
+                    port: 80,
+                },
+                tcp: Some(RouteSpecTCP { port: Some(0) }),
+                ..Default::default()
+            },
+        };
+        let (_store, ctx) = dummy_ctx(client, vec![tcp_route.clone()]);
+
+        let tmpl = k8s_common::crd::CTFTemplate {
+            metadata: ObjectMeta {
+                name: Some("whoami-template".into()),
+                namespace: Some("default".into()),
+                generation: Some(2),
+                ..Default::default()
+            },
+            spec: k8s_common::crd::CTFTemplateSpec {
+                routes: vec![tcp_route],
+                ..Default::default()
+            },
+            status: None,
+        };
+        ctx.template_cache.as_ref().unwrap().update(&tmpl);
+
+        let mut instance = Arc::new(dummy_instance("chal-1", None));
+        let inst = Arc::get_mut(&mut instance).unwrap();
+        inst.spec.sync = true;
+        inst.metadata.generation = Some(1);
+        inst.status = Some(CTFInstanceStatus {
+            observed_generation: Some(1),
+            template_generation: Some(1),
+            restarted_at: None,
+            conditions: vec![],
+            endpoints: vec![],
+        });
+
+        reconcile(instance, ctx).await.unwrap();
+
+        let stamped = log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.starts_with("PATCH") && s.contains("/status"));
+        assert!(
+            stamped,
+            "reconcile must stamp templateGeneration after applying a bumped template \
+             so the instance can return to Ready"
+        );
+    }
+
+    #[tokio::test]
     async fn test_reconcile_observed_generation_skips() {
         let (_store, ctx) = dummy_context();
         let instance = Arc::new(CTFInstance {
@@ -631,8 +927,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_instance_watcher_init_done_success() {
-        use crate::test_utils::tests::dummy_instance;
-
         let client = dummy_kube_client();
         let (instance_store, mut instance_writer) = store();
         let mut inst = dummy_instance("chal-1", None);

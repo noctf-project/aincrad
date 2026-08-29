@@ -102,40 +102,76 @@ impl Planner for ProxyRoutePlanner {
         let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
         let instance_ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
-        if let Some(allocator) = &ctx.route_allocator {
-            let routes = allocator
-                .ports()
-                .instance_routes(instance_ns, instance_name);
-            if !routes.is_empty() {
-                // Populate endpoints from the allocator cache
-                let mut endpoints = Vec::new();
-                for (key, port) in &routes {
-                    let spec = RouteSpec {
-                        tcp: Some(k8s_common::crd::RouteSpecTCP { port: Some(*port) }),
-                        ..Default::default()
-                    };
-                    if let Ok(alloc) = allocator.allocate(key, &spec) {
-                        endpoints.push(alloc.endpoint);
-                    }
-                }
-                endpoints.sort_by(|a, b| (&a.name, &a.type_).cmp(&(&b.name, &b.type_)));
-                status.endpoints = endpoints;
+        let entry = ctx
+            .template_cache
+            .as_ref()
+            .and_then(|cache| cache.get(instance_ns, &instance.spec.template));
 
-                apply_condition(
-                    status,
-                    Condition {
-                        type_: Self::KIND.to_string(),
-                        status: "True".to_string(),
-                        reason: "RoutesAllocated".to_string(),
-                        message: format!("{} proxy route(s) allocated", routes.len()),
-                        last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                            Timestamp::now(),
-                        ),
-                        observed_generation: None,
-                    },
-                );
-                return Ok(());
+        let Some(entry) = entry else {
+            apply_condition(
+                status,
+                Condition {
+                    type_: Self::KIND.to_string(),
+                    status: "Unknown".to_string(),
+                    reason: "TemplateNotFound".to_string(),
+                    message: "No proxy routes planned without a resolved template".to_string(),
+                    last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                        Timestamp::now(),
+                    ),
+                    observed_generation: None,
+                },
+            );
+            return Ok(());
+        };
+        let template = &entry.template;
+
+        let allocator = ctx.route_allocator.as_deref();
+        let mut endpoints = Vec::new();
+        let mut unallocated: Vec<String> = Vec::new();
+
+        for route_tmpl in &template.spec.routes {
+            let route_override = instance
+                .spec
+                .routes
+                .iter()
+                .find(|r| r.name == route_tmpl.name);
+            let merged_spec = build_merged_route_spec(&route_tmpl.spec, route_override);
+            let route_key = RouteKey::new(instance_ns, instance_name, &route_tmpl.name);
+
+            if let Some(allocator) = allocator {
+                // TLS hostnames are derived deterministically from the route key,
+                // so a planned route is considered successful once applied.
+                if let Some(_target) = merged_spec.target() {
+                    match allocator.allocate(&route_key, &merged_spec) {
+                        Ok(alloc) => endpoints.push(alloc.endpoint),
+                        Err(_) => unallocated.push(route_tmpl.name.clone()),
+                    }
+                } else {
+                    unallocated.push(route_tmpl.name.clone());
+                }
+            } else {
+                unallocated.push(route_tmpl.name.clone());
             }
+        }
+
+        if unallocated.is_empty() {
+            endpoints.sort_by(|a, b| (&a.name, &a.type_).cmp(&(&b.name, &b.type_)));
+            status.endpoints = endpoints;
+
+            apply_condition(
+                status,
+                Condition {
+                    type_: Self::KIND.to_string(),
+                    status: "True".to_string(),
+                    reason: "RoutesAllocated".to_string(),
+                    message: format!("{} proxy route(s) allocated", template.spec.routes.len()),
+                    last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                        Timestamp::now(),
+                    ),
+                    observed_generation: None,
+                },
+            );
+            return Ok(());
         }
 
         apply_condition(
@@ -143,8 +179,8 @@ impl Planner for ProxyRoutePlanner {
             Condition {
                 type_: Self::KIND.to_string(),
                 status: "Unknown".to_string(),
-                reason: "NoRoutesAllocated".to_string(),
-                message: "No proxy routes allocated for this instance".to_string(),
+                reason: "RoutesNotAllocated".to_string(),
+                message: format!("Proxy route(s) not allocated: {}", unallocated.join(", ")),
                 last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                     Timestamp::now(),
                 ),
@@ -202,7 +238,9 @@ pub fn build_merged_route_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::tests::{dummy_context, dummy_instance, dummy_resolved_template};
+    use crate::test_utils::tests::{
+        dummy_context, dummy_context_with_routes, dummy_instance, dummy_resolved_template,
+    };
     use k8s_common::crd::{
         CTFTemplateSpecRoute, RouteBackend, RouteSpec, RouteSpecPOW, RouteSpecTCP, RouteSpecTLS,
         RouteSpecTLSPatch,
@@ -307,5 +345,69 @@ mod tests {
                 prefix: Some("custom-prefix".into())
             })
         );
+    }
+
+    #[tokio::test]
+    async fn test_tls_route_sets_endpoint_and_marks_routes_allocated() {
+        use k8s_common::crd::{CTFTemplateSpecRoute, RouteSpecTLS};
+
+        let tls_route = CTFTemplateSpecRoute {
+            name: "web".to_string(),
+            spec: RouteSpec {
+                backend: RouteBackend {
+                    service: "web".into(),
+                    port: 80,
+                },
+                tls: Some(RouteSpecTLS {
+                    prefix: Some("web".into()),
+                }),
+                ..Default::default()
+            },
+        };
+        let (_store, ctx) = dummy_context_with_routes(vec![tls_route]);
+
+        let mut status = CTFInstanceStatus::default();
+        ProxyRoutePlanner::check_status(&dummy_instance("chal-1", None), &mut status, &ctx)
+            .unwrap();
+
+        assert!(
+            !status.endpoints.is_empty(),
+            "TLS endpoint must appear in instance status"
+        );
+        let tls_ep = status
+            .endpoints
+            .iter()
+            .find(|e| e.type_ == "tls")
+            .expect("TLS endpoint present");
+        assert_eq!(tls_ep.name, "web");
+
+        let cond = status
+            .conditions
+            .iter()
+            .find(|c| c.type_ == ProxyRoutePlanner::KIND)
+            .unwrap();
+        assert_eq!(cond.status, "True");
+        assert_eq!(cond.reason, "RoutesAllocated");
+    }
+
+    #[tokio::test]
+    async fn test_no_routes_marks_condition_true() {
+        let (_store, ctx) = dummy_context();
+
+        let mut status = CTFInstanceStatus::default();
+        ProxyRoutePlanner::check_status(&dummy_instance("chal-1", None), &mut status, &ctx)
+            .unwrap();
+
+        assert!(
+            status.endpoints.is_empty(),
+            "no routes means no endpoints"
+        );
+        let cond = status
+            .conditions
+            .iter()
+            .find(|c| c.type_ == ProxyRoutePlanner::KIND)
+            .unwrap();
+        assert_eq!(cond.status, "True");
+        assert_eq!(cond.reason, "RoutesAllocated");
     }
 }

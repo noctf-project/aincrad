@@ -256,10 +256,30 @@ pub mod tests {
         kube::runtime::reflector::Store<CTFTemplate>,
         Arc<crate::Context>,
     ) {
+        dummy_ctx(dummy_kube_client(), Vec::new())
+    }
+
+    /// Creates a dummy Context whose template includes the given routes.
+    pub fn dummy_context_with_routes(
+        routes: Vec<k8s_common::crd::CTFTemplateSpecRoute>,
+    ) -> (
+        kube::runtime::reflector::Store<CTFTemplate>,
+        Arc<crate::Context>,
+    ) {
+        dummy_ctx(dummy_kube_client(), routes)
+    }
+
+    /// Builds a dummy Context using a caller-provided kube client and template routes.
+    pub fn dummy_ctx(
+        client: kube::Client,
+        routes: Vec<k8s_common::crd::CTFTemplateSpecRoute>,
+    ) -> (
+        kube::runtime::reflector::Store<CTFTemplate>,
+        Arc<crate::Context>,
+    ) {
         use crate::routing::{PortsStore, RouteAllocator};
         use k8s_common::PortRange;
 
-        let client = dummy_kube_client();
         let (template_store, _) = kube::runtime::reflector::store();
         let ports = Arc::new(PortsStore::new(
             PortRange(20000..=20010),
@@ -297,7 +317,7 @@ pub mod tests {
                         ..Default::default()
                     },
                 }],
-                routes: vec![],
+                routes,
                 params: vec![],
                 ..Default::default()
             },
@@ -308,5 +328,131 @@ pub mod tests {
         }
 
         (template_store, Arc::new(ctx))
+    }
+
+    /// Returns a kube client that mirrors `dummy_kube_client` and records
+    /// "(method path)" for every request it serves.
+    pub fn recording_kube_client() -> (kube::Client, Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::sync::Mutex;
+        use tower::service_fn;
+
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_task = log.clone();
+
+        let config = kube::Config::new("https://127.0.0.1:6443".parse().unwrap());
+
+        let service = service_fn(move |req: axum::http::Request<kube::client::Body>| {
+            let log = log_task.clone();
+            async move {
+                log.lock()
+                    .unwrap()
+                    .push(format!("{} {}", req.method(), req.uri().path()));
+                respond_like_dummy(req.method(), req.uri().path())
+            }
+        });
+
+        let client = kube::Client::new(service, config.default_namespace);
+        (client, log)
+    }
+
+    fn respond_like_dummy(
+        method: &axum::http::Method,
+        path: &str,
+    ) -> Result<axum::http::Response<axum::body::Body>, std::convert::Infallible> {
+        let is_get = method == axum::http::Method::GET;
+
+        if is_get {
+            if path.contains("ctftemplates") {
+                let tmpl = serde_json::json!({
+                    "apiVersion": "aincrad.noctf.dev/v1",
+                    "kind": "CTFTemplate",
+                    "metadata": {
+                        "name": "whoami-template",
+                        "namespace": "default",
+                        "generation": 1
+                    },
+                    "spec": {
+                        "params": [],
+                        "pods": [],
+                        "routes": []
+                    }
+                });
+                let body_str = serde_json::to_string(&tmpl).unwrap();
+                return Ok(axum::http::Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body_str))
+                    .unwrap());
+            }
+
+            if path.ends_with("/replicasets")
+                || path.ends_with("/services")
+                || path.ends_with("/networkpolicies")
+                || path.ends_with("/ctfinstances")
+                || path.ends_with("/ctfproxyroutes")
+            {
+                let list = serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "List",
+                    "metadata": {},
+                    "items": []
+                });
+                let body_str = serde_json::to_string(&list).unwrap();
+                return Ok(axum::http::Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body_str))
+                    .unwrap());
+            }
+
+            let status = serde_json::json!({
+                "kind": "Status",
+                "apiVersion": "v1",
+                "status": "Failure",
+                "message": "not found",
+                "reason": "NotFound",
+                "code": 404
+            });
+            let body_str = serde_json::to_string(&status).unwrap();
+            Ok(axum::http::Response::builder()
+                .status(axum::http::StatusCode::NOT_FOUND)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body_str))
+                .unwrap())
+        } else {
+            let (api_version, kind) = if path.contains("networkpolicies") {
+                ("networking.k8s.io/v1", "NetworkPolicy")
+            } else if path.contains("replicasets") {
+                ("apps/v1", "ReplicaSet")
+            } else if path.contains("ctfproxyroutes") {
+                ("aincrad.noctf.dev/v1", "CTFProxyRoute")
+            } else if path.contains("ctfinstances") {
+                ("aincrad.noctf.dev/v1", "CTFInstance")
+            } else {
+                ("v1", "Service")
+            };
+
+            let mut body = serde_json::json!({
+                "apiVersion": api_version,
+                "kind": kind,
+                "metadata": {
+                    "name": "dummy",
+                    "namespace": "default"
+                }
+            });
+            if kind == "CTFInstance" {
+                body["spec"] = serde_json::json!({ "template": "whoami-template" });
+            } else if kind == "CTFProxyRoute" {
+                body["spec"] = serde_json::json!({
+                    "backend": "web.default.svc.cluster.local:80"
+                });
+            }
+            let body_str = serde_json::to_string(&body).unwrap();
+            Ok(axum::http::Response::builder()
+                .status(axum::http::StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body_str))
+                .unwrap())
+        }
     }
 }

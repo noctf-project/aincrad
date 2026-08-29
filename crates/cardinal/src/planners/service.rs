@@ -74,7 +74,7 @@ impl Planner for ServicePlanner {
                 type_: Self::KIND.to_string(),
                 status: "True".to_string(),
                 reason: "ResourceManaged".to_string(),
-                message: "Service managed by SSA reconciliation".to_string(),
+                message: "TODO: Sync status".to_string(),
                 last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                     Timestamp::now(),
                 ),

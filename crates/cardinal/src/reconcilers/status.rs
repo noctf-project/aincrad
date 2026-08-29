@@ -72,21 +72,21 @@ pub async fn reconcile(instance: &CTFInstance, ctx: &Context) -> Result<Readines
             )
             .await?;
 
-        Ok(Readiness::Ready)
-    } else {
-        // Don't stamp observed_generation — only set when fully Ready.
-        // Patch the full status so endpoint updates from check_status are preserved.
-        let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
-        instances
-            .patch_status(
-                name,
-                &kube::api::PatchParams::default(),
-                &kube::api::Patch::Merge(serde_json::json!({ "status": &status })),
-            )
-            .await?;
-
-        Ok(Readiness::NotReady)
+        return Ok(Readiness::Ready);
     }
+
+    // Don't stamp observed_generation, only set when fully Ready.
+    // Patch the full status so endpoint updates from check_status are preserved.
+    let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
+    instances
+        .patch_status(
+            name,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(serde_json::json!({ "status": &status })),
+        )
+        .await?;
+
+    Ok(Readiness::NotReady)
 }
 
 /// Reconciles child resource status conditions, propagating the first failure
@@ -152,10 +152,16 @@ fn evaluate_template_condition(instance: &CTFInstance, ctx: &Context) -> (Condit
 
     let template_gen = cached.template.metadata.generation;
 
-    // If sync is on, check that template generation is up to date
+    // If sync is on, check that the template is not newer than this instance's
+    // last observed state. The first time this instance sees a template, the number
+    // of the template generation becomes the observed template generation once it
+    // is reconciled, so an absent observed generation is treated as "in sync".
     if instance.spec.sync {
-        let observed_tmpl_gen = instance.status.as_ref().and_then(|s| s.template_generation);
-        if observed_tmpl_gen < template_gen {
+        let observed_tmpl_gen = instance.status.as_ref()
+            .and_then(|s| s.template_generation);
+        if let (Some(observed), Some(current)) = (observed_tmpl_gen, template_gen)
+            && observed < current
+        {
             return (
                 Condition {
                     type_: "Template".to_string(),
@@ -285,7 +291,9 @@ pub async fn reconcile_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::tests::{dummy_context, dummy_instance, dummy_kube_client};
+    use crate::test_utils::tests::{
+        dummy_context, dummy_context_with_routes, dummy_instance, dummy_kube_client,
+    };
     use k8s_common::crd::CTFInstanceStatusEndpoint;
 
     #[tokio::test]
@@ -296,6 +304,114 @@ mod tests {
 
         let res = reconcile(&instance, &ctx).await;
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_synced_instance_reaches_ready() {
+        use k8s_common::crd::{CTFTemplateSpecRoute, RouteBackend, RouteSpec, RouteSpecTCP};
+
+        let tcp_route = CTFTemplateSpecRoute {
+            name: "chal".to_string(),
+            spec: RouteSpec {
+                backend: RouteBackend {
+                    service: "web".into(),
+                    port: 80,
+                },
+                tcp: Some(RouteSpecTCP { port: Some(0) }),
+                ..Default::default()
+            },
+        };
+        let (_store, ctx) = dummy_context_with_routes(vec![tcp_route]);
+
+        let mut synced = dummy_instance("chal-1", None);
+        synced.spec.sync = true;
+        synced.metadata.generation = Some(1);
+        synced.status = Some(CTFInstanceStatus {
+            observed_generation: Some(1),
+            template_generation: None,
+            restarted_at: None,
+            conditions: vec![],
+            endpoints: vec![],
+        });
+
+        assert_eq!(
+            reconcile(&synced, &ctx).await.unwrap(),
+            Readiness::Ready,
+            "synced instance at current template generation must become Ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_synced_instance_returns_to_ready_after_template_bump() {
+        use k8s_common::crd::{CTFTemplateSpecRoute, RouteBackend, RouteSpec, RouteSpecTCP};
+
+        let tcp_route = CTFTemplateSpecRoute {
+            name: "chal".to_string(),
+            spec: RouteSpec {
+                backend: RouteBackend {
+                    service: "web".into(),
+                    port: 80,
+                },
+                tcp: Some(RouteSpecTCP { port: Some(0) }),
+                ..Default::default()
+            },
+        };
+        let (_store, ctx) = dummy_context_with_routes(vec![tcp_route.clone()]);
+
+        let mut synced = dummy_instance("chal-1", None);
+        synced.spec.sync = true;
+        synced.metadata.generation = Some(1);
+        synced.status = Some(CTFInstanceStatus {
+            observed_generation: Some(1),
+            template_generation: Some(1),
+            restarted_at: None,
+            conditions: vec![],
+            endpoints: vec![],
+        });
+        assert_eq!(reconcile(&synced, &ctx).await.unwrap(), Readiness::Ready);
+
+        let bump_tmpl = k8s_common::crd::CTFTemplate {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("whoami-template".into()),
+                namespace: Some("default".into()),
+                generation: Some(2),
+                ..Default::default()
+            },
+            spec: k8s_common::crd::CTFTemplateSpec {
+                routes: vec![tcp_route],
+                ..Default::default()
+            },
+            status: None,
+        };
+        ctx.template_cache.as_ref().unwrap().update(&bump_tmpl);
+
+        let mut bumped = synced.clone();
+        bumped.status = Some(CTFInstanceStatus {
+            observed_generation: Some(1),
+            template_generation: Some(1),
+            restarted_at: None,
+            conditions: vec![],
+            endpoints: vec![],
+        });
+        assert_eq!(
+            reconcile(&bumped, &ctx).await.unwrap(),
+            Readiness::NotReady,
+            "template bump surfaces as NotReady so children get re-applied"
+        );
+
+        let mut caught_up = bumped.clone();
+        caught_up.status = Some(CTFInstanceStatus {
+            observed_generation: Some(1),
+            template_generation: Some(2),
+            restarted_at: None,
+            conditions: vec![],
+            endpoints: vec![],
+        });
+        assert_eq!(
+            reconcile(&caught_up, &ctx).await.unwrap(),
+            Readiness::Ready,
+            "after the applied template generation is recorded, the instance returns to Ready"
+        );
     }
 
     #[tokio::test]

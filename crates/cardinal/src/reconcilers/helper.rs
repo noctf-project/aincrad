@@ -5,7 +5,7 @@ use kube::{
     Api, Resource,
     api::{ListParams, Patch, PatchParams},
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tracing::{info, warn};
 
 use crate::{
@@ -17,6 +17,26 @@ use crate::{
 };
 
 const PRUNE_CONCURRENCY_LIMIT: usize = 16;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PartialStatusTemplateGeneration {
+    pub template_generation: i64,
+}
+
+impl PartialStatusTemplateGeneration {
+    pub async fn apply(&self, client: kube::Client, name: &str, ns: &str) -> Result<(), Error> {
+        let instances: Api<CTFInstance> = Api::namespaced(client, ns);
+        instances
+            .patch_status(
+                name,
+                &kube::api::PatchParams::default(),
+                &kube::api::Patch::Merge(serde_json::json!({ "status": self })),
+            )
+            .await?;
+        Ok(())
+    }
+}
 
 /// Applies all planned child resources using Server-Side Apply and prunes orphans.
 pub async fn apply_planner<P: Planner>(
