@@ -246,6 +246,7 @@ pub mod tests {
                 params: vec![],
             },
             pod_patchers: Arc::new(std::collections::HashMap::new()),
+            route_patchers: Arc::new(std::collections::HashMap::new()),
             params_map: std::collections::BTreeMap::new(),
         }
     }

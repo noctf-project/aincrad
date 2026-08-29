@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use k8s_common::{
     ROUTE_LABEL,
     crd::{
@@ -46,6 +48,9 @@ impl Planner for ProxyRoutePlanner {
 
         let mut routes = Vec::new();
 
+        let mut context_map = BTreeMap::new();
+        context_map.insert("params".to_string(), &template.params_map);
+
         for route_tmpl in &template.spec.routes {
             let route_override = instance
                 .spec
@@ -53,7 +58,10 @@ impl Planner for ProxyRoutePlanner {
                 .iter()
                 .find(|r| r.name == route_tmpl.name);
 
-            let merged_spec = build_merged_route_spec(route_tmpl, route_override);
+            let policy = template.get_patched_route_policy(route_tmpl, &context_map)?;
+            let mut merged_spec = route_tmpl.clone();
+            merged_spec.policy = policy;
+            let merged_spec = build_merged_route_spec(&merged_spec, route_override);
             let route_key = RouteKey::new(ns, instance_name, &route_tmpl.name);
 
             let allocated: AllocatedRoute = allocator.allocate(&route_key, &merged_spec)?;
@@ -215,6 +223,7 @@ mod tests {
     use k8s_common::crd::{
         RouteBackend, RoutePolicySpec, RouteSpec, RouteSpecPOW, RouteSpecTCP, RouteSpecTLS,
     };
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_plan_proxy_routes_tcp_and_tls() {
@@ -312,6 +321,60 @@ mod tests {
             routes[0].metadata.owner_references.is_none(),
             "CTFProxyRoute must not reference a cross-namespace owner"
         );
+    }
+
+    #[tokio::test]
+    async fn test_plan_proxy_routes_patches_policy() {
+        use crate::planners::replicaset::ROUTE_POLICY_PATCH_BLACKLIST;
+        use crate::reconcilers::template::ResolvedTemplate;
+        use k8s_common::SpecPatcher;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        use serde_json::json;
+
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+
+        let patch: json_patch::Patch = serde_json::from_value(json!([
+            { "op": "add", "path": "/flag", "value": "{{ params.FLAG }}" }
+        ]))
+        .unwrap();
+        let patcher = SpecPatcher::new(&ROUTE_POLICY_PATCH_BLACKLIST, patch).unwrap();
+
+        let route = RouteSpec {
+            name: "web".into(),
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 80,
+            },
+            tls: Some(RouteSpecTLS {
+                prefix: Some("whoami".into()),
+            }),
+            ..Default::default()
+        };
+
+        let mut route_patchers = std::collections::HashMap::new();
+        route_patchers.insert("web".to_string(), Some(patcher));
+
+        let mut params_map = BTreeMap::new();
+        params_map.insert("FLAG".to_string(), "CTF{patched}".to_string());
+
+        let template = ResolvedTemplate {
+            metadata: ObjectMeta::default(),
+            spec: k8s_common::crd::CTFTemplateSpec {
+                routes: vec![route],
+                ..Default::default()
+            },
+            pod_patchers: Arc::new(std::collections::HashMap::new()),
+            route_patchers: Arc::new(route_patchers),
+            params_map,
+        };
+
+        let routes = ProxyRoutePlanner::plan(&instance, &template, &ctx).unwrap();
+        let tls_route = routes
+            .iter()
+            .find(|r| r.metadata.name.as_deref().unwrap().starts_with('r'))
+            .unwrap();
+        assert_eq!(tls_route.spec.policy.flag.as_deref(), Some("CTF{patched}"));
     }
 
     #[test]

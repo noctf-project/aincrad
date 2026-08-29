@@ -1,15 +1,14 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use k8s_common::{
-    SpecPatcher,
-    crd::{CTFTemplate, CTFTemplateSpecPod},
-};
+use globset::GlobSet;
+use k8s_common::{SpecPatcher, crd::CTFTemplate};
 use kube::runtime::reflector::Store;
 
-use crate::planners::replicaset::POD_PATCH_BLACKLIST;
+use crate::planners::replicaset::{POD_PATCH_BLACKLIST, ROUTE_POLICY_PATCH_BLACKLIST};
 
 pub type PodPatchersMap = Arc<HashMap<String, Option<SpecPatcher>>>;
+pub type RoutePatchersMap = Arc<HashMap<String, Option<SpecPatcher>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TemplateKey {
@@ -21,6 +20,7 @@ pub struct TemplateKey {
 pub struct CachedTemplateEntry {
     pub template: Arc<CTFTemplate>,
     pub pod_patchers: Result<PodPatchersMap, String>,
+    pub route_patchers: Result<RoutePatchersMap, String>,
 }
 
 #[derive(Clone)]
@@ -64,10 +64,26 @@ impl TemplateCache {
             return;
         }
 
-        let pod_patchers = compile_pod_patchers(&template.spec.pods);
+        let pod_patchers = compile_patchers(
+            template
+                .spec
+                .pods
+                .iter()
+                .map(|p| (p.name.clone(), p.patch_spec.clone())),
+            &POD_PATCH_BLACKLIST,
+        );
+        let route_patchers = compile_patchers(
+            template
+                .spec
+                .routes
+                .iter()
+                .map(|r| (r.name.clone(), r.patch_policy.clone())),
+            &ROUTE_POLICY_PATCH_BLACKLIST,
+        );
         let entry = CachedTemplateEntry {
             template: Arc::new(template.clone()),
             pod_patchers,
+            route_patchers,
         };
 
         let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
@@ -91,23 +107,27 @@ impl TemplateCache {
     }
 }
 
-pub fn compile_pod_patchers(pods: &[CTFTemplateSpecPod]) -> Result<PodPatchersMap, String> {
-    let mut pod_patchers = HashMap::new();
-    for pod in pods {
-        let patcher = if let Some(patch) = &pod.patch_spec {
-            Some(SpecPatcher::new(&POD_PATCH_BLACKLIST, patch.clone())?)
+fn compile_patchers(
+    entries: impl Iterator<Item = (String, Option<json_patch::Patch>)>,
+    blacklist: &GlobSet,
+) -> Result<Arc<HashMap<String, Option<SpecPatcher>>>, String> {
+    let mut patchers = HashMap::new();
+    for (name, patch) in entries {
+        let patcher = if let Some(patch) = patch {
+            Some(SpecPatcher::new(blacklist, patch)?)
         } else {
             None
         };
-        pod_patchers.insert(pod.name.clone(), patcher);
+        patchers.insert(name, patcher);
     }
-    Ok(Arc::new(pod_patchers))
+    Ok(Arc::new(patchers))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use k8s_common::crd::CTFTemplateSpec;
+    use k8s_common::crd::CTFTemplateSpecPod;
     use k8s_openapi::api::core::v1::{Container, PodSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::reflector::store;

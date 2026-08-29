@@ -31,6 +31,10 @@ pub static POD_PATCH_BLACKLIST: LazyLock<GlobSet> = LazyLock::new(|| {
     builder.build().expect("valid globset")
 });
 
+/// Blacklist enforced for route policy JSON patches. Empty: all policy fields are author-owned.
+pub static ROUTE_POLICY_PATCH_BLACKLIST: LazyLock<GlobSet> =
+    LazyLock::new(|| GlobSetBuilder::new().build().expect("valid globset"));
+
 pub struct ReplicaSetPlanner;
 
 impl Planner for ReplicaSetPlanner {
@@ -586,6 +590,7 @@ mod tests {
                 ..Default::default()
             },
             pod_patchers: Arc::new(pod_patchers),
+            route_patchers: Arc::new(std::collections::HashMap::new()),
             params_map: BTreeMap::new(),
         };
 

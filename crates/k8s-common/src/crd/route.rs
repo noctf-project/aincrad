@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::crd::util::KubeListKey;
+use crate::crd::util::{KubeListKey, json_patch_schema};
 
 fn clamp_u64<'de, D>(d: D) -> Result<u64, D::Error>
 where
@@ -107,6 +107,9 @@ pub struct RouteSpec {
     pub name: String,
     #[serde(default)]
     pub policy: RoutePolicySpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "json_patch_schema")]
+    pub patch_policy: Option<json_patch::Patch>,
     /// Target backend Kubernetes service name and port.
     pub backend: RouteBackend,
     /// TCP routing configuration (mutually exclusive with 'tls').
