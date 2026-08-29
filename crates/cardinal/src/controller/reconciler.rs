@@ -15,6 +15,7 @@ use kube::{
 use tracing::{error, info, instrument, warn};
 
 use crate::{Context, Error, reconcilers};
+use crate::cache::InstanceCache;
 
 /// Reconciles a single `CTFInstance` resource state.
 #[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
@@ -186,8 +187,8 @@ pub async fn run(
                         .unwrap_or("default");
                     let pod_name = labels.get(crate::utils::labels::POD_LABEL);
 
-                    if let (Some(inst), Some(pod)) = (instance_name, pod_name) {
-                        let route_key = crate::routing::RouteKey::new(instance_ns, inst, pod);
+                    if let (Some(inst), Some(route)) = (instance_name, pod_name) {
+                        let route_key = crate::routing::RouteKey::new(instance_ns, inst, route);
                         allocator.sync(&route_key, port);
                         count += 1;
                     }
@@ -245,8 +246,7 @@ pub async fn run(
     // Initialize in-memory CTFInstance reflector store cache for watches mapping
     let (instance_store, instance_writer) = store();
 
-    use crate::cache::InstanceCache;
-    let instance_cache = InstanceCache::new(instance_store.clone());
+    let instance_cache = InstanceCache::new();
     let instance_cache_task = instance_cache.clone();
 
     let client_init_done = client.clone();

@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use k8s_common::crd::{CTFInstance, CTFProxyRoute};
+use k8s_common::{
+    ROUTE_LABEL,
+    crd::{CTFInstance, CTFProxyRoute},
+};
 use kube::{
     Api, Resource,
     api::{ListParams, Patch, PatchParams},
@@ -271,7 +274,7 @@ pub async fn delete_proxy_routes_batch(
 
                     if let Some(labels) = route.metadata.labels.as_ref()
                         && let (Some(inst), Some(pod)) =
-                            (labels.get(INSTANCE_LABEL), labels.get(POD_LABEL))
+                            (labels.get(INSTANCE_LABEL), labels.get(ROUTE_LABEL))
                     {
                         let instance_ns = labels
                             .get(INSTANCE_NAMESPACE_LABEL)

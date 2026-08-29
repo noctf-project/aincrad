@@ -1,6 +1,9 @@
-use k8s_common::crd::{
-    CTFInstance, CTFInstanceSpecRouteOverride, CTFInstanceStatusEndpoint, CTFProxyRoute,
-    CTFProxyRouteSpec, CTFProxyRouteSpecPOW, RouteSpec,
+use k8s_common::{
+    ROUTE_LABEL,
+    crd::{
+        CTFInstance, CTFInstanceSpecRouteOverride, CTFInstanceStatusEndpoint, CTFProxyRoute,
+        CTFProxyRouteSpec, CTFProxyRouteSpecPOW, RouteSpec,
+    },
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use k8s_openapi::jiff::Timestamp;
@@ -10,9 +13,7 @@ use crate::{
     planners::Planner,
     reconcilers::template::ResolvedTemplate,
     routing::{AllocatedRoute, RouteKey},
-    utils::labels::{
-        INSTANCE_LABEL, INSTANCE_NAMESPACE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL,
-    },
+    utils::labels::{INSTANCE_LABEL, INSTANCE_NAMESPACE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE},
     utils::naming::resource_name,
 };
 
@@ -67,7 +68,7 @@ impl Planner for ProxyRoutePlanner {
                 MANAGED_BY_LABEL => MANAGED_BY_VALUE,
                 INSTANCE_LABEL => instance_name,
                 INSTANCE_NAMESPACE_LABEL => ns,
-                POD_LABEL => route_tmpl.name.as_str(),
+                ROUTE_LABEL => route_tmpl.name.as_str(),
             };
 
             let proxy_spec = CTFProxyRouteSpec {

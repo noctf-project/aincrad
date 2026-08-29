@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use k8s_common::crd::{CTFInstance, CTFTemplate};
-use kube::runtime::reflector::{ObjectRef, Store};
+use kube::runtime::reflector::ObjectRef;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InstanceKey {
@@ -19,20 +19,14 @@ struct Inner {
 
 #[derive(Clone)]
 pub struct InstanceCache {
-    store: Store<CTFInstance>,
     inner: Arc<Mutex<Inner>>,
 }
 
 impl InstanceCache {
-    pub fn new(store: Store<CTFInstance>) -> Self {
+    pub fn new() -> Self {
         Self {
-            store,
             inner: Arc::new(Mutex::new(Inner::default())),
         }
-    }
-
-    pub fn store(&self) -> &Store<CTFInstance> {
-        &self.store
     }
 
     pub fn update(&self, instance: &CTFInstance) {
@@ -126,12 +120,10 @@ mod tests {
     use super::*;
     use k8s_common::crd::{CTFInstanceSpec, CTFTemplateSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use kube::runtime::reflector::store;
 
     #[test]
     fn test_instance_cache_find_synced_instances() {
-        let (store, _writer) = store();
-        let cache = InstanceCache::new(store);
+        let cache = InstanceCache::new();
         let tmpl = CTFTemplate::new("whoami-template", CTFTemplateSpec::default());
 
         let inst_sync_true = CTFInstance {
@@ -193,8 +185,7 @@ mod tests {
 
     #[test]
     fn test_instance_cache_update_sync_flag_toggles() {
-        let (store, _writer) = store();
-        let cache = InstanceCache::new(store);
+        let cache = InstanceCache::new();
         let tmpl = CTFTemplate::new("whoami-template", CTFTemplateSpec::default());
 
         let mut inst = CTFInstance {
@@ -228,8 +219,7 @@ mod tests {
 
     #[test]
     fn test_instance_cache_deletion_timestamp_pruning() {
-        let (store, _writer) = store();
-        let cache = InstanceCache::new(store);
+        let cache = InstanceCache::new();
         let tmpl = CTFTemplate::new("whoami-template", CTFTemplateSpec::default());
 
         let mut inst = CTFInstance {
@@ -260,8 +250,7 @@ mod tests {
 
     #[test]
     fn test_instance_cache_template_change_migration() {
-        let (store, _writer) = store();
-        let cache = InstanceCache::new(store);
+        let cache = InstanceCache::new();
         let tmpl_a = CTFTemplate::new("tmpl-a", CTFTemplateSpec::default());
         let tmpl_b = CTFTemplate::new("tmpl-b", CTFTemplateSpec::default());
 
@@ -301,8 +290,7 @@ mod tests {
 
     #[test]
     fn test_instance_cache_indexes_unobserved_generation_instances() {
-        let (store, _writer) = store();
-        let cache = InstanceCache::new(store);
+        let cache = InstanceCache::new();
         let tmpl = CTFTemplate::new("whoami-template", CTFTemplateSpec::default());
 
         // Instance with sync=false, but observed_generation=None and generation=1 (unobserved failed/initial instance)
