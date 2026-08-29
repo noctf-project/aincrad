@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 pub mod labels;
 pub mod naming;
 pub mod ttl;
+pub mod versions;
 
 pub struct HashWriter<'a, D: sha2::digest::Update>(pub &'a mut D);
 impl<'a, D: sha2::digest::Update> io::Write for HashWriter<'a, D> {

@@ -139,21 +139,28 @@ pub mod prepare {
             ..
         } = flow;
 
-        // Evaluate every child condition without writing. Only when all are True
-        // and nothing has changed since the last apply can we skip reconciling.
-        let evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
-        if evaluation.is_ready() && is_observed(instance) {
-            info!(name, ns, "Instance ready, skipping reconciliation");
-            return Ok(Step::Finish(completed_action(flow)));
-        }
-        info!(name, ns, "Instance not ready, reconciling children");
-
         // Resolve the CTFTemplate referenced by instance.spec.template.
         let template = reconcilers::template::reconcile(instance, ctx).await?;
 
         // Reject overrides that name template entries which do not exist,
         // rather than silently ignoring them.
         crate::planners::validate_overrides(instance, &template)?;
+
+        // Evaluate every child condition without writing. Only when all are True,
+        // nothing has changed since the last apply, and the instance no longer
+        // requires an upgrade can we skip reconciling.
+        let evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
+        if evaluation.is_ready()
+            && is_observed(instance)
+            && !crate::utils::versions::requires_template_upgrade(
+                template.metadata.generation,
+                instance,
+            )
+        {
+            info!(name, ns, "Instance ready, skipping reconciliation");
+            return Ok(Step::Finish(completed_action(flow)));
+        }
+        info!(name, ns, "Instance not ready, reconciling children");
 
         // A non-numeric or non-positive minTemplateGeneration is rewritten to the
         // template's current generation, short-circuiting the reconcile.

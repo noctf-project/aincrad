@@ -34,17 +34,15 @@ impl Evaluation {
 /// status payload. Purely reads in-memory state and writes nothing to the API
 /// server, so it can be run before deciding whether to apply children.
 pub fn evaluate_status(instance: &CTFInstance, ctx: &Context) -> Result<Evaluation, Error> {
-    let mut evaluation = Evaluation::default();
-
-    let (template_condition, template_gen) = evaluate_template_condition(instance, ctx);
-    evaluation.conditions.push(template_condition);
+    let mut evaluation = Evaluation {
+        template_generation: current_template_generation(instance, ctx),
+        ..Default::default()
+    };
 
     fold_planner::<ReplicaSetPlanner>(instance, ctx, &mut evaluation)?;
     fold_planner::<NetworkPolicyPlanner>(instance, ctx, &mut evaluation)?;
     fold_planner::<ServicePlanner>(instance, ctx, &mut evaluation)?;
     fold_planner::<ProxyRoutePlanner>(instance, ctx, &mut evaluation)?;
-
-    evaluation.template_generation = template_gen;
 
     Ok(evaluation)
 }
@@ -124,92 +122,16 @@ pub async fn commit(
     Ok(())
 }
 
-/// Evaluates the "Template" condition and returns the current template generation.
-fn evaluate_template_condition(instance: &CTFInstance, ctx: &Context) -> (Condition, Option<i64>) {
+/// Resolves the current generation of the template referenced by the instance,
+/// if it is present in the in-memory template cache.
+fn current_template_generation(instance: &CTFInstance, ctx: &Context) -> Option<i64> {
     let tmpl_name = &instance.spec.template;
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
-    let entry = ctx
-        .template_cache
+    ctx.template_cache
         .as_ref()
-        .and_then(|cache| cache.get(ns, tmpl_name));
-
-    let Some(cached) = entry else {
-        return (
-            Condition {
-                type_: "Template".to_string(),
-                status: "False".to_string(),
-                reason: "TemplateNotFound".to_string(),
-                message: format!("Template \"{tmpl_name}\" not found"),
-                last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                    Timestamp::now(),
-                ),
-                observed_generation: None,
-            },
-            None,
-        );
-    };
-
-    let template_gen = cached.template.metadata.generation;
-
-    // If sync is on, check that the template is not newer than this instance's
-    // last observed state. The first time this instance sees a template, the number
-    // of the template generation becomes the observed template generation once it
-    // is reconciled, so an absent observed generation is treated as "in sync".
-    if instance.spec.sync {
-        let observed_tmpl_gen = instance.status.as_ref().and_then(|s| s.template_generation);
-        if let (Some(observed), Some(current)) = (observed_tmpl_gen, template_gen)
-            && observed < current
-        {
-            return (
-                Condition {
-                    type_: "Template".to_string(),
-                    status: "False".to_string(),
-                    reason: "TemplateOutOfSync".to_string(),
-                    message: format!(
-                        "Template gen {:?} is newer than observed gen {:?}",
-                        template_gen, observed_tmpl_gen
-                    ),
-                    last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                        Timestamp::now(),
-                    ),
-                    observed_generation: None,
-                },
-                template_gen,
-            );
-        }
-    }
-
-    // Check that pod patchers compiled successfully
-    if let Err(err) = &cached.pod_patchers {
-        return (
-            Condition {
-                type_: "Template".to_string(),
-                status: "False".to_string(),
-                reason: "TemplateBuildError".to_string(),
-                message: err.clone(),
-                last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                    Timestamp::now(),
-                ),
-                observed_generation: None,
-            },
-            template_gen,
-        );
-    }
-
-    (
-        Condition {
-            type_: "Template".to_string(),
-            status: "True".to_string(),
-            reason: "TemplateResolved".to_string(),
-            message: format!("Template gen {}", template_gen.unwrap_or(0)),
-            last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                Timestamp::now(),
-            ),
-            observed_generation: None,
-        },
-        template_gen,
-    )
+        .and_then(|cache| cache.get(ns, tmpl_name))
+        .and_then(|entry| entry.template.metadata.generation)
 }
 
 /// Updates CTFInstance status conditions to indicate reconciliation failure.
@@ -344,7 +266,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_evaluate_synced_instance_returns_to_ready_after_template_bump() {
+    async fn test_requires_upgrade_detects_template_bump() {
         use k8s_common::crd::{CTFTemplateSpecRoute, RouteBackend, RouteSpec, RouteSpecTCP};
 
         let tcp_route = CTFTemplateSpecRoute {
@@ -370,7 +292,12 @@ mod tests {
             conditions: vec![],
             resources: Default::default(),
         });
-        assert!(evaluate_status(&synced, &ctx).unwrap().is_ready());
+
+        let template_gen = current_template_generation(&synced, &ctx);
+        assert!(
+            !crate::utils::versions::requires_template_upgrade(template_gen, &synced),
+            "synced instance at the current template generation must not require an upgrade"
+        );
 
         let bump_tmpl = k8s_common::crd::CTFTemplate {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
@@ -387,20 +314,13 @@ mod tests {
         };
         ctx.template_cache.as_ref().unwrap().update(&bump_tmpl);
 
-        let mut bumped = synced.clone();
-        bumped.status = Some(CTFInstanceStatus {
-            observed_generation: Some(1),
-            template_generation: Some(1),
-            restarted_at: None,
-            conditions: vec![],
-            resources: Default::default(),
-        });
+        let template_gen = current_template_generation(&synced, &ctx);
         assert!(
-            !evaluate_status(&bumped, &ctx).unwrap().is_ready(),
-            "template bump surfaces as not ready so children get re-applied"
+            crate::utils::versions::requires_template_upgrade(template_gen, &synced),
+            "a template generation bump surfaces as an upgrade so children get re-applied"
         );
 
-        let mut caught_up = bumped.clone();
+        let mut caught_up = synced.clone();
         caught_up.status = Some(CTFInstanceStatus {
             observed_generation: Some(1),
             template_generation: Some(2),
@@ -408,9 +328,10 @@ mod tests {
             conditions: vec![],
             resources: Default::default(),
         });
+        let template_gen = current_template_generation(&caught_up, &ctx);
         assert!(
-            evaluate_status(&caught_up, &ctx).unwrap().is_ready(),
-            "after the applied template generation is recorded, the instance returns to ready"
+            !crate::utils::versions::requires_template_upgrade(template_gen, &caught_up),
+            "after the applied template generation is recorded, the upgrade is no longer required"
         );
     }
 

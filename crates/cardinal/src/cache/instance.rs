@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use k8s_common::crd::{CTFInstance, CTFTemplate};
-use kube::runtime::reflector::ObjectRef;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InstanceKey {
@@ -13,20 +12,18 @@ pub struct InstanceKey {
 
 #[derive(Default)]
 struct Inner {
-    index: BTreeMap<InstanceKey, ObjectRef<CTFInstance>>,
+    index: BTreeMap<InstanceKey, Arc<CTFInstance>>,
     instance_templates: HashMap<(String, String), String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct InstanceCache {
     inner: Arc<Mutex<Inner>>,
 }
 
 impl InstanceCache {
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Inner::default())),
-        }
+        Self::default()
     }
 
     pub fn update(&self, instance: &CTFInstance) {
@@ -34,15 +31,6 @@ impl InstanceCache {
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
         let inst_id = (ns.to_string(), name.to_string());
         let new_template = instance.spec.template.clone();
-
-        let observed_gen = instance.status.as_ref().and_then(|s| s.observed_generation);
-        let spec_gen = instance.metadata.generation;
-        let is_unobserved = match (observed_gen, spec_gen) {
-            (Some(o), Some(g)) => o != g,
-            (None, Some(_)) => true,
-            _ => false,
-        };
-        let needs_template_watch = instance.spec.sync || is_unobserved;
 
         let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -56,14 +44,13 @@ impl InstanceCache {
             lock.index.remove(&old_key);
         }
 
-        if needs_template_watch && instance.metadata.deletion_timestamp.is_none() {
-            let obj_ref = ObjectRef::from_obj(instance);
+        if instance.metadata.deletion_timestamp.is_none() {
             let key = InstanceKey {
                 namespace: ns.to_string(),
                 template: new_template.clone(),
                 instance: name.to_string(),
             };
-            lock.index.insert(key, obj_ref);
+            lock.index.insert(key, Arc::new(instance.clone()));
             lock.instance_templates.insert(inst_id, new_template);
         }
     }
@@ -97,7 +84,7 @@ impl InstanceCache {
         lock.instance_templates.clear();
     }
 
-    pub fn find_synced_instances(&self, template: &CTFTemplate) -> Vec<ObjectRef<CTFInstance>> {
+    pub fn instances_to_sync(&self, template: &CTFTemplate) -> Vec<Arc<CTFInstance>> {
         let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
         let tmpl_ns = template.metadata.namespace.as_deref().unwrap_or("default");
         let start_key = InstanceKey {
@@ -106,11 +93,14 @@ impl InstanceCache {
             instance: String::new(),
         };
 
+        let template_gen = template.metadata.generation;
+
         let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         lock.index
             .range(start_key..)
             .take_while(|(k, _)| k.namespace == tmpl_ns && k.template == tmpl_name)
             .map(|(_, val)| val.clone())
+            .filter(|inst| crate::utils::versions::requires_template_upgrade(template_gen, inst))
             .collect()
     }
 }
@@ -118,126 +108,107 @@ impl InstanceCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_common::crd::{CTFInstanceSpec, CTFTemplateSpec};
+    use k8s_common::crd::{CTFInstanceSpec, CTFInstanceStatus, CTFTemplateSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+    fn tmpl(name: &str, generation: i64) -> CTFTemplate {
+        CTFTemplate {
+            metadata: ObjectMeta {
+                name: Some(name.into()),
+                namespace: Some("default".into()),
+                generation: Some(generation),
+                ..Default::default()
+            },
+            spec: CTFTemplateSpec::default(),
+            status: None,
+        }
+    }
+
+    fn inst(name: &str, template: &str, sync: bool, observed: Option<i64>) -> CTFInstance {
+        CTFInstance {
+            metadata: ObjectMeta {
+                name: Some(name.into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: CTFInstanceSpec {
+                template: template.into(),
+                sync,
+                ..Default::default()
+            },
+            status: Some(CTFInstanceStatus {
+                template_generation: observed,
+                ..Default::default()
+            }),
+        }
+    }
 
     #[test]
     fn test_instance_cache_find_synced_instances() {
         let cache = InstanceCache::new();
-        let tmpl = CTFTemplate::new("whoami-template", CTFTemplateSpec::default());
+        let tmpl = tmpl("whoami-template", 2);
 
-        let inst_sync_true = CTFInstance {
-            metadata: ObjectMeta {
-                name: Some("inst-1".into()),
-                namespace: Some("default".into()),
-                ..Default::default()
-            },
-            spec: CTFInstanceSpec {
-                template: "whoami-template".into(),
-                sync: true,
-                ..Default::default()
-            },
-            status: None,
-        };
-
-        let inst_sync_false = CTFInstance {
-            metadata: ObjectMeta {
-                name: Some("inst-2".into()),
-                namespace: Some("default".into()),
-                ..Default::default()
-            },
-            spec: CTFInstanceSpec {
-                template: "whoami-template".into(),
-                sync: false,
-                ..Default::default()
-            },
-            status: None,
-        };
-
-        let inst_other_tmpl = CTFInstance {
-            metadata: ObjectMeta {
-                name: Some("inst-3".into()),
-                namespace: Some("default".into()),
-                ..Default::default()
-            },
-            spec: CTFInstanceSpec {
-                template: "other-template".into(),
-                sync: true,
-                ..Default::default()
-            },
-            status: None,
-        };
+        let inst_sync_true = inst("inst-1", "whoami-template", true, Some(1));
+        let inst_sync_false = inst("inst-2", "whoami-template", false, Some(1));
+        let inst_other_tmpl = inst("inst-3", "other-template", true, Some(1));
 
         cache.update(&inst_sync_true);
         cache.update(&inst_sync_false);
         cache.update(&inst_other_tmpl);
 
-        let matched = cache.find_synced_instances(&tmpl);
+        let matched = cache.instances_to_sync(&tmpl);
 
         assert_eq!(matched.len(), 1);
-        assert_eq!(matched[0].name, "inst-1");
-        assert_eq!(matched[0].namespace.as_deref(), Some("default"));
+        assert_eq!(matched[0].metadata.name.as_deref(), Some("inst-1"));
+        assert_eq!(matched[0].metadata.namespace.as_deref(), Some("default"));
 
         cache.remove(&inst_sync_true);
-        let matched_after_remove = cache.find_synced_instances(&tmpl);
+        let matched_after_remove = cache.instances_to_sync(&tmpl);
         assert_eq!(matched_after_remove.len(), 0);
     }
 
     #[test]
     fn test_instance_cache_update_sync_flag_toggles() {
         let cache = InstanceCache::new();
-        let tmpl = CTFTemplate::new("whoami-template", CTFTemplateSpec::default());
+        let tmpl = tmpl("whoami-template", 2);
 
-        let mut inst = CTFInstance {
-            metadata: ObjectMeta {
-                name: Some("inst-toggle".into()),
-                namespace: Some("default".into()),
-                ..Default::default()
-            },
-            spec: CTFInstanceSpec {
-                template: "whoami-template".into(),
-                sync: true,
-                ..Default::default()
-            },
-            status: None,
-        };
+        let mut inst = inst("inst-toggle", "whoami-template", true, Some(1));
 
-        // Initial add with sync = true
+        // Initial add with sync = true and stale template generation
         cache.update(&inst);
-        assert_eq!(cache.find_synced_instances(&tmpl).len(), 1);
+        assert_eq!(cache.instances_to_sync(&tmpl).len(), 1);
 
-        // Update with sync = false -> should be removed
+        // Update with sync = false -> filtered out of sync results
         inst.spec.sync = false;
         cache.update(&inst);
-        assert_eq!(cache.find_synced_instances(&tmpl).len(), 0);
+        assert_eq!(cache.instances_to_sync(&tmpl).len(), 0);
 
-        // Toggle sync back to true -> should be re-added
+        // Toggle sync back to true -> needs upgrade again
         inst.spec.sync = true;
         cache.update(&inst);
-        assert_eq!(cache.find_synced_instances(&tmpl).len(), 1);
+        assert_eq!(cache.instances_to_sync(&tmpl).len(), 1);
+    }
+
+    #[test]
+    fn test_instance_cache_skips_caught_up_synced_instances() {
+        let cache = InstanceCache::new();
+        let tmpl = tmpl("whoami-template", 2);
+
+        // Synced but already current: must not be returned for re-apply.
+        let caught_up = inst("inst-up-to-date", "whoami-template", true, Some(2));
+        cache.update(&caught_up);
+        assert_eq!(cache.instances_to_sync(&tmpl).len(), 0);
     }
 
     #[test]
     fn test_instance_cache_deletion_timestamp_pruning() {
         let cache = InstanceCache::new();
-        let tmpl = CTFTemplate::new("whoami-template", CTFTemplateSpec::default());
+        let tmpl = tmpl("whoami-template", 2);
 
-        let mut inst = CTFInstance {
-            metadata: ObjectMeta {
-                name: Some("inst-del".into()),
-                namespace: Some("default".into()),
-                ..Default::default()
-            },
-            spec: CTFInstanceSpec {
-                template: "whoami-template".into(),
-                sync: true,
-                ..Default::default()
-            },
-            status: None,
-        };
+        let mut inst = inst("inst-del", "whoami-template", true, Some(1));
 
         cache.update(&inst);
-        assert_eq!(cache.find_synced_instances(&tmpl).len(), 1);
+        assert_eq!(cache.instances_to_sync(&tmpl).len(), 1);
 
         // Mark for deletion -> should be pruned from cache
         inst.metadata.deletion_timestamp =
@@ -245,84 +216,66 @@ mod tests {
                 k8s_openapi::jiff::Timestamp::now(),
             ));
         cache.update(&inst);
-        assert_eq!(cache.find_synced_instances(&tmpl).len(), 0);
+        assert_eq!(cache.instances_to_sync(&tmpl).len(), 0);
     }
 
     #[test]
     fn test_instance_cache_template_change_migration() {
         let cache = InstanceCache::new();
-        let tmpl_a = CTFTemplate::new("tmpl-a", CTFTemplateSpec::default());
-        let tmpl_b = CTFTemplate::new("tmpl-b", CTFTemplateSpec::default());
+        let tmpl_a = tmpl("tmpl-a", 2);
+        let tmpl_b = tmpl("tmpl-b", 2);
 
-        let mut inst = CTFInstance {
-            metadata: ObjectMeta {
-                name: Some("inst-migrate".into()),
-                namespace: Some("default".into()),
-                ..Default::default()
-            },
-            spec: CTFInstanceSpec {
-                template: "tmpl-a".into(),
-                sync: true,
-                ..Default::default()
-            },
-            status: None,
-        };
+        let mut inst = inst("inst-migrate", "tmpl-a", true, Some(1));
 
         cache.update(&inst);
-        assert_eq!(cache.find_synced_instances(&tmpl_a).len(), 1);
-        assert_eq!(cache.find_synced_instances(&tmpl_b).len(), 0);
+        assert_eq!(cache.instances_to_sync(&tmpl_a).len(), 1);
+        assert_eq!(cache.instances_to_sync(&tmpl_b).len(), 0);
 
         // Update instance to reference tmpl-b
         inst.spec.template = "tmpl-b".into();
         cache.update(&inst);
 
-        assert_eq!(cache.find_synced_instances(&tmpl_b).len(), 1);
+        assert_eq!(cache.instances_to_sync(&tmpl_b).len(), 1);
         assert_eq!(
-            cache.find_synced_instances(&tmpl_a).len(),
+            cache.instances_to_sync(&tmpl_a).len(),
             0,
-            "Demonstrates bug: tmpl-a index entry was leaked and not purged on spec.template change"
+            "tmpl-a index entry must be purged on spec.template change"
         );
 
         // Explicit removal
         cache.remove(&inst);
-        assert_eq!(cache.find_synced_instances(&tmpl_b).len(), 0);
+        assert_eq!(cache.instances_to_sync(&tmpl_b).len(), 0);
     }
 
     #[test]
-    fn test_instance_cache_indexes_unobserved_generation_instances() {
+    fn test_instance_cache_synced_unobserved_instance_needs_catch_up() {
         let cache = InstanceCache::new();
-        let tmpl = CTFTemplate::new("whoami-template", CTFTemplateSpec::default());
+        let tmpl = tmpl("whoami-template", 1);
 
-        // Instance with sync=false, but observed_generation=None and generation=1 (unobserved failed/initial instance)
-        let mut inst = CTFInstance {
-            metadata: ObjectMeta {
-                name: Some("inst-failed".into()),
-                namespace: Some("default".into()),
-                generation: Some(1),
-                ..Default::default()
-            },
-            spec: CTFInstanceSpec {
-                template: "whoami-template".into(),
-                sync: false,
-                ..Default::default()
-            },
-            status: None,
-        };
+        // Synced instance that has never applied the template (template_generation
+        // absent) must be returned so its first apply happens.
+        let inst_fresh = inst("inst-fresh", "whoami-template", true, None);
+        cache.update(&inst_fresh);
+        assert_eq!(cache.instances_to_sync(&tmpl).len(), 1);
 
-        // Should be indexed because observed_generation (None) != generation (1)
-        cache.update(&inst);
-        assert_eq!(cache.find_synced_instances(&tmpl).len(), 1);
-
-        // After successful reconciliation, observed_generation becomes Some(1)
-        inst.status = Some(k8s_common::crd::CTFInstanceStatus {
-            observed_generation: Some(1),
-            conditions: vec![],
-            resources: Default::default(),
+        // After a successful apply, template_generation is caught up and it drops out.
+        let mut inst_done = inst_fresh.clone();
+        inst_done.status = Some(CTFInstanceStatus {
+            template_generation: Some(1),
             ..Default::default()
         });
-        cache.update(&inst);
+        cache.update(&inst_done);
+        assert_eq!(cache.instances_to_sync(&tmpl).len(), 0);
+    }
 
-        // Because sync=false and observed_generation == generation, it should be removed from template watch index
-        assert_eq!(cache.find_synced_instances(&tmpl).len(), 0);
+    #[test]
+    fn test_instance_cache_non_synced_not_returned_for_sync() {
+        let cache = InstanceCache::new();
+        let tmpl = tmpl("whoami-template", 2);
+
+        // Non-synced instances never track the template, even if stale.
+        let non_synced = inst("inst-static", "whoami-template", false, Some(1));
+        cache.update(&non_synced);
+        assert_eq!(cache.instances_to_sync(&tmpl).len(), 0);
     }
 }

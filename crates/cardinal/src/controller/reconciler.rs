@@ -14,8 +14,8 @@ use kube::{
 };
 use tracing::{error, info, instrument, warn};
 
-use crate::{Context, Error, reconcilers};
 use crate::cache::InstanceCache;
+use crate::{Context, Error, reconcilers};
 
 /// Reconciles a single `CTFInstance` resource state.
 #[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
@@ -312,7 +312,11 @@ pub async fn run(
                     template_name = tmpl_name,
                     "CTFTemplate updated, evaluating synced CTFInstances to retrigger"
                 );
-                instance_cache.find_synced_instances(&template)
+                instance_cache
+                    .instances_to_sync(&template)
+                    .into_iter()
+                    .map(|inst| ObjectRef::from_obj(&*inst))
+                    .collect::<Vec<_>>()
             })
             .run(reconcile, error_policy, context)
             .for_each(|res| async {
