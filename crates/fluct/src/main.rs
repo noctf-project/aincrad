@@ -17,6 +17,7 @@ mod store;
 use crate::{
     config::{ServiceConfig, ServiceContext},
     services::routes::RoutesService,
+    store::resolver::{Resolver, ResolverExpiryPolicy},
 };
 
 #[tokio::main]
@@ -57,6 +58,7 @@ pub async fn run(config: ServiceConfig) -> Result<(), Error> {
 
     let service_context = Arc::new(ServiceContext {
         config,
+        resolver: Resolver::new(1000, ResolverExpiryPolicy::default()),
         routes_service,
         shutdown: shutdown.clone(),
     });

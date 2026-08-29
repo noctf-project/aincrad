@@ -128,7 +128,8 @@ impl Handler {
 
         let backend_addr = &spec.backend;
         debug!("Connecting to backend {}", backend_addr);
-        let mut socket = TcpStream::connect(backend_addr).await?;
+        let addr = self.service.resolver.resolve(backend_addr).await?;
+        let mut socket = TcpStream::connect(addr).await?;
         let (b_rx, mut b_tx) = socket.split();
         let mut b_rx = BufReader::with_capacity(BUF_SIZE, b_rx);
         if spec.flag.is_some() {
@@ -250,6 +251,7 @@ mod tests {
     use super::*;
     use crate::config::{PortRange, ServiceConfig};
     use crate::services::routes::RoutesService;
+    use crate::store::resolver::{Resolver, ResolverExpiryPolicy};
     use chrono::{Duration as ChronoDuration, Utc};
     use k8s_common::crd::{CTFProxyRouteSpec, CTFProxyRouteSpecPOW};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -270,6 +272,7 @@ mod tests {
                 system_namespace: None,
                 tproxy_port: None,
             },
+            resolver: Resolver::new(1000, ResolverExpiryPolicy::default()),
             routes_service: RoutesService::new(
                 client.clone(),
                 vec![PortRange(20000..=20999), PortRange(30000..=30999)],

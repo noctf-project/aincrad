@@ -7,10 +7,11 @@ use tokio_util::sync::CancellationToken;
 
 use fluct::Error;
 
-use crate::services::routes::RoutesService;
+use crate::{services::routes::RoutesService, store::resolver::Resolver};
 
 pub struct ServiceContext {
     pub config: ServiceConfig,
+    pub resolver: Resolver,
     pub routes_service: RoutesService,
     pub shutdown: CancellationToken,
 }
