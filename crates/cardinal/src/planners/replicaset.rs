@@ -3,17 +3,18 @@ use std::fmt::Write;
 use std::sync::LazyLock;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use k8s_common::crd::{CTFInstance, CTFTemplateSpecPod};
+use k8s_common::crd::{CTFInstance, CTFInstanceStatus, CTFTemplateSpecPod};
 use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetSpec};
 use k8s_openapi::api::core::v1::{PodSpec, PodTemplateSpec};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector, ObjectMeta};
+use k8s_openapi::jiff::Timestamp;
 use sha2::{Digest, Sha256};
 
 use crate::utils::HashWriter;
 use crate::utils::naming::resource_name;
 use crate::{
-    Error, btreemap,
-    planners::{Planner, set_owner_ref},
+    Context, Error, btreemap,
+    planners::{Planner, apply_condition, set_owner_ref},
     reconcilers::template::ResolvedTemplate,
     utils::labels::{
         INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL, RESTARTED_AT_ANNOTATION,
@@ -36,7 +37,11 @@ impl Planner for ReplicaSetPlanner {
     const KIND: &'static str = "ReplicaSet";
     type Resource = ReplicaSet;
 
-    fn plan(instance: &CTFInstance, template: &ResolvedTemplate) -> Result<Vec<ReplicaSet>, Error> {
+    fn plan(
+        instance: &CTFInstance,
+        template: &ResolvedTemplate,
+        _ctx: &Context,
+    ) -> Result<Vec<ReplicaSet>, Error> {
         let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
@@ -122,9 +127,30 @@ impl Planner for ReplicaSetPlanner {
 
         Ok(desired)
     }
+
+    fn check_status(
+        _instance: &CTFInstance,
+        status: &mut CTFInstanceStatus,
+        _ctx: &Context,
+    ) -> Result<(), Error> {
+        // TODO: Query ReplicaSet cache to verify ready_replicas >= desired_replicas
+        apply_condition(
+            status,
+            Condition {
+                type_: Self::KIND.to_string(),
+                status: "True".to_string(),
+                reason: "ResourceManaged".to_string(),
+                message: "ReplicaSet managed by SSA reconciliation".to_string(),
+                last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    Timestamp::now(),
+                ),
+                observed_generation: None,
+            },
+        );
+        Ok(())
+    }
 }
 
-/// Applies secure pod defaults for unset fields in CTF challenge workloads.
 fn apply_pod_defaults(pod_spec: &mut PodSpec) {
     if pod_spec.automount_service_account_token.is_none() {
         pod_spec.automount_service_account_token = Some(false);
@@ -260,12 +286,13 @@ mod tests {
         assert_eq!(pod_spec.containers[0].name, "web");
     }
 
-    #[test]
-    fn test_plan_replicasets() {
+    #[tokio::test]
+    async fn test_plan_replicasets() {
         let instance = dummy_instance("chal-1", None);
         let template = dummy_resolved_template(1);
+        let (_store, _ctx) = crate::test_utils::tests::dummy_context();
 
-        let desired = ReplicaSetPlanner::plan(&instance, &template).unwrap();
+        let desired = ReplicaSetPlanner::plan(&instance, &template, &_ctx).unwrap();
         assert_eq!(desired.len(), 1);
         let rs = &desired[0];
         assert!(
@@ -278,8 +305,8 @@ mod tests {
         assert_eq!(rs.metadata.owner_references.as_ref().unwrap().len(), 1);
     }
 
-    #[test]
-    fn test_plan_replicasets_restarted_at_changes_name() {
+    #[tokio::test]
+    async fn test_plan_replicasets_restarted_at_changes_name() {
         let mut instance1 = dummy_instance("chal-1", None);
         let mut instance2 = dummy_instance("chal-1", None);
 
@@ -302,9 +329,10 @@ mod tests {
         );
 
         let template = dummy_resolved_template(1);
+        let (_store, _ctx) = crate::test_utils::tests::dummy_context();
 
-        let desired1 = ReplicaSetPlanner::plan(&instance1, &template).unwrap();
-        let desired2 = ReplicaSetPlanner::plan(&instance2, &template).unwrap();
+        let desired1 = ReplicaSetPlanner::plan(&instance1, &template, &_ctx).unwrap();
+        let desired2 = ReplicaSetPlanner::plan(&instance2, &template, &_ctx).unwrap();
 
         assert_ne!(desired1[0].metadata.name, desired2[0].metadata.name);
     }
@@ -346,8 +374,8 @@ mod tests {
         assert_eq!(custom_pod_spec.termination_grace_period_seconds, Some(30));
     }
 
-    #[test]
-    fn test_plan_replicasets_with_services_context() {
+    #[tokio::test]
+    async fn test_plan_replicasets_with_services_context() {
         use k8s_common::patcher::SpecPatcher;
         use serde_json::json;
         use std::collections::HashMap;
@@ -401,7 +429,8 @@ mod tests {
             params_map: BTreeMap::new(),
         };
 
-        let desired = ReplicaSetPlanner::plan(&instance, &template).unwrap();
+        let (_store, _ctx) = crate::test_utils::tests::dummy_context();
+        let desired = ReplicaSetPlanner::plan(&instance, &template, &_ctx).unwrap();
         let web_rs = desired
             .iter()
             .find(|rs| {

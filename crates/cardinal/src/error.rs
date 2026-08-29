@@ -26,6 +26,13 @@ pub enum Error {
         source: Box<kube::Error>,
     },
 
+    #[error("Status reconciliation failed for {kind}: {source}")]
+    StatusReconciliationError {
+        kind: String,
+        #[source]
+        source: Box<Error>,
+    },
+
     #[error("{0}")]
     Custom(String),
 }

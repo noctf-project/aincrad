@@ -149,6 +149,14 @@ impl Inner {
         self.bindings[port as usize].clone()
     }
 
+    fn instance_routes(&self, namespace: &str, instance: &str) -> Vec<(RouteKey, u16)> {
+        self.mappings
+            .iter()
+            .filter(|(k, _)| k.namespace == namespace && k.instance == instance)
+            .map(|(k, &p)| (k.clone(), p))
+            .collect()
+    }
+
     fn active_ports(&self) -> Vec<u16> {
         self.mappings.values().copied().collect()
     }
@@ -224,6 +232,12 @@ impl PortsStore {
             .read()
             .expect(LOCK_POISONED_ERROR)
             .get_route(port)
+    }
+
+    /// Returns all (RouteKey, port) pairs for a given namespace and instance.
+    pub fn instance_routes(&self, namespace: &str, instance: &str) -> Vec<(RouteKey, u16)> {
+        let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
+        inner.instance_routes(namespace, instance)
     }
 
     /// Returns a list of all currently allocated ports.
@@ -440,5 +454,22 @@ mod tests {
         assert_eq!(store.get_port(&k2), None);
         assert_eq!(store.get_port(&k3), Some(p3));
         assert_eq!(store.active_ports(), vec![p3]);
+    }
+
+    #[test]
+    fn test_instance_routes() {
+        let store = make_store();
+        let k1 = RouteKey::new("default", "chal-1", "web");
+        let k2 = RouteKey::new("default", "chal-1", "pwn");
+        let k3 = RouteKey::new("default", "chal-2", "web");
+
+        store.allocate(&k1, 20001).unwrap();
+        store.allocate(&k2, 0).unwrap();
+        store.allocate(&k3, 20002).unwrap();
+
+        let routes = store.instance_routes("default", "chal-1");
+        assert_eq!(routes.len(), 2);
+        assert!(routes.iter().any(|(k, p)| k.route == "web" && *p == 20001));
+        assert!(routes.iter().any(|(k, _)| k.route == "pwn"));
     }
 }

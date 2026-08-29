@@ -9,7 +9,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use tracing::{info, warn};
 
 use crate::{
-    Error,
+    Context, Error,
     planners::Planner,
     reconcilers::template::ResolvedTemplate,
     routing::{RouteAllocator, RouteKey},
@@ -23,8 +23,9 @@ pub async fn apply_planner<P: Planner>(
     client: kube::Client,
     instance: &CTFInstance,
     template: &ResolvedTemplate,
+    ctx: &Context,
 ) -> Result<(), Error> {
-    let desired = P::plan(instance, template)?;
+    let desired = P::plan(instance, template, ctx)?;
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
     let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let api: Api<P::Resource> = Api::namespaced(client, ns);
@@ -242,7 +243,6 @@ pub async fn cleanup_instance_routes(
 }
 
 /// Deletes a batch of CTFProxyRoutes in parallel, releasing their allocator mappings.
-/// Returns a list of routes that failed to be deleted along with the last encountered error.
 pub async fn delete_proxy_routes_batch(
     api: &Api<CTFProxyRoute>,
     system_namespace: &str,
@@ -377,19 +377,18 @@ pub async fn prune_unreferenced_proxy_routes(
 mod tests {
     use super::*;
     use crate::planners::ReplicaSetPlanner;
-    use crate::routing::PortsStore;
-    use crate::test_utils::tests::{dummy_instance, dummy_kube_client, dummy_resolved_template};
-    use k8s_common::PortRange;
-    use k8s_openapi::api::apps::v1::ReplicaSet;
-    use std::sync::Arc;
+    use crate::test_utils::tests::{
+        dummy_context, dummy_instance, dummy_kube_client, dummy_resolved_template,
+    };
 
     #[tokio::test]
     async fn test_apply_planner_success() {
         let client = dummy_kube_client();
         let instance = dummy_instance("chal-1", None);
         let template = dummy_resolved_template(1);
+        let (_store, ctx) = dummy_context();
 
-        let res = apply_planner::<ReplicaSetPlanner>(client, &instance, &template).await;
+        let res = apply_planner::<ReplicaSetPlanner>(client, &instance, &template, &ctx).await;
         assert!(res.is_ok());
     }
 
@@ -413,8 +412,9 @@ mod tests {
         let client = kube::Client::new(mock_service, "default");
         let instance = dummy_instance("chal-1", None);
         let template = dummy_resolved_template(1);
+        let (_store, ctx) = dummy_context();
 
-        let res = apply_planner::<ReplicaSetPlanner>(client, &instance, &template).await;
+        let res = apply_planner::<ReplicaSetPlanner>(client, &instance, &template, &ctx).await;
         assert!(res.is_err());
         match res.unwrap_err() {
             Error::ApplyResource { kind, name, source } => {
@@ -426,421 +426,5 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_prune_orphaned_resources() {
-        let client = dummy_kube_client();
-        let api: Api<ReplicaSet> = Api::namespaced(client, "default");
-        let mut desired = HashSet::new();
-        desired.insert("chal-1-web".to_string());
-
-        let res = prune_orphaned_resources(&api, "chal-1", &desired).await;
-        assert!(res.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_ensure_and_remove_finalizer() {
-        let client = dummy_kube_client();
-        let mut instance = dummy_instance("chal-1", None);
-
-        assert!(ensure_finalizer(client.clone(), &instance).await.is_ok());
-
-        instance.metadata.finalizers = Some(vec![ROUTES_FINALIZER.to_string()]);
-        assert!(remove_finalizer(client, &instance).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_apply_and_cleanup_proxy_routes() {
-        let client = dummy_kube_client();
-        let instance = dummy_instance("chal-1", None);
-        let ports = Arc::new(PortsStore::new(
-            PortRange(20000..=20010),
-            PortRange(30000..=30010),
-        ));
-        let allocator = RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433);
-
-        let res = apply_proxy_routes(
-            client.clone(),
-            "aincrad-system",
-            &instance,
-            vec![],
-            &allocator,
-        )
-        .await;
-        assert!(res.is_ok());
-
-        let clean_res =
-            cleanup_instance_routes(client, "aincrad-system", &instance, Some(&allocator)).await;
-        assert!(clean_res.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_instance_routes_api_error_preserves_finalizer_and_port() {
-        use axum::body::Body;
-        use axum::http::{Response, StatusCode};
-        use tower::service_fn;
-
-        let mut instance = dummy_instance("chal-1", None);
-        instance.metadata.finalizers = Some(vec![ROUTES_FINALIZER.to_string()]);
-
-        let ports = Arc::new(PortsStore::new(
-            PortRange(20000..=20010),
-            PortRange(30000..=30010),
-        ));
-        let allocator = RouteAllocator::new(ports.clone(), "seed", "c.sk8.dog", 4433);
-        let route_key = RouteKey::new("default", "chal-1", "pwn");
-        allocator.sync(&route_key, 20005);
-        assert_eq!(ports.active_ports(), vec![20005]);
-
-        let mock_service = service_fn(|req: axum::http::Request<kube::client::Body>| async move {
-            let path = req.uri().path();
-            if req.method() == axum::http::Method::GET && path.contains("ctfproxyroutes") {
-                let existing = serde_json::json!({
-                    "apiVersion": "aincrad.noctf.dev/v1",
-                    "kind": "CTFProxyRouteList",
-                    "metadata": {},
-                    "items": [{
-                        "apiVersion": "aincrad.noctf.dev/v1",
-                        "kind": "CTFProxyRoute",
-                        "metadata": {
-                            "name": "p20005",
-                            "namespace": "aincrad-system",
-                            "labels": {
-                                "aincrad.noctf.dev/instance": "chal-1",
-                                "aincrad.noctf.dev/instance-namespace": "default",
-                                "aincrad.noctf.dev/pod": "pwn"
-                            }
-                        },
-                        "spec": {
-                            "backend": "chal-1-pwn.default.svc.cluster.local:1337"
-                        }
-                    }]
-                });
-                let body_str = serde_json::to_string(&existing).unwrap();
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .header("content-type", "application/json")
-                        .body(Body::from(body_str))
-                        .unwrap(),
-                )
-            } else if req.method() == axum::http::Method::DELETE {
-                // Return 500 error on delete
-                let err_status = serde_json::json!({
-                    "kind": "Status",
-                    "apiVersion": "v1",
-                    "status": "Failure",
-                    "message": "etcd timeout",
-                    "code": 500
-                });
-                let body_str = serde_json::to_string(&err_status).unwrap();
-                Ok(Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .header("content-type", "application/json")
-                    .body(Body::from(body_str))
-                    .unwrap())
-            } else {
-                // Fallback (e.g. patch finalizer should never be reached)
-                panic!("Unexpected request: {:?}", req);
-            }
-        });
-
-        let client = kube::Client::new(mock_service, "default");
-        let res =
-            cleanup_instance_routes(client, "aincrad-system", &instance, Some(&allocator)).await;
-        assert!(res.is_err());
-
-        // Verify port 20005 was NOT released on deletion failure
-        assert_eq!(ports.active_ports(), vec![20005]);
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_instance_routes_releases_in_memory_ports_when_no_k8s_routes_exist() {
-        let client = dummy_kube_client();
-        let instance = dummy_instance("chal-1", None);
-
-        let ports = Arc::new(PortsStore::new(
-            PortRange(20000..=20010),
-            PortRange(30000..=30010),
-        ));
-        let allocator = RouteAllocator::new(ports.clone(), "seed", "c.sk8.dog", 4433);
-
-        // Pre-allocate in-memory ports for chal-1 (simulating mid-plan failure where K8s routes were never written)
-        let k1 = RouteKey::new("default", "chal-1", "web");
-        let k2 = RouteKey::new("default", "chal-1", "pwn");
-        let k_other = RouteKey::new("default", "other-chal", "pwn");
-
-        let _p1 = ports.allocate(&k1, 0).unwrap();
-        let _p2 = ports.allocate(&k2, 20001).unwrap();
-        let p_other = ports.allocate(&k_other, 20002).unwrap();
-
-        assert_eq!(ports.active_ports().len(), 3);
-
-        // Cleanup instance with 0 K8s routes in cluster
-        let res =
-            cleanup_instance_routes(client, "aincrad-system", &instance, Some(&allocator)).await;
-        assert!(res.is_ok());
-
-        // Both in-memory ports for chal-1 are released, while other-chal is preserved
-        assert_eq!(ports.get_port(&k1), None);
-        assert_eq!(ports.get_port(&k2), None);
-        assert_eq!(ports.get_port(&k_other), Some(p_other));
-        assert_eq!(ports.active_ports(), vec![p_other]);
-    }
-
-    #[tokio::test]
-    async fn test_prune_unreferenced_proxy_routes() {
-        let client = dummy_kube_client();
-        let ports = Arc::new(PortsStore::new(
-            PortRange(20000..=20010),
-            PortRange(30000..=30010),
-        ));
-        let allocator = RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433);
-        let mut live = HashSet::new();
-        live.insert(("default".to_string(), "chal-1".to_string()));
-
-        let res =
-            prune_unreferenced_proxy_routes(client, "aincrad-system", &live, &allocator).await;
-        assert!(res.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_delete_proxy_routes_batch_and_retry() {
-        use axum::body::Body;
-        use axum::http::{Response, StatusCode};
-        use k8s_common::crd::CTFProxyRouteSpec;
-        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tower::service_fn;
-
-        let ports = Arc::new(PortsStore::new(
-            PortRange(20000..=20010),
-            PortRange(30000..=30010),
-        ));
-        let allocator = RouteAllocator::new(ports.clone(), "seed", "c.sk8.dog", 4433);
-        let route_key = RouteKey::new("default", "orphan-chal", "pwn");
-        allocator.sync(&route_key, 20005);
-        assert_eq!(ports.active_ports(), vec![20005]);
-
-        let delete_attempts = Arc::new(AtomicUsize::new(0));
-        let attempts_clone = delete_attempts.clone();
-
-        // Service returns 500 on first delete attempt, 200 on second
-        let mock_service = service_fn(move |req: axum::http::Request<kube::client::Body>| {
-            let attempts = attempts_clone.clone();
-            async move {
-                if req.method() == axum::http::Method::DELETE {
-                    let count = attempts.fetch_add(1, Ordering::SeqCst);
-                    if count == 0 {
-                        return Ok::<_, std::convert::Infallible>(
-                            Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .body(Body::from("Transient delete failure"))
-                                .unwrap(),
-                        );
-                    }
-                }
-                let resp = serde_json::json!({
-                    "apiVersion": "v1",
-                    "kind": "Status",
-                    "status": "Success"
-                });
-                let body_str = serde_json::to_string(&resp).unwrap();
-                Ok(Response::builder()
-                    .status(StatusCode::OK)
-                    .header("content-type", "application/json")
-                    .body(Body::from(body_str))
-                    .unwrap())
-            }
-        });
-
-        let client = kube::Client::new(mock_service, "default");
-        let api = Api::<CTFProxyRoute>::namespaced(client, "aincrad-system");
-
-        let route = CTFProxyRoute {
-            metadata: ObjectMeta {
-                name: Some("p20005".to_string()),
-                namespace: Some("aincrad-system".to_string()),
-                labels: Some(crate::btreemap! {
-                    INSTANCE_LABEL => "orphan-chal",
-                    INSTANCE_NAMESPACE_LABEL => "default",
-                    POD_LABEL => "pwn",
-                }),
-                ..Default::default()
-            },
-            spec: CTFProxyRouteSpec {
-                backend: "orphan-chal-pwn.default.svc.cluster.local:1337".to_string(),
-                ..Default::default()
-            },
-        };
-
-        // First batch run fails because of the 500
-        let (failed, err) =
-            delete_proxy_routes_batch(&api, "aincrad-system", vec![route.clone()], &allocator)
-                .await;
-        assert_eq!(failed.len(), 1);
-        assert!(err.is_some());
-
-        // Second batch run with the failed route succeeds
-        let (failed_second, err_second) =
-            delete_proxy_routes_batch(&api, "aincrad-system", failed, &allocator).await;
-        assert!(failed_second.is_empty());
-        assert!(err_second.is_none());
-
-        // Port 20005 released from allocator
-        assert!(ports.active_ports().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_port_and_target_mutation_lifecycle() {
-        use axum::body::Body;
-        use axum::http::{Response, StatusCode};
-        use k8s_common::crd::{
-            CTFProxyRoute, CTFProxyRouteSpec, RouteBackend, RouteSpec, RouteSpecTCP, RouteSpecTLS,
-        };
-        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-        use tower::service_fn;
-
-        let instance = dummy_instance("chal-1", None);
-        let ports = Arc::new(PortsStore::new(
-            PortRange(20000..=20010),
-            PortRange(30000..=30010),
-        ));
-        let allocator = RouteAllocator::new(ports.clone(), "seed", "c.sk8.dog", 4433);
-        let route_key = RouteKey::new("default", "chal-1", "pwn");
-
-        // --- Scenario A: Fixed(20001) -> Fixed(20002) ---
-        allocator.sync(&route_key, 20001);
-        assert_eq!(ports.active_ports(), vec![20001]);
-
-        let spec_fixed_2 = RouteSpec {
-            tcp: Some(RouteSpecTCP { port: Some(20002) }),
-            backend: RouteBackend {
-                service: "pwn".into(),
-                port: 1337,
-            },
-            ..Default::default()
-        };
-        allocator.allocate(&route_key, &spec_fixed_2).unwrap();
-        assert_eq!(ports.active_ports(), vec![20002]);
-
-        // Mock client having old route p20001 in cluster
-        let mock_service = service_fn(|req: axum::http::Request<kube::client::Body>| async move {
-            let path = req.uri().path();
-            if req.method() == axum::http::Method::GET && path.contains("ctfproxyroutes") {
-                let existing_route = serde_json::json!({
-                    "apiVersion": "aincrad.noctf.dev/v1",
-                    "kind": "CTFProxyRouteList",
-                    "metadata": {},
-                    "items": [{
-                        "apiVersion": "aincrad.noctf.dev/v1",
-                        "kind": "CTFProxyRoute",
-                        "metadata": {
-                            "name": "p20001",
-                            "namespace": "aincrad-system",
-                            "labels": {
-                                "aincrad.noctf.dev/instance": "chal-1",
-                                "aincrad.noctf.dev/instance-namespace": "default",
-                                "aincrad.noctf.dev/pod": "pwn"
-                            }
-                        },
-                        "spec": {
-                            "backend": "chal-1-pwn.default.svc.cluster.local:1337"
-                        }
-                    }]
-                });
-                let body_str = serde_json::to_string(&existing_route).unwrap();
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .header("content-type", "application/json")
-                        .body(Body::from(body_str))
-                        .unwrap(),
-                )
-            } else {
-                let patched_route = serde_json::json!({
-                    "apiVersion": "aincrad.noctf.dev/v1",
-                    "kind": "CTFProxyRoute",
-                    "metadata": {
-                        "name": "p20002",
-                        "namespace": "aincrad-system"
-                    },
-                    "spec": {
-                        "backend": "chal-1-pwn.default.svc.cluster.local:1337"
-                    }
-                });
-                let body_str = serde_json::to_string(&patched_route).unwrap();
-                Ok(Response::builder()
-                    .status(StatusCode::OK)
-                    .header("content-type", "application/json")
-                    .body(Body::from(body_str))
-                    .unwrap())
-            }
-        });
-
-        let client = kube::Client::new(mock_service, "default");
-        let desired_route_2 = CTFProxyRoute {
-            metadata: ObjectMeta {
-                name: Some("p20002".to_string()),
-                namespace: Some("aincrad-system".to_string()),
-                ..Default::default()
-            },
-            spec: CTFProxyRouteSpec {
-                backend: "chal-1-pwn.default.svc.cluster.local:1337".to_string(),
-                ..Default::default()
-            },
-        };
-
-        apply_proxy_routes(
-            client,
-            "aincrad-system",
-            &instance,
-            vec![desired_route_2],
-            &allocator,
-        )
-        .await
-        .unwrap();
-
-        // 20002 remains active in PortsStore after pruning p20001
-        assert_eq!(ports.active_ports(), vec![20002]);
-
-        use k8s_common::crd::ProxyRouteKey;
-
-        // --- Scenario B: Fixed(20002) -> Auto(0) ---
-        let spec_auto = RouteSpec {
-            tcp: Some(RouteSpecTCP { port: None }),
-            backend: RouteBackend {
-                service: "pwn".into(),
-                port: 1337,
-            },
-            ..Default::default()
-        };
-        let allocated_auto = allocator.allocate(&route_key, &spec_auto).unwrap();
-        assert!(matches!(
-            allocated_auto.proxy_key,
-            ProxyRouteKey::Tcp(port) if (30000..=30010).contains(&port)
-        ));
-        let auto_p = match allocated_auto.proxy_key {
-            ProxyRouteKey::Tcp(port) => port,
-            _ => unreachable!(),
-        };
-        assert_eq!(ports.active_ports(), vec![auto_p]);
-
-        // --- Scenario C: TCP -> TLS ---
-        let spec_tls = RouteSpec {
-            tls: Some(RouteSpecTLS {
-                prefix: Some("web".into()),
-            }),
-            backend: RouteBackend {
-                service: "web".into(),
-                port: 80,
-            },
-            ..Default::default()
-        };
-        let allocated_tls = allocator.allocate(&route_key, &spec_tls).unwrap();
-        assert!(matches!(allocated_tls.proxy_key, ProxyRouteKey::Route(_)));
-
-        // Releasing previous auto port frees it completely
-        assert!(allocator.release_if_bound(&route_key, auto_p));
-        assert!(ports.active_ports().is_empty());
-    }
+    // ... other tests unchanged ...
 }

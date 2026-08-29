@@ -1,18 +1,20 @@
+pub mod helpers;
 pub mod network_policy;
 pub mod proxy_route;
 pub mod replicaset;
 pub mod service;
 
+pub use helpers::apply_condition;
 pub use network_policy::NetworkPolicyPlanner;
-pub use proxy_route::{PlannedRoutes, ProxyRoutePlanner, build_merged_route_spec};
+pub use proxy_route::ProxyRoutePlanner;
 pub use replicaset::ReplicaSetPlanner;
 pub use service::ServicePlanner;
 
-use k8s_common::crd::CTFInstance;
+use k8s_common::crd::{CTFInstance, CTFInstanceStatus};
 use kube::{Resource, core::NamespaceResourceScope};
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{Error, reconcilers::template::ResolvedTemplate};
+use crate::{Context, Error, reconcilers::template::ResolvedTemplate};
 
 /// Pure trait for declaring the desired state of a child Kubernetes resource type.
 pub trait Planner {
@@ -31,7 +33,16 @@ pub trait Planner {
     fn plan(
         instance: &CTFInstance,
         template: &ResolvedTemplate,
+        ctx: &Context,
     ) -> Result<Vec<Self::Resource>, Error>;
+
+    /// Writes readiness information into `status`. A condition with status "True"
+    /// indicates the child is healthy; "False" or "Unknown" means not ready.
+    fn check_status(
+        instance: &CTFInstance,
+        status: &mut CTFInstanceStatus,
+        ctx: &Context,
+    ) -> Result<(), Error>;
 }
 
 /// Sets controller owner reference on a resource pointing to the CTFInstance.

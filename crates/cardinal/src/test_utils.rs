@@ -1,6 +1,8 @@
 #[cfg(test)]
 pub mod tests {
-    use k8s_common::crd::{CTFInstance, CTFInstanceSpec, CTFTemplateSpec, CTFTemplateSpecPod};
+    use k8s_common::crd::{
+        CTFInstance, CTFInstanceSpec, CTFTemplate, CTFTemplateSpec, CTFTemplateSpecPod,
+    };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::Client;
     use std::sync::Arc;
@@ -246,5 +248,65 @@ pub mod tests {
             pod_patchers: Arc::new(std::collections::HashMap::new()),
             params_map: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Creates a dummy Context with template store + allocator for tests.
+    /// Returns (store, Arc<Context>) so store can be populated before use.
+    pub fn dummy_context() -> (
+        kube::runtime::reflector::Store<CTFTemplate>,
+        Arc<crate::Context>,
+    ) {
+        use crate::routing::{PortsStore, RouteAllocator};
+        use k8s_common::PortRange;
+
+        let client = dummy_kube_client();
+        let (template_store, _) = kube::runtime::reflector::store();
+        let ports = Arc::new(PortsStore::new(
+            PortRange(20000..=20010),
+            PortRange(30000..=30010),
+        ));
+        let allocator = Arc::new(RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433));
+        let ctx = crate::Context::with_allocator(
+            client,
+            template_store.clone(),
+            allocator,
+            "aincrad-system",
+            "cluster.local",
+        );
+
+        // Populate template cache with a default template
+        let tmpl = CTFTemplate {
+            metadata: ObjectMeta {
+                name: Some("whoami-template".into()),
+                namespace: Some("default".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: CTFTemplateSpec {
+                pods: vec![CTFTemplateSpecPod {
+                    name: "web".into(),
+                    allow_internet: false,
+                    replicas: 1,
+                    patch: None,
+                    spec: k8s_openapi::api::core::v1::PodSpec {
+                        containers: vec![k8s_openapi::api::core::v1::Container {
+                            name: "web".into(),
+                            image: Some("nginx:latest".into()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                }],
+                routes: vec![],
+                params: vec![],
+                ..Default::default()
+            },
+            status: None,
+        };
+        if let Some(cache) = &ctx.template_cache {
+            cache.update(&tmpl);
+        }
+
+        (template_store, Arc::new(ctx))
     }
 }

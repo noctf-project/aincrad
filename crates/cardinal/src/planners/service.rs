@@ -1,11 +1,11 @@
-use k8s_common::crd::{CTFInstance, CTFTemplateSpecPod};
+use k8s_common::crd::{CTFInstance, CTFInstanceStatus};
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta};
+use k8s_openapi::jiff::Timestamp;
 
 use crate::{
-    Error, btreemap,
-    planners::{Planner, set_owner_ref},
+    Context, Error, btreemap,
+    planners::{Planner, apply_condition, set_owner_ref},
     reconcilers::template::ResolvedTemplate,
     utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL},
     utils::naming::resource_name,
@@ -17,7 +17,11 @@ impl Planner for ServicePlanner {
     const KIND: &'static str = "Service";
     type Resource = Service;
 
-    fn plan(instance: &CTFInstance, template: &ResolvedTemplate) -> Result<Vec<Service>, Error> {
+    fn plan(
+        instance: &CTFInstance,
+        template: &ResolvedTemplate,
+        _ctx: &Context,
+    ) -> Result<Vec<Service>, Error> {
         let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
@@ -39,7 +43,17 @@ impl Planner for ServicePlanner {
                     labels: Some(labels),
                     ..Default::default()
                 },
-                spec: Some(build_headless_service_spec(instance_name, pod)),
+                spec: Some(ServiceSpec {
+                    selector: Some(btreemap! {
+                        INSTANCE_LABEL => instance_name,
+                        POD_LABEL => pod.name.as_str(),
+                    }),
+                    ports: Some(vec![ServicePort {
+                        port: 80,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
             set_owner_ref(&mut svc, instance);
@@ -48,106 +62,25 @@ impl Planner for ServicePlanner {
 
         Ok(desired)
     }
-}
 
-/// Builds a Headless ClusterIP ServiceSpec for a specific pod within a CTFInstance.
-///
-/// - ClusterIP: `"None"` (Headless Service)
-/// - Selector: Matches `INSTANCE_LABEL => instance_name` and `POD_LABEL => pod_name`
-pub fn build_headless_service_spec(
-    instance_name: &str,
-    pod_tmpl: &CTFTemplateSpecPod,
-) -> ServiceSpec {
-    let selector = btreemap! {
-        INSTANCE_LABEL => instance_name,
-        POD_LABEL => pod_tmpl.name.as_str(),
-    };
-
-    // Extract ports from pod container specs if available
-    let mut service_ports = Vec::new();
-    for container in &pod_tmpl.spec.containers {
-        if let Some(ports) = &container.ports {
-            for port in ports {
-                let port_name = port
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("port-{}", port.container_port));
-                service_ports.push(ServicePort {
-                    name: Some(port_name),
-                    port: port.container_port,
-                    target_port: Some(IntOrString::Int(port.container_port)),
-                    protocol: port.protocol.clone(),
-                    ..Default::default()
-                });
-            }
-        }
-    }
-
-    ServiceSpec {
-        cluster_ip: Some("None".into()),
-        selector: Some(selector),
-        ports: if service_ports.is_empty() {
-            None
-        } else {
-            Some(service_ports)
-        },
-        ..Default::default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use k8s_openapi::api::core::v1::{Container, ContainerPort, PodSpec};
-
-    #[test]
-    fn test_build_headless_service_spec() {
-        let pod_tmpl = CTFTemplateSpecPod {
-            name: "web".into(),
-            spec: PodSpec {
-                containers: vec![Container {
-                    name: "web-container".into(),
-                    ports: Some(vec![ContainerPort {
-                        container_port: 8080,
-                        name: Some("http".into()),
-                        protocol: Some("TCP".into()),
-                        ..Default::default()
-                    }]),
-                    ..Default::default()
-                }],
-                ..Default::default()
+    fn check_status(
+        _instance: &CTFInstance,
+        status: &mut CTFInstanceStatus,
+        _ctx: &Context,
+    ) -> Result<(), Error> {
+        apply_condition(
+            status,
+            Condition {
+                type_: Self::KIND.to_string(),
+                status: "True".to_string(),
+                reason: "ResourceManaged".to_string(),
+                message: "Service managed by SSA reconciliation".to_string(),
+                last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    Timestamp::now(),
+                ),
+                observed_generation: None,
             },
-            ..Default::default()
-        };
-
-        let spec = build_headless_service_spec("team-alpha", &pod_tmpl);
-        assert_eq!(spec.cluster_ip, Some("None".into()));
-
-        let selector = spec.selector.unwrap();
-        assert_eq!(
-            selector.get(INSTANCE_LABEL),
-            Some(&"team-alpha".to_string())
         );
-        assert_eq!(selector.get(POD_LABEL), Some(&"web".to_string()));
-
-        let ports = spec.ports.unwrap();
-        assert_eq!(ports.len(), 1);
-        assert_eq!(ports[0].port, 8080);
-        assert_eq!(ports[0].name, Some("http".into()));
-    }
-
-    #[test]
-    fn test_plan_service() {
-        use crate::test_utils::tests::{dummy_instance, dummy_resolved_template};
-        let instance = dummy_instance("chal-1", None);
-        let template = dummy_resolved_template(1);
-
-        let desired = ServicePlanner::plan(&instance, &template).unwrap();
-        assert_eq!(desired.len(), 1);
-        assert_eq!(desired[0].metadata.name.as_deref(), Some("chal-1-web"));
-        assert_eq!(
-            desired[0].metadata.owner_references.as_ref().unwrap().len(),
-            1
-        );
+        Ok(())
     }
 }

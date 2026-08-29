@@ -1,8 +1,8 @@
 use moka::{Expiry, future::Cache};
-use rand::{Rng, RngExt, rngs::SmallRng};
+use rand::{RngExt, rngs::SmallRng};
 use std::{
     borrow::Cow,
-    cell::{Cell, RefCell},
+    cell::RefCell,
     net::{IpAddr, SocketAddr},
     time::{Duration, Instant},
 };

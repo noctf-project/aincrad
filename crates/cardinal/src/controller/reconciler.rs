@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use k8s_common::crd::{CTFInstance, CTFInstanceStatusEndpoint, CTFProxyRoute, CTFTemplate};
+use k8s_common::crd::{CTFInstance, CTFProxyRoute, CTFTemplate};
 use kube::{
     Api, Client,
     runtime::{
@@ -70,52 +70,34 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
         return Ok(Action::await_change());
     }
 
-    // Check if instance generation and restartedAt annotation have already been observed
-    let observed_gen = instance.status.as_ref().and_then(|s| s.observed_generation);
-    let observed_tmpl_gen = instance.status.as_ref().and_then(|s| s.template_generation);
-    let observed_restarted_at = instance
-        .status
-        .as_ref()
-        .and_then(|s| s.restarted_at.as_deref());
-    let instance_restarted_at = instance
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
-        .map(|s| s.as_str())
-        .filter(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok());
-
-    let is_instance_gen_current = instance.metadata.generation.is_some()
-        && instance.metadata.generation == observed_gen
-        && instance_restarted_at == observed_restarted_at;
-
-    let raw_min_tmpl_gen = instance
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION));
-
-    // Fast-path skip: if instance spec generation is current, restartedAt matches,
-    // minTemplateGeneration is not set, sync is false, and instance has already been deployed.
-    if is_instance_gen_current
-        && raw_min_tmpl_gen.is_none()
-        && !instance.spec.sync
-        && observed_tmpl_gen.is_some()
-    {
-        info!(
-            name,
-            ns, "CTFInstance already reconciled and not synced, skipping template resolution"
-        );
-        if let Some(remaining) = calculate_remaining_ttl(expires_at) {
-            return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
+    // This evaluates all child conditions (Template, ReplicaSet, NetworkPolicy, Service, CTFProxyRoute)
+    // and writes them to the instance status. If all are True, it patches Ready=True and we skip.
+    match reconcilers::status::reconcile(instance, ctx).await? {
+        reconcilers::status::Readiness::Ready => {
+            info!(name, ns, "Instance ready, skipping reconciliation");
+            if let Some(remaining) = calculate_remaining_ttl(expires_at) {
+                return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
+            }
+            return Ok(Action::await_change());
         }
-        return Ok(Action::await_change());
+        reconcilers::status::Readiness::NotReady => {
+            info!(
+                name,
+                ns, "Instance not ready, proceeding with reconciliation"
+            );
+        }
     }
 
     // Resolve CTFTemplate referenced by `instance.spec.template`.
     let template = reconcilers::template::reconcile(instance, ctx).await?;
 
     // Rewrite invalid minTemplateGeneration annotation (non-numeric or <= 0)
+    let raw_min_tmpl_gen = instance
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION));
+
     let min_tmpl_gen_annotation = match raw_min_tmpl_gen {
         Some(raw_val) => match raw_val.parse::<i64>() {
             Ok(parsed_gen) if parsed_gen > 0 => Some(parsed_gen),
@@ -142,28 +124,7 @@ async fn reconcile_inner(instance: &CTFInstance, ctx: &Context) -> Result<Action
         return patch_min_template_annotation(ctx, name, ns, tmpl_gen).await;
     }
 
-    let target_tmpl_gen = min_tmpl_gen_annotation.or({
-        if instance.spec.sync {
-            template.metadata.generation
-        } else {
-            None
-        }
-    });
-
-    let is_tmpl_gen_satisfied = observed_tmpl_gen >= target_tmpl_gen;
-
-    if is_instance_gen_current && is_tmpl_gen_satisfied {
-        info!(name, ns, "CTFInstance already reconciled, skipping");
-        if let Some(remaining) = calculate_remaining_ttl(expires_at) {
-            return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
-        }
-        return Ok(Action::await_change());
-    }
-
-    let endpoints = reconcile_children(instance, &template, ctx).await?;
-
-    // Success! Update status conditions (Ready = True) & observed generations & endpoints
-    reconcilers::status::reconcile(instance, ctx, template.metadata.generation, endpoints).await?;
+    reconcile_children(instance, &template, ctx).await?;
 
     if let Some(remaining) = calculate_remaining_ttl(expires_at) {
         return Ok(Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER));
@@ -202,41 +163,32 @@ async fn reconcile_children(
     instance: &CTFInstance,
     template: &reconcilers::template::ResolvedTemplate,
     ctx: &Context,
-) -> Result<Vec<CTFInstanceStatusEndpoint>, Error> {
+) -> Result<(), Error> {
     use crate::planners::{
         NetworkPolicyPlanner, ProxyRoutePlanner, ReplicaSetPlanner, ServicePlanner,
     };
     use crate::reconcilers::helper::{apply_planner, apply_proxy_routes};
 
-    apply_planner::<ReplicaSetPlanner>(ctx.client.clone(), instance, template).await?;
-    apply_planner::<NetworkPolicyPlanner>(ctx.client.clone(), instance, template).await?;
-    apply_planner::<ServicePlanner>(ctx.client.clone(), instance, template).await?;
+    apply_planner::<ReplicaSetPlanner>(ctx.client.clone(), instance, template, ctx).await?;
+    apply_planner::<NetworkPolicyPlanner>(ctx.client.clone(), instance, template, ctx).await?;
+    apply_planner::<ServicePlanner>(ctx.client.clone(), instance, template, ctx).await?;
 
-    let endpoints = if let Some(allocator) = &ctx.route_allocator {
-        let planned = ProxyRoutePlanner::plan(
-            instance,
-            template,
-            allocator,
-            &ctx.system_namespace,
-            &ctx.cluster_domain,
-        )?;
+    if let Some(allocator) = &ctx.route_allocator {
+        use crate::planners::Planner;
+        let routes = ProxyRoutePlanner::plan(instance, template, ctx)?;
         apply_proxy_routes(
             ctx.client.clone(),
             &ctx.system_namespace,
             instance,
-            planned.routes,
+            routes,
             allocator,
         )
         .await?;
-        planned.endpoints
-    } else {
-        Vec::new()
-    };
+    }
 
-    Ok(endpoints)
+    Ok(())
 }
 
-/// Error policy handler invoked when reconciliation returns an error.
 pub fn error_policy(instance: Arc<CTFInstance>, error: &Error, _ctx: Arc<Context>) -> Action {
     let name = instance.metadata.name.as_deref().unwrap_or("unknown");
     error!(name, %error, "Reconciliation failed");
@@ -534,64 +486,16 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::routing::{PortsStore, RouteAllocator};
-    use crate::test_utils::tests::dummy_kube_client;
+    use crate::test_utils::tests::{dummy_context, dummy_kube_client};
     use chrono::{Duration as ChronoDuration, Utc};
     use k8s_common::PortRange;
-    use k8s_common::crd::CTFInstanceSpec;
+    use k8s_common::crd::{CTFInstanceSpec, CTFInstanceStatus};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-
-    fn dummy_test_context() -> Arc<Context> {
-        let client = dummy_kube_client();
-        let (template_store, _) = kube::runtime::reflector::store();
-        let ports = Arc::new(PortsStore::new(
-            PortRange(20000..=20010),
-            PortRange(30000..=30010),
-        ));
-        let allocator = Arc::new(RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433));
-        let ctx = Context::with_allocator(
-            client,
-            template_store,
-            allocator,
-            "aincrad-system",
-            "cluster.local",
-        );
-
-        let tmpl = CTFTemplate {
-            metadata: ObjectMeta {
-                name: Some("whoami-template".into()),
-                namespace: Some("default".into()),
-                generation: Some(1),
-                ..Default::default()
-            },
-            spec: k8s_common::crd::CTFTemplateSpec {
-                pods: vec![k8s_common::crd::CTFTemplateSpecPod {
-                    name: "web".into(),
-                    allow_internet: false,
-                    replicas: 1,
-                    patch: None,
-                    spec: k8s_openapi::api::core::v1::PodSpec {
-                        containers: vec![k8s_openapi::api::core::v1::Container {
-                            name: "web".into(),
-                            image: Some("nginx:latest".into()),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                }],
-                routes: vec![],
-                ..Default::default()
-            },
-            status: None,
-        };
-        if let Some(cache) = &ctx.template_cache {
-            cache.update(&tmpl);
-        }
-        Arc::new(ctx)
-    }
 
     #[tokio::test]
     async fn test_reconcile_no_expiration() {
-        let ctx = dummy_test_context();
+        let (_store, ctx) = dummy_context();
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
@@ -611,7 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_future_expiration() {
-        let ctx = dummy_test_context();
+        let (_store, ctx) = dummy_context();
         let future_time = Utc::now() + ChronoDuration::seconds(120);
         let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(
@@ -639,7 +543,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_past_expiration() {
-        let ctx = dummy_test_context();
+        let (_store, ctx) = dummy_context();
         let past_time = Utc::now() - ChronoDuration::seconds(60);
         let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(
@@ -667,7 +571,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_deletion_timestamp() {
-        let ctx = dummy_test_context();
+        let (_store, ctx) = dummy_context();
         let now = Utc::now();
 
         let instance = Arc::new(CTFInstance {
@@ -692,7 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_observed_generation_skips() {
-        let ctx = dummy_test_context();
+        let (_store, ctx) = dummy_context();
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
@@ -704,10 +608,19 @@ mod tests {
                 template: "whoami-template".into(),
                 ..Default::default()
             },
-            status: Some(k8s_common::crd::CTFInstanceStatus {
+            status: Some(CTFInstanceStatus {
                 observed_generation: Some(1),
-                conditions: vec![],
-                endpoints: vec![],
+                template_generation: Some(1),
+                conditions: vec![Condition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    reason: "Reconciled".to_string(),
+                    message: "CTFInstance reconciled successfully".to_string(),
+                    last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                        k8s_openapi::jiff::Timestamp::now(),
+                    ),
+                    observed_generation: Some(1),
+                }],
                 ..Default::default()
             }),
         });
