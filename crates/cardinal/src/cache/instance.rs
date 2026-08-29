@@ -103,6 +103,21 @@ impl InstanceCache {
             .filter(|inst| crate::utils::versions::requires_template_upgrade(template_gen, inst))
             .collect()
     }
+
+    /// Returns the `(namespace, name)` of every live (non-deleted) instance in
+    /// the cluster as seen by the cache. The index only holds non-deleted
+    /// instances, so every entry is live.
+    pub fn live_instances(&self) -> Vec<(String, String)> {
+        let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        lock.index
+            .values()
+            .map(|inst| {
+                let ns = inst.metadata.namespace.as_deref().unwrap_or("default");
+                let name = inst.metadata.name.as_deref().unwrap_or("unknown");
+                (ns.to_string(), name.to_string())
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

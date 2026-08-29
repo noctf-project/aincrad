@@ -87,19 +87,11 @@ fn instance_predicate() -> impl Predicate<CTFInstance> {
 pub async fn handle_instance_watcher_init_done(
     client: Client,
     system_ns: &str,
-    store: &store::Store<CTFInstance>,
+    cache: &crate::cache::InstanceCache,
     allocator: &crate::routing::RouteAllocator,
 ) -> Result<(), Error> {
-    let live_instances: std::collections::HashSet<(String, String)> = store
-        .state()
-        .into_iter()
-        .filter(|inst| inst.metadata.deletion_timestamp.is_none())
-        .map(|inst| {
-            let ns = inst.metadata.namespace.as_deref().unwrap_or("default");
-            let name = inst.metadata.name.as_deref().unwrap_or("unknown");
-            (ns.to_string(), name.to_string())
-        })
-        .collect();
+    let live_instances: std::collections::HashSet<(String, String)> =
+        cache.live_instances().into_iter().collect();
 
     info!(
         live_count = live_instances.len(),
@@ -252,7 +244,6 @@ pub async fn run(
     let client_init_done = client.clone();
     let system_ns_init_done = system_namespace.clone();
     let allocator_init_done = allocator.clone();
-    let instance_store_init_done = instance_store.clone();
 
     let instance_template_rx = template_ready_rx.clone();
 
@@ -264,7 +255,6 @@ pub async fn run(
             let client = client_init_done.clone();
             let system_ns = system_ns_init_done.clone();
             let allocator = allocator_init_done.clone();
-            let store = instance_store_init_done.clone();
             let cache = instance_cache_task.clone();
             let fatal_tx = fatal_tx.clone();
             let mut template_rx = instance_template_rx.clone();
@@ -282,7 +272,7 @@ pub async fn run(
                     handle_instance_watcher_event(event, &cache);
                     if let Event::InitDone = event
                         && let Err(e) = handle_instance_watcher_init_done(
-                            client, &system_ns, &store, &allocator,
+                            client, &system_ns, &cache, &allocator,
                         )
                         .await
                     {
@@ -731,11 +721,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_instance_watcher_init_done_success() {
+        use crate::cache::InstanceCache;
+
         let client = dummy_kube_client();
-        let (instance_store, mut instance_writer) = store();
         let mut inst = dummy_instance("chal-1", None);
         inst.metadata.namespace = Some("team-1".into());
-        instance_writer.apply_watcher_event(&Event::Apply(inst));
+        let cache = InstanceCache::new();
+        cache.update(&inst);
 
         let ports = Arc::new(PortsStore::new(
             PortRange(20000..=20010),
@@ -743,18 +735,14 @@ mod tests {
         ));
         let allocator = RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433);
 
-        let res = handle_instance_watcher_init_done(
-            client,
-            "aincrad-system",
-            &instance_store,
-            &allocator,
-        )
-        .await;
+        let res =
+            handle_instance_watcher_init_done(client, "aincrad-system", &cache, &allocator).await;
         assert!(res.is_ok());
     }
 
     #[tokio::test]
     async fn test_handle_instance_watcher_init_done_failure() {
+        use crate::cache::InstanceCache;
         use tower::service_fn;
         let mock_service = service_fn(|_req: axum::http::Request<kube::client::Body>| async move {
             Ok::<_, std::convert::Infallible>(
@@ -765,7 +753,7 @@ mod tests {
             )
         });
         let client = kube::Client::new(mock_service, "default");
-        let (instance_store, _) = store();
+        let cache = InstanceCache::new();
 
         let ports = Arc::new(PortsStore::new(
             PortRange(20000..=20010),
@@ -773,13 +761,8 @@ mod tests {
         ));
         let allocator = RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433);
 
-        let res = handle_instance_watcher_init_done(
-            client,
-            "aincrad-system",
-            &instance_store,
-            &allocator,
-        )
-        .await;
+        let res =
+            handle_instance_watcher_init_done(client, "aincrad-system", &cache, &allocator).await;
         assert!(res.is_err());
     }
 
