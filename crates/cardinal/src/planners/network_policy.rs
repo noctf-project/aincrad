@@ -24,6 +24,7 @@ pub struct NetworkPolicyPlanner;
 
 impl Planner for NetworkPolicyPlanner {
     const KIND: &'static str = "NetworkPolicy";
+    const PRUNE_ORPHANS: bool = false;
     type Resource = NetworkPolicy;
 
     fn plan(

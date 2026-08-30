@@ -18,6 +18,8 @@ pub struct ServicePlanner;
 
 impl Planner for ServicePlanner {
     const KIND: &'static str = "Service";
+    const PRUNE_ORPHANS: bool = false;
+
     type Resource = Service;
 
     fn plan(

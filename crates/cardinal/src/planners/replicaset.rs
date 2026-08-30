@@ -44,6 +44,7 @@ pub struct ReplicaSetPlanner;
 
 impl Planner for ReplicaSetPlanner {
     const KIND: &'static str = "ReplicaSet";
+
     type Resource = ReplicaSet;
 
     fn plan(

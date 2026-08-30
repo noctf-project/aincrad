@@ -34,16 +34,20 @@ pub async fn apply_planner<P: Planner>(
     let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let api: Api<P::Resource> = Api::namespaced(client, ns);
 
-    sync_resources(&api, P::KIND, instance_name, desired).await
+    let desired_names = sync_resources(&api, P::KIND, desired).await?;
+    if P::PRUNE_ORPHANS {
+        prune_orphaned_resources(&api, instance_name, &desired_names).await
+    } else {
+        Ok(())
+    }
 }
 
 /// Applies a list of desired resources using Server-Side Apply and prunes orphans.
 pub async fn sync_resources<K>(
     api: &Api<K>,
     kind: &'static str,
-    instance_name: &str,
     desired: Vec<K>,
-) -> Result<(), Error>
+) -> Result<HashSet<String>, Error>
 where
     K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Serialize + std::fmt::Debug,
 {
@@ -62,9 +66,7 @@ where
                 })?;
         }
     }
-
-    prune_orphaned_resources(api, instance_name, &desired_names).await?;
-    Ok(())
+    Ok(desired_names)
 }
 
 /// Prunes orphaned child resources owned by `instance_name`.

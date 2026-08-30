@@ -32,6 +32,7 @@ pub struct ProxyRoutePlanner;
 
 impl Planner for ProxyRoutePlanner {
     const KIND: &'static str = "CTFProxyRoute";
+
     type Resource = CTFProxyRoute;
 
     fn plan(
