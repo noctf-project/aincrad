@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod cli;
 pub mod context;
 pub mod controller;
 pub mod error;

@@ -3,7 +3,7 @@ use std::ops::RangeInclusive;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PortRange(pub RangeInclusive<u16>);
 
 impl PortRange {

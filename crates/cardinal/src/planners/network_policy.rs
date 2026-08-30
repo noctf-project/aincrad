@@ -43,20 +43,18 @@ impl Planner for NetworkPolicyPlanner {
             .map(|pod| pod.name.clone())
             .collect();
 
-        let ingress_rules = vec![
-            NetworkPolicyIngressRule {
-                from: Some(vec![NetworkPolicyPeer {
-                    pod_selector: Some(LabelSelector {
-                        match_labels: Some(btreemap! {
-                            INSTANCE_LABEL => instance_name,
-                        }),
-                        ..Default::default()
+        let ingress_rules = vec![NetworkPolicyIngressRule {
+            from: Some(vec![NetworkPolicyPeer {
+                pod_selector: Some(LabelSelector {
+                    match_labels: Some(btreemap! {
+                        INSTANCE_LABEL => instance_name,
                     }),
                     ..Default::default()
-                }]),
+                }),
                 ..Default::default()
-            }
-        ];
+            }]),
+            ..Default::default()
+        }];
 
         let egress_rules = {
             let mut rules = Vec::new();

@@ -284,7 +284,14 @@ mod tests {
         );
         assert!(tls_route.spec.policy.logging.is_some());
         assert_eq!(
-            tls_route.spec.policy.logging.as_ref().unwrap().needle.as_deref(),
+            tls_route
+                .spec
+                .policy
+                .logging
+                .as_ref()
+                .unwrap()
+                .needle
+                .as_deref(),
             Some("whoami")
         );
 

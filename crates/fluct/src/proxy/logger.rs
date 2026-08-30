@@ -4,11 +4,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use aho_corasick::AhoCorasick;
 use fluct::Error;
-use tokio::{
-    fs::OpenOptions,
-    io::AsyncWriteExt,
-    sync::Mutex,
-};
+use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
 
 pub const MAX_PAYLOAD: usize = 0x7FFF;
 pub const FOOTER_SIZE: usize = 2;
@@ -41,7 +37,10 @@ impl NeedleState {
 
 impl NeedleMatcher {
     fn new(needle: &str) -> Self {
-        assert!(!needle.is_empty(), "empty needle is rejected before construction");
+        assert!(
+            !needle.is_empty(),
+            "empty needle is rejected before construction"
+        );
         let ac = AhoCorasick::new([needle]).expect("valid non-empty needle");
         let len = needle.len();
         Self {
@@ -186,7 +185,8 @@ impl LogBuffer {
                         let to_write = data.len().min(space);
                         let write_pos = self.pos - FOOTER_SIZE;
 
-                        self.buf[write_pos..write_pos + to_write].copy_from_slice(&data[..to_write]);
+                        self.buf[write_pos..write_pos + to_write]
+                            .copy_from_slice(&data[..to_write]);
                         let new_len = cur_len + to_write;
                         self.pos = write_pos + to_write;
 
@@ -314,10 +314,7 @@ mod tests {
         rb.write(0, b"aaa");
         rb.write(1, b"bb");
         rb.write(1, b"cc");
-        let expected: Vec<u8> = rec(0, b"aaa")
-            .into_iter()
-            .chain(rec(1, b"bbcc"))
-            .collect();
+        let expected: Vec<u8> = rec(0, b"aaa").into_iter().chain(rec(1, b"bbcc")).collect();
         assert_eq!(rb.as_slices().1, expected);
         assert!(rb.as_slices().0.is_empty());
     }

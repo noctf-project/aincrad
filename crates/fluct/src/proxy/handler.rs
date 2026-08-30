@@ -133,7 +133,11 @@ impl Handler {
         }
 
         if spec.policy.logging.is_some() {
-            let needle = spec.policy.logging.as_ref().and_then(|l| l.needle.as_deref());
+            let needle = spec
+                .policy
+                .logging
+                .as_ref()
+                .and_then(|l| l.needle.as_deref());
             let path = Path::new(&self.service.config.logs_dir).join(self.get_log_filename());
             let log = TrafficLogger::new(self.service.config.max_log_size, needle);
             try_join!(
@@ -289,7 +293,8 @@ mod tests {
         let pipe_log = log.clone();
 
         let rx = BufReader::new(server_rx);
-        let pipe_handle = tokio::spawn(async move { handler.pipe(pipe_log, 0, rx, server_tx).await });
+        let pipe_handle =
+            tokio::spawn(async move { handler.pipe(pipe_log, 0, rx, server_tx).await });
 
         // Write payload to client_tx
         tokio::spawn(async move {

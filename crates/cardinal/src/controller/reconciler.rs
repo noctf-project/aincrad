@@ -14,8 +14,11 @@ use kube::{
 };
 use tracing::{error, info, instrument, warn};
 
-use crate::cache::InstanceCache;
-use crate::{Context, Error, reconcilers};
+use crate::{
+    Context, Error, reconcilers,
+    routing::{PortsStore, RouteAllocator},
+};
+use crate::{cache::InstanceCache, cli::Opts};
 
 /// Reconciles a single `CTFInstance` resource state.
 #[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
@@ -148,19 +151,19 @@ pub fn handle_template_watcher_event(
     }
 }
 
-/// Spawns and runs the `CTFInstance` controller loop.
-pub async fn run(
-    client: Client,
-    allocator: Arc<crate::routing::RouteAllocator>,
-    system_namespace: String,
-    cluster_domain: String,
-    image_aliases: std::collections::BTreeMap<String, String>,
-) -> Result<(), Error> {
-    let instances = Api::<CTFInstance>::all(client.clone());
-    let templates = Api::<CTFTemplate>::all(client.clone());
+pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
+    let system_namespace = opts
+        .system_namespace
+        .unwrap_or_else(|| client.default_namespace().to_string());
     let proxy_routes = Api::<CTFProxyRoute>::namespaced(client.clone(), &system_namespace);
 
-    // Bootstrap active port allocations directly from existing CTFProxyRoutes in system namespace
+    // Initialize in-memory CTFTemplate reflector store cache and bootstrap active port allocations.
+    let allocator = RouteAllocator::new(
+        Arc::new(PortsStore::new(opts.reserved_ports, opts.auto_ports)),
+        opts.route_seed,
+        opts.hostname_suffix,
+        opts.tls_port,
+    );
     match proxy_routes.list(&Default::default()).await {
         Ok(routes) => {
             use k8s_common::crd::ProxyRouteKey;
@@ -199,7 +202,27 @@ pub async fn run(
         }
     }
 
-    // Initialize in-memory CTFTemplate reflector store cache
+    run_controller(
+        client,
+        Arc::new(allocator),
+        system_namespace,
+        opts.cluster_domain.clone(),
+        opts.image_alias_map(),
+    )
+    .await
+}
+
+/// Spawns and runs the `CTFInstance` controller loop.
+pub async fn run_controller(
+    client: Client,
+    allocator: Arc<crate::routing::RouteAllocator>,
+    system_namespace: String,
+    cluster_domain: String,
+    image_alias: std::collections::BTreeMap<String, String>,
+) -> Result<(), Error> {
+    let instances = Api::<CTFInstance>::all(client.clone());
+    let templates = Api::<CTFTemplate>::all(client.clone());
+
     let (template_store, template_writer) = store();
 
     let context = Arc::new(Context::with_allocator(
@@ -208,7 +231,7 @@ pub async fn run(
         allocator.clone(),
         system_namespace.clone(),
         cluster_domain,
-        image_aliases,
+        image_alias,
     ));
     let template_cache = context.template_cache.clone().unwrap();
     let template_cache_task = template_cache.clone();
@@ -781,7 +804,7 @@ mod tests {
         ));
         let allocator = Arc::new(RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433));
 
-        let res = run(
+        let res = run_controller(
             client,
             allocator,
             "aincrad-system".into(),
