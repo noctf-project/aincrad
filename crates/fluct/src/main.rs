@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 
 mod config;
 mod hash;
-mod logger;
 mod netfilter;
 mod proxy;
 mod services;

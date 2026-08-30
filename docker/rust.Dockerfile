@@ -15,8 +15,6 @@ RUN apk add --no-cache \
     m4 \
     perl \
     diffutils \
-    capnproto \
-    capnproto-dev \
     mpfr-dev \
     gmp-dev \
     musl-dev

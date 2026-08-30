@@ -221,7 +221,8 @@ mod tests {
         dummy_context, dummy_context_with_routes, dummy_instance, dummy_resolved_template,
     };
     use k8s_common::crd::{
-        RouteBackend, RoutePolicySpec, RouteSpec, RouteSpecPOW, RouteSpecTCP, RouteSpecTLS,
+        RouteBackend, RouteLoggingSpec, RoutePolicySpec, RouteSpec, RouteSpecPOW, RouteSpecTCP,
+        RouteSpecTLS,
     };
     use std::sync::Arc;
 
@@ -241,7 +242,9 @@ mod tests {
                     prefix: Some("whoami".into()),
                 }),
                 policy: RoutePolicySpec {
-                    logs: true,
+                    logging: Some(RouteLoggingSpec {
+                        needle: Some("whoami".into()),
+                    }),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -279,7 +282,11 @@ mod tests {
             tls_route.spec.backend,
             "chal-1-web.default.svc.cluster.local:80"
         );
-        assert!(tls_route.spec.policy.logs);
+        assert!(tls_route.spec.policy.logging.is_some());
+        assert_eq!(
+            tls_route.spec.policy.logging.as_ref().unwrap().needle.as_deref(),
+            Some("whoami")
+        );
 
         let tcp_route = routes
             .iter()

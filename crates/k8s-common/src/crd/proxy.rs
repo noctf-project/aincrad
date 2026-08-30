@@ -250,7 +250,9 @@ mod tests {
             "backend": "chal-1-c-web.default.svc.cluster.local:8080",
             "policy": {
                 "flag": "CTF{test}",
-                "logs": true,
+                "logging": {
+                    "needle": "flag"
+                },
                 "pow": {
                     "difficulty": 10000,
                     "enableAdminBypass": true
@@ -261,7 +263,11 @@ mod tests {
         let spec: CTFProxyRouteSpec = serde_json::from_value(json).unwrap();
         assert_eq!(spec.backend, "chal-1-c-web.default.svc.cluster.local:8080");
         assert_eq!(spec.policy.flag.as_deref(), Some("CTF{test}"));
-        assert!(spec.policy.logs);
+        assert!(spec.policy.logging.is_some());
+        assert_eq!(
+            spec.policy.logging.as_ref().unwrap().needle.as_deref(),
+            Some("flag")
+        );
         assert_eq!(spec.policy.pow.as_ref().unwrap().difficulty, 10000);
         assert!(spec.policy.pow.as_ref().unwrap().enable_admin_bypass);
     }

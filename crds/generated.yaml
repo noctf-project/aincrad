@@ -107,7 +107,6 @@ spec:
                       default:
                         availableAt: null
                         flag: null
-                        logs: false
                         pow: null
                         requestUid: false
                         secret: null
@@ -122,10 +121,17 @@ spec:
                           description: Flag string or template string for the challenge route.
                           nullable: true
                           type: string
-                        logs:
-                          default: false
-                          description: When true, enables logging of player TCP/TLS session traffic.
-                          type: boolean
+                        logging:
+                          description: Logging configuration for player TCP/TLS session traffic.
+                          nullable: true
+                          properties:
+                            needle:
+                              description: |-
+                                Substring to search for in the captured traffic. When set, only the
+                                portion of the log surrounding the first match is retained.
+                              nullable: true
+                              type: string
+                          type: object
                         pow:
                           description: Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
                           nullable: true
@@ -489,7 +495,6 @@ spec:
                 default:
                   availableAt: null
                   flag: null
-                  logs: false
                   pow: null
                   requestUid: false
                   secret: null
@@ -504,10 +509,17 @@ spec:
                     description: Flag string or template string for the challenge route.
                     nullable: true
                     type: string
-                  logs:
-                    default: false
-                    description: When true, enables logging of player TCP/TLS session traffic.
-                    type: boolean
+                  logging:
+                    description: Logging configuration for player TCP/TLS session traffic.
+                    nullable: true
+                    properties:
+                      needle:
+                        description: |-
+                          Substring to search for in the captured traffic. When set, only the
+                          portion of the log surrounding the first match is retained.
+                        nullable: true
+                        type: string
+                    type: object
                   pow:
                     description: Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
                     nullable: true
