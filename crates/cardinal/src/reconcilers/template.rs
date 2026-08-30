@@ -239,8 +239,7 @@ mod tests {
 
     #[test]
     fn test_template_cache_eviction() {
-        let (store, _writer) = kube::runtime::reflector::store();
-        let cache = TemplateCache::new(store);
+        let cache = TemplateCache::new();
         let pod_tmpl = CTFTemplateSpecPod {
             name: "web".into(),
             ..Default::default()
@@ -275,8 +274,7 @@ mod tests {
 
     #[test]
     fn test_template_cache_failed_compile_caching() {
-        let (store, _writer) = kube::runtime::reflector::store();
-        let cache = TemplateCache::new(store);
+        let cache = TemplateCache::new();
         let patch_json = json!([
             {
                 "op": "add",

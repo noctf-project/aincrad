@@ -1,7 +1,7 @@
 use clap::Parser;
 use k8s_common::{PortRange, parse_port_range};
 
-#[derive(Parser, Debug, Copy)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "cardinal", about = "Control plane controller for Aincrad CTF")]
 pub struct Opts {
     #[arg(

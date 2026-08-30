@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use globset::GlobSet;
 use k8s_common::{SpecPatcher, crd::CTFTemplate};
-use kube::runtime::reflector::Store;
 
 use crate::planners::replicaset::{POD_PATCH_BLACKLIST, ROUTE_POLICY_PATCH_BLACKLIST};
 
@@ -25,20 +24,14 @@ pub struct CachedTemplateEntry {
 
 #[derive(Clone)]
 pub struct TemplateCache {
-    store: Store<CTFTemplate>,
     index: Arc<Mutex<BTreeMap<TemplateKey, CachedTemplateEntry>>>,
 }
 
 impl TemplateCache {
-    pub fn new(store: Store<CTFTemplate>) -> Self {
+    pub fn new() -> Self {
         Self {
-            store,
             index: Arc::new(Mutex::new(BTreeMap::new())),
         }
-    }
-
-    pub fn store(&self) -> &Store<CTFTemplate> {
-        &self.store
     }
 
     pub fn get(&self, namespace: &str, name: &str) -> Option<CachedTemplateEntry> {
@@ -130,13 +123,11 @@ mod tests {
     use k8s_common::crd::CTFTemplateSpecPod;
     use k8s_openapi::api::core::v1::{Container, PodSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use kube::runtime::reflector::store;
     use serde_json::json;
 
     #[test]
     fn test_template_cache_update_and_get() {
-        let (store, _writer) = store();
-        let cache = TemplateCache::new(store);
+        let cache = TemplateCache::new();
         let valid_patch: json_patch::Patch = serde_json::from_value(json!([
             { "op": "add", "path": "/metadata/labels/test", "value": "true" }
         ]))
@@ -186,8 +177,7 @@ mod tests {
 
     #[test]
     fn test_template_cache_failed_compile_cached() {
-        let (store, _writer) = store();
-        let cache = TemplateCache::new(store);
+        let cache = TemplateCache::new();
         // Path "/hostNetwork" is blacklisted by POD_PATCH_BLACKLIST
         let invalid_patch: json_patch::Patch = serde_json::from_value(json!([
             { "op": "add", "path": "/hostNetwork", "value": true }
@@ -223,8 +213,7 @@ mod tests {
 
     #[test]
     fn test_template_cache_remove_and_clear() {
-        let (store, _writer) = store();
-        let cache = TemplateCache::new(store);
+        let cache = TemplateCache::new();
         let tmpl1 = CTFTemplate {
             metadata: ObjectMeta {
                 name: Some("tmpl1".into()),

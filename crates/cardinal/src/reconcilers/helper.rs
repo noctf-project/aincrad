@@ -13,9 +13,10 @@ use tracing::{info, warn};
 
 use crate::{
     Context, Error,
+    cache::ResourceKey,
     planners::Planner,
     reconcilers::template::ResolvedTemplate,
-    routing::{RouteAllocator, RouteKey},
+    routing::RouteAllocator,
     utils::labels::{INSTANCE_LABEL, INSTANCE_NAMESPACE_LABEL, POD_LABEL, ROUTES_FINALIZER},
 };
 
@@ -184,7 +185,7 @@ pub async fn apply_proxy_routes(
                     .as_ref()
                     .and_then(|l| l.get(POD_LABEL))
             {
-                let route_key = RouteKey::new(instance_ns, instance_name, pod_name);
+                let route_key = ResourceKey::new(instance_ns, instance_name, pod_name);
                 allocator.release_if_bound(&route_key, old_port);
             }
         }
@@ -280,7 +281,7 @@ pub async fn delete_proxy_routes_batch(
                             .get(INSTANCE_NAMESPACE_LABEL)
                             .map(|s| s.as_str())
                             .unwrap_or("default");
-                        let route_key = RouteKey::new(instance_ns, inst, pod);
+                        let route_key = ResourceKey::new(instance_ns, inst, pod);
                         allocator.release(&route_key);
                     }
                 }

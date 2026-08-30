@@ -5,7 +5,8 @@ use k8s_common::PortRange;
 use thiserror::Error;
 use tracing::info;
 
-use super::RouteKey;
+use crate::cache::ResourceKey;
+
 use super::port_finder::PortFinderFactory;
 
 const LOCK_POISONED_ERROR: &str = "PortsStore lock was poisoned";
@@ -16,21 +17,21 @@ pub enum PortError {
     #[error("port {0} is outside reserved range")]
     OutOfRange(u16),
     #[error("port {0} is already occupied by route '{1}'")]
-    Occupied(u16, RouteKey),
+    Occupied(u16, ResourceKey),
     #[error("auto port pool is exhausted")]
     Exhausted,
 }
 
 struct Inner {
-    bindings: Vec<Option<RouteKey>>,
-    mappings: BTreeMap<RouteKey, u16>,
+    bindings: Vec<Option<ResourceKey>>,
+    mappings: BTreeMap<ResourceKey, u16>,
     range_reserved: PortRange,
     range_auto: PortRange,
     finder: PortFinderFactory,
 }
 
 impl Inner {
-    fn allocate(&mut self, key: &RouteKey, port: u16) -> Result<u16, PortError> {
+    fn allocate(&mut self, key: &ResourceKey, port: u16) -> Result<u16, PortError> {
         // Fixed port allocation (port != 0)
         if port != 0 {
             if !self.range_reserved.contains(port) {
@@ -76,7 +77,7 @@ impl Inner {
         Ok(candidate)
     }
 
-    fn release(&mut self, key: &RouteKey) -> Option<u16> {
+    fn release(&mut self, key: &ResourceKey) -> Option<u16> {
         if let Some(port) = self.mappings.remove(key) {
             self.bindings[port as usize] = None;
             return Some(port);
@@ -84,7 +85,7 @@ impl Inner {
         None
     }
 
-    fn release_if_bound(&mut self, key: &RouteKey, port: u16) -> bool {
+    fn release_if_bound(&mut self, key: &ResourceKey, port: u16) -> bool {
         if let Some(&current_port) = self.mappings.get(key)
             && current_port == port
         {
@@ -96,7 +97,7 @@ impl Inner {
     }
 
     fn release_instance(&mut self, namespace: &str, instance: &str) -> Vec<u16> {
-        let keys_to_remove: Vec<RouteKey> = self
+        let keys_to_remove: Vec<ResourceKey> = self
             .mappings
             .keys()
             .filter(|k| k.namespace == namespace && k.instance == instance)
@@ -113,7 +114,7 @@ impl Inner {
         released
     }
 
-    fn sync(&mut self, key: &RouteKey, port: u16) {
+    fn sync(&mut self, key: &ResourceKey, port: u16) {
         if port == 0 {
             self.release(key);
             return;
@@ -141,15 +142,15 @@ impl Inner {
         self.mappings.clear();
     }
 
-    fn get_port(&self, key: &RouteKey) -> Option<u16> {
+    fn get_port(&self, key: &ResourceKey) -> Option<u16> {
         self.mappings.get(key).copied()
     }
 
-    fn get_route(&self, port: u16) -> Option<RouteKey> {
+    fn get_route(&self, port: u16) -> Option<ResourceKey> {
         self.bindings[port as usize].clone()
     }
 
-    fn instance_routes(&self, namespace: &str, instance: &str) -> Vec<(RouteKey, u16)> {
+    fn instance_routes(&self, namespace: &str, instance: &str) -> Vec<(ResourceKey, u16)> {
         self.mappings
             .iter()
             .filter(|(k, _)| k.namespace == namespace && k.instance == instance)
@@ -179,14 +180,14 @@ impl PortsStore {
         }
     }
 
-    /// Allocates a port for a given RouteKey (port == 0 for auto, port != 0 for fixed).
-    pub fn allocate(&self, key: &RouteKey, port: u16) -> Result<u16, PortError> {
+    /// Allocates a port for a given ResourceKey (port == 0 for auto, port != 0 for fixed).
+    pub fn allocate(&self, key: &ResourceKey, port: u16) -> Result<u16, PortError> {
         let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
         inner.allocate(key, port)
     }
 
-    /// Releases any port allocated to the given RouteKey.
-    pub fn release(&self, key: &RouteKey) -> Option<u16> {
+    /// Releases any port allocated to the given ResourceKey.
+    pub fn release(&self, key: &ResourceKey) -> Option<u16> {
         let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
         let port = inner.release(key);
         if let Some(p) = port {
@@ -205,8 +206,8 @@ impl PortsStore {
         released
     }
 
-    /// Releases the port only if it is currently mapped to this exact port for the given RouteKey.
-    pub fn release_if_bound(&self, key: &RouteKey, port: u16) -> bool {
+    /// Releases the port only if it is currently mapped to this exact port for the given ResourceKey.
+    pub fn release_if_bound(&self, key: &ResourceKey, port: u16) -> bool {
         let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
         let released = inner.release_if_bound(key, port);
         if released {
@@ -216,26 +217,26 @@ impl PortsStore {
     }
 
     /// Synchronizes an authoritative port assignment observed from external resources.
-    pub fn sync(&self, key: &RouteKey, port: u16) {
+    pub fn sync(&self, key: &ResourceKey, port: u16) {
         let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
         inner.sync(key, port);
     }
 
-    /// Gets the allocated port for a RouteKey if present.
-    pub fn get_port(&self, key: &RouteKey) -> Option<u16> {
+    /// Gets the allocated port for a ResourceKey if present.
+    pub fn get_port(&self, key: &ResourceKey) -> Option<u16> {
         self.inner.read().expect(LOCK_POISONED_ERROR).get_port(key)
     }
 
-    /// Gets the RouteKey bound to a port if present.
-    pub fn get_route(&self, port: u16) -> Option<RouteKey> {
+    /// Gets the ResourceKey bound to a port if present.
+    pub fn get_route(&self, port: u16) -> Option<ResourceKey> {
         self.inner
             .read()
             .expect(LOCK_POISONED_ERROR)
             .get_route(port)
     }
 
-    /// Returns all (RouteKey, port) pairs for a given namespace and instance.
-    pub fn instance_routes(&self, namespace: &str, instance: &str) -> Vec<(RouteKey, u16)> {
+    /// Returns all (ResourceKey, port) pairs for a given namespace and instance.
+    pub fn instance_routes(&self, namespace: &str, instance: &str) -> Vec<(ResourceKey, u16)> {
         let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
         inner.instance_routes(namespace, instance)
     }
@@ -254,14 +255,16 @@ impl PortsStore {
 
 #[cfg(test)]
 mod tests {
+    use crate::cache::ResourceKey;
+
     use super::*;
     use std::sync::Arc;
 
-    fn k(s: &str) -> RouteKey {
-        RouteKey {
+    fn k(s: &str) -> ResourceKey {
+        ResourceKey {
             namespace: "default".into(),
             instance: "chal-1".into(),
-            route: s.into(),
+            resource: s.into(),
         }
     }
 
@@ -406,7 +409,7 @@ mod tests {
         for i in 0..50 {
             let store = store.clone();
             let handle = tokio::spawn(async move {
-                let key = RouteKey::new("default", format!("chal-{i}"), "pwn");
+                let key = ResourceKey::new("default", format!("chal-{i}"), "pwn");
                 store.allocate(&key, 0)
             });
             handles.push(handle);
@@ -434,9 +437,9 @@ mod tests {
     #[test]
     fn test_release_instance() {
         let store = make_store();
-        let k1 = RouteKey::new("default", "chal-1", "web");
-        let k2 = RouteKey::new("default", "chal-1", "pwn");
-        let k3 = RouteKey::new("default", "chal-2", "web");
+        let k1 = ResourceKey::new("default", "chal-1", "web");
+        let k2 = ResourceKey::new("default", "chal-1", "pwn");
+        let k3 = ResourceKey::new("default", "chal-2", "web");
 
         let p1 = store.allocate(&k1, 20001).unwrap();
         let p2 = store.allocate(&k2, 0).unwrap();
@@ -459,9 +462,9 @@ mod tests {
     #[test]
     fn test_instance_routes() {
         let store = make_store();
-        let k1 = RouteKey::new("default", "chal-1", "web");
-        let k2 = RouteKey::new("default", "chal-1", "pwn");
-        let k3 = RouteKey::new("default", "chal-2", "web");
+        let k1 = ResourceKey::new("default", "chal-1", "web");
+        let k2 = ResourceKey::new("default", "chal-1", "pwn");
+        let k3 = ResourceKey::new("default", "chal-2", "web");
 
         store.allocate(&k1, 20001).unwrap();
         store.allocate(&k2, 0).unwrap();
@@ -469,7 +472,11 @@ mod tests {
 
         let routes = store.instance_routes("default", "chal-1");
         assert_eq!(routes.len(), 2);
-        assert!(routes.iter().any(|(k, p)| k.route == "web" && *p == 20001));
-        assert!(routes.iter().any(|(k, _)| k.route == "pwn"));
+        assert!(
+            routes
+                .iter()
+                .any(|(k, p)| k.resource == "web" && *p == 20001)
+        );
+        assert!(routes.iter().any(|(k, _)| k.resource == "pwn"));
     }
 }

@@ -213,8 +213,11 @@ pub async fn reconcile_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::tests::{
-        dummy_context, dummy_context_with_routes, dummy_instance, dummy_kube_client,
+    use crate::{
+        cache::ResourceKey,
+        test_utils::tests::{
+            dummy_context, dummy_context_with_routes, dummy_instance, dummy_kube_client,
+        },
     };
     #[tokio::test]
     async fn test_commit_status() {
@@ -349,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_failure() {
         let client = dummy_kube_client();
-        let ctx = crate::Context::new(client);
+        let ctx = crate::Context::new_stub(client);
         let instance = dummy_instance("chal-1", None);
         let err = Error::TemplateNotFound("missing".to_string());
 
@@ -359,7 +362,7 @@ mod tests {
         let route_err = Error::RouteAllocationError(crate::routing::RouteError::Port(
             crate::routing::PortError::Occupied(
                 20001,
-                crate::routing::RouteKey::new("default", "other-chal", "pwn"),
+                ResourceKey::new("default", "other-chal", "pwn"),
             ),
         ));
         let res_route = reconcile_failure(&instance, &ctx, &route_err).await;
@@ -369,7 +372,7 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_failure_preserves_existing_resources() {
         let client = dummy_kube_client();
-        let ctx = crate::Context::new(client);
+        let ctx = Context::new_stub(client);
 
         let mut instance = dummy_instance("chal-1", None);
         instance.status = Some(CTFInstanceStatus {

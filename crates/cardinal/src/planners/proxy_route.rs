@@ -12,11 +12,14 @@ use k8s_openapi::jiff::Timestamp;
 
 use crate::{
     Context, Error, btreemap,
+    cache::ResourceKey,
     planners::Planner,
     reconcilers::template::ResolvedTemplate,
-    routing::{AllocatedRoute, RouteKey},
-    utils::labels::{INSTANCE_LABEL, INSTANCE_NAMESPACE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE},
-    utils::naming::resource_name,
+    routing::AllocatedRoute,
+    utils::{
+        labels::{INSTANCE_LABEL, INSTANCE_NAMESPACE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE},
+        naming::resource_name,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -62,7 +65,7 @@ impl Planner for ProxyRoutePlanner {
             let mut merged_spec = route_tmpl.clone();
             merged_spec.policy = policy;
             let merged_spec = build_merged_route_spec(&merged_spec, route_override);
-            let route_key = RouteKey::new(ns, instance_name, &route_tmpl.name);
+            let route_key = ResourceKey::new(ns, instance_name, &route_tmpl.name);
 
             let allocated: AllocatedRoute = allocator.allocate(&route_key, &merged_spec)?;
 
@@ -134,7 +137,7 @@ impl Planner for ProxyRoutePlanner {
                 .iter()
                 .find(|r| r.name == route_tmpl.name);
             let merged_spec = build_merged_route_spec(route_tmpl, route_override);
-            let route_key = RouteKey::new(instance_ns, instance_name, &route_tmpl.name);
+            let route_key = ResourceKey::new(instance_ns, instance_name, &route_tmpl.name);
 
             if let Some(allocator) = allocator {
                 // TLS hostnames are derived deterministically from the route key,

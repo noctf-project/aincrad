@@ -287,9 +287,8 @@ pub mod tests {
             PortRange(30000..=30010),
         ));
         let allocator = Arc::new(RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433));
-        let ctx = crate::Context::with_allocator(
+        let ctx = crate::Context::new_stub_with_allocator(
             client,
-            template_store.clone(),
             allocator,
             "aincrad-system",
             "cluster.local",

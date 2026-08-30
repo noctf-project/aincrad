@@ -1,8 +1,5 @@
-use std::sync::Arc;
-
 use cardinal::Error;
 use cardinal::cli::Opts;
-use cardinal::routing::{PortsStore, RouteAllocator};
 use clap::Parser;
 use kube::Client;
 use kube_lease_manager::LeaseManagerBuilder;
@@ -60,7 +57,7 @@ async fn main() -> Result<(), Error> {
                         } => {}
                         res = cardinal::controller::run(
                             kube_client.clone(),
-                            opts,
+                            opts.clone(),
                         ) => {
                             if let Err(err) = res {
                                 error!("atal controller error: {err}");

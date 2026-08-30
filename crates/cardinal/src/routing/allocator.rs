@@ -7,37 +7,12 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::cache::ResourceKey;
+
 use super::ports_store::{PortError, PortsStore};
 
 const HOSTNAME_ID_LEN: usize = 14;
 const MAX_PREFIX_LEN: usize = 56 - HOSTNAME_ID_LEN - 1;
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RouteKey {
-    pub namespace: String,
-    pub instance: String,
-    pub route: String,
-}
-
-impl RouteKey {
-    pub fn new(
-        namespace: impl Into<String>,
-        instance: impl Into<String>,
-        route: impl Into<String>,
-    ) -> Self {
-        Self {
-            namespace: namespace.into(),
-            instance: instance.into(),
-            route: route.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for RouteKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}/{}", self.namespace, self.instance, self.route)
-    }
-}
 
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum RouteError {
@@ -49,7 +24,7 @@ pub enum RouteError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AllocatedRoute {
-    pub route_key: RouteKey,
+    pub resource_key: ResourceKey,
     pub proxy_key: ProxyRouteKey,
     pub endpoint: CTFInstanceStatusEndpoint,
 }
@@ -82,12 +57,16 @@ impl RouteAllocator {
     }
 
     /// Allocates an endpoint and proxy route key given a RouteKey and CTFRouteSpec.
-    pub fn allocate(&self, key: &RouteKey, spec: &RouteSpec) -> Result<AllocatedRoute, RouteError> {
+    pub fn allocate(
+        &self,
+        key: &ResourceKey,
+        spec: &RouteSpec,
+    ) -> Result<AllocatedRoute, RouteError> {
         match spec.target() {
             Some(RouteTarget::Tcp(tcp)) => {
                 let port = self.ports.allocate(key, tcp.port.unwrap_or(0))?;
                 let endpoint = CTFInstanceStatusEndpoint {
-                    name: key.route.clone(),
+                    name: key.resource.clone(),
                     type_: "tcp".to_string(),
                     target: EndpointTarget {
                         host: self.hostname_suffix.clone(),
@@ -95,7 +74,7 @@ impl RouteAllocator {
                     },
                 };
                 Ok(AllocatedRoute {
-                    route_key: key.clone(),
+                    resource_key: key.clone(),
                     proxy_key: ProxyRouteKey::Tcp(port),
                     endpoint,
                 })
@@ -104,7 +83,7 @@ impl RouteAllocator {
                 let hostname = self.derive_hostname(key, tls.prefix.as_deref());
                 let fqdn = self.format_tls_host(&hostname);
                 let endpoint = CTFInstanceStatusEndpoint {
-                    name: key.route.clone(),
+                    name: key.resource.clone(),
                     type_: "tls".to_string(),
                     target: EndpointTarget {
                         host: fqdn,
@@ -112,7 +91,7 @@ impl RouteAllocator {
                     },
                 };
                 Ok(AllocatedRoute {
-                    route_key: key.clone(),
+                    resource_key: key.clone(),
                     proxy_key: ProxyRouteKey::Route(hostname),
                     endpoint,
                 })
@@ -122,7 +101,7 @@ impl RouteAllocator {
     }
 
     /// Releases any port allocated for the given RouteKey.
-    pub fn release(&self, key: &RouteKey) -> Option<u16> {
+    pub fn release(&self, key: &ResourceKey) -> Option<u16> {
         self.ports.release(key)
     }
 
@@ -132,7 +111,7 @@ impl RouteAllocator {
     }
 
     /// Releases the port only if it is currently mapped to this exact port for the given RouteKey.
-    pub fn release_if_bound(&self, key: &RouteKey, port: u16) -> bool {
+    pub fn release_if_bound(&self, key: &ResourceKey, port: u16) -> bool {
         self.ports.release_if_bound(key, port)
     }
 
@@ -142,20 +121,20 @@ impl RouteAllocator {
     }
 
     /// Synchronizes an authoritative port assignment observed from external resources.
-    pub fn sync(&self, key: &RouteKey, port: u16) {
+    pub fn sync(&self, key: &ResourceKey, port: u16) {
         self.ports.sync(key, port);
     }
 
     /// Synchronizes multiple port assignments from an initial list or batch.
-    pub fn sync_all(&self, routes: impl IntoIterator<Item = (RouteKey, u16)>) {
+    pub fn sync_all(&self, routes: impl IntoIterator<Item = (ResourceKey, u16)>) {
         for (key, port) in routes {
             self.ports.sync(&key, port);
         }
     }
 
     /// Derives the base hostname label (`{prefix}-{hash14}`).
-    pub fn derive_hostname(&self, key: &RouteKey, prefix: Option<&str>) -> String {
-        let raw_prefix = prefix.filter(|s| !s.is_empty()).unwrap_or(&key.route);
+    pub fn derive_hostname(&self, key: &ResourceKey, prefix: Option<&str>) -> String {
+        let raw_prefix = prefix.filter(|s| !s.is_empty()).unwrap_or(&key.resource);
         let clean_prefix = sanitize_prefix(raw_prefix);
 
         let seed_tag = format!("aincrad:route:v1:{}:{}", self.route_seed, key);
@@ -218,7 +197,7 @@ mod tests {
     #[test]
     fn test_allocate_tcp_auto_and_fixed() {
         let allocator = make_allocator();
-        let key_auto = RouteKey::new("default", "chal-1", "pwn");
+        let key_auto = ResourceKey::new("default", "chal-1", "pwn");
         let spec_auto = RouteSpec {
             backend: RouteBackend {
                 service: "pwn".into(),
@@ -229,7 +208,7 @@ mod tests {
         };
 
         let res_auto = allocator.allocate(&key_auto, &spec_auto).unwrap();
-        assert_eq!(res_auto.route_key, key_auto);
+        assert_eq!(res_auto.resource_key, key_auto);
         assert_eq!(res_auto.endpoint.name, "pwn");
         assert_eq!(res_auto.endpoint.type_, "tcp");
         assert_eq!(res_auto.endpoint.target.host, "c.sk8.dog");
@@ -240,7 +219,7 @@ mod tests {
             _ => panic!("expected ProxyRouteKey::Tcp"),
         }
 
-        let key_fixed = RouteKey::new("default", "chal-1", "admin");
+        let key_fixed = ResourceKey::new("default", "chal-1", "admin");
         let spec_fixed = RouteSpec {
             backend: k8s_common::crd::RouteBackend {
                 service: "admin".into(),
@@ -261,7 +240,7 @@ mod tests {
     #[test]
     fn test_allocate_tls_endpoint() {
         let allocator = make_allocator();
-        let key = RouteKey::new("default", "chal-1", "web");
+        let key = ResourceKey::new("default", "chal-1", "web");
         let spec = RouteSpec {
             backend: k8s_common::crd::RouteBackend {
                 service: "web".into(),
@@ -274,7 +253,7 @@ mod tests {
         };
 
         let res = allocator.allocate(&key, &spec).unwrap();
-        assert_eq!(res.route_key, key);
+        assert_eq!(res.resource_key, key);
         assert_eq!(res.endpoint.name, "web");
         assert_eq!(res.endpoint.type_, "tls");
         assert_eq!(res.endpoint.target.port, 4433);
@@ -293,7 +272,7 @@ mod tests {
     #[test]
     fn test_allocate_missing_target() {
         let allocator = make_allocator();
-        let key = RouteKey::new("default", "chal-1", "empty");
+        let key = ResourceKey::new("default", "chal-1", "empty");
         let spec = RouteSpec {
             backend: k8s_common::crd::RouteBackend {
                 service: "empty".into(),

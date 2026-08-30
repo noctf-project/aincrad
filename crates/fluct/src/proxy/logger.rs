@@ -240,10 +240,6 @@ impl LogBuffer {
         }
     }
 
-    pub fn capacity(&self) -> usize {
-        self.buf.len()
-    }
-
     fn write_footer(&mut self, len: usize, dir: u8) {
         debug_assert!(len <= MAX_PAYLOAD);
         let footer_val = ((len as u16) & 0x7FFF) | (((dir as u16) & 1) << 15);
