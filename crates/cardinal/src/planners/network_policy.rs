@@ -1,4 +1,5 @@
 use k8s_common::crd::CTFInstance;
+use k8s_openapi::api::networking::v1::NetworkPolicyIngressRule;
 use k8s_openapi::jiff::Timestamp;
 use k8s_openapi::{
     api::networking::v1::{
@@ -15,7 +16,7 @@ use crate::{
     Context, Error, btreemap,
     planners::{Planner, set_owner_ref},
     reconcilers::template::ResolvedTemplate,
-    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL},
+    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE},
     utils::naming::resource_name,
 };
 
@@ -42,32 +43,20 @@ impl Planner for NetworkPolicyPlanner {
             .map(|pod| pod.name.clone())
             .collect();
 
-        let internal_egress: Vec<NetworkPolicyPeer> = template
-            .spec
-            .pods
-            .iter()
-            .flat_map(|pod| {
-                let mut other_pod_names: Vec<String> = template
-                    .spec
-                    .pods
-                    .iter()
-                    .filter(|p| p.name != pod.name)
-                    .map(|p| p.name.clone())
-                    .collect();
-                other_pod_names.push(pod.name.clone());
-                other_pod_names.into_iter().map(|name| NetworkPolicyPeer {
+        let ingress_rules = vec![
+            NetworkPolicyIngressRule {
+                from: Some(vec![NetworkPolicyPeer {
                     pod_selector: Some(LabelSelector {
                         match_labels: Some(btreemap! {
                             INSTANCE_LABEL => instance_name,
-                            POD_LABEL => name,
                         }),
                         ..Default::default()
                     }),
-                    namespace_selector: None,
-                    ip_block: None,
-                })
-            })
-            .collect();
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }
+        ];
 
         let egress_rules = {
             let mut rules = Vec::new();
@@ -79,12 +68,16 @@ impl Planner for NetworkPolicyPlanner {
             }];
 
             rules.push(NetworkPolicyEgressRule {
-                ports: Some(vec![NetworkPolicyPort {
-                    port: None,
-                    protocol: None,
-                    end_port: None,
+                to: Some(vec![NetworkPolicyPeer {
+                    pod_selector: Some(LabelSelector {
+                        match_labels: Some(btreemap! {
+                            INSTANCE_LABEL => instance_name,
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
                 }]),
-                to: Some(internal_egress),
+                ..Default::default()
             });
 
             rules.push(NetworkPolicyEgressRule {
@@ -152,7 +145,7 @@ impl Planner for NetworkPolicyPlanner {
                 }),
                 policy_types: Some(vec!["Ingress".to_string(), "Egress".to_string()]),
                 egress: Some(egress_rules),
-                ingress: Some(vec![]),
+                ingress: Some(ingress_rules),
             }),
         };
         set_owner_ref(&mut np, instance);

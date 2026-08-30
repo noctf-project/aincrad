@@ -45,11 +45,10 @@ pub struct Opts {
 
     #[arg(
         long,
-        env = "IMAGE_ALIAS",
         value_parser = parse_image_alias,
         action = clap::ArgAction::Append
     )]
-    pub image_aliases: Option<Vec<(String, String)>>,
+    pub image_alias: Option<Vec<(String, String)>>,
 }
 
 /// Parses a single `key=value` image alias argument, validating the key and
@@ -122,7 +121,7 @@ impl Opts {
 
         // Duplicate image alias keys would make lookup ambiguous; reject them.
         let mut seen = std::collections::HashSet::new();
-        if let Some(aliases) = &self.image_aliases {
+        if let Some(aliases) = &self.image_alias {
             for (key, _) in aliases {
                 if !seen.insert(key) {
                     return Err(format!("duplicate image alias key '{key}'"));
@@ -135,7 +134,7 @@ impl Opts {
 
     /// Builds the deduplicated image alias map.
     pub fn image_alias_map(&self) -> std::collections::BTreeMap<String, String> {
-        self.image_aliases
+        self.image_alias
             .iter()
             .flatten()
             .cloned()
@@ -254,7 +253,7 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            image_aliases: None,
+            image_alias: None,
         };
         assert!(opts.validate().is_ok());
     }
@@ -269,7 +268,7 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            image_aliases: None,
+            image_alias: None,
         };
         let err = opts.validate().unwrap_err();
         assert!(err.contains("overlaps with auto_ports"));
@@ -285,7 +284,7 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            image_aliases: None,
+            image_alias: None,
         };
         let err = opts.validate().unwrap_err();
         assert!(err.contains("tls_port (4433) overlaps with reserved_ports"));
@@ -301,7 +300,7 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            image_aliases: None,
+            image_alias: None,
         };
         let err = opts.validate().unwrap_err();
         assert!(err.contains("tls_port (4433) overlaps with auto_ports"));
@@ -316,7 +315,7 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            image_aliases,
+            image_alias: image_aliases,
         }
     }
 

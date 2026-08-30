@@ -64,6 +64,7 @@ impl Planner for ServicePlanner {
                         INSTANCE_LABEL => instance_name,
                         POD_LABEL => pod.name.as_str(),
                     }),
+                    cluster_ip: Some("None".into()),
                     ports: Some(
                         ports
                             .iter()
