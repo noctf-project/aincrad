@@ -4,6 +4,8 @@ pub mod proxy_route;
 pub mod replicaset;
 pub mod service;
 
+use std::collections::BTreeMap;
+
 pub use helpers::apply_condition;
 pub use helpers::validate_overrides;
 pub use network_policy::NetworkPolicyPlanner;
@@ -15,6 +17,7 @@ use k8s_common::crd::CTFInstance;
 use kube::{Resource, core::NamespaceResourceScope};
 use serde::{Serialize, de::DeserializeOwned};
 
+use crate::utils::naming::resource_name;
 use crate::{Context, Error, reconcilers::template::ResolvedTemplate};
 
 /// Pure trait for declaring the desired state of a child Kubernetes resource type.
@@ -61,4 +64,16 @@ pub fn set_owner_ref<K: Resource>(resource: &mut K, instance: &CTFInstance) {
     if let Some(owner) = instance.controller_owner_ref(&()) {
         meta.owner_references = Some(vec![owner]);
     }
+}
+
+pub fn get_services_map(
+    template: &ResolvedTemplate,
+    instance_name: &str,
+) -> BTreeMap<String, String> {
+    let mut services_map = BTreeMap::new();
+    for pod_tmpl in &template.spec.pods {
+        let svc_name = resource_name(instance_name, &pod_tmpl.name);
+        services_map.insert(pod_tmpl.name.clone(), svc_name);
+    }
+    services_map
 }

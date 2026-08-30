@@ -1,8 +1,11 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use k8s_common::crd::CTFInstance;
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta};
 use k8s_openapi::jiff::Timestamp;
 
+use crate::planners::get_services_map;
 use crate::{
     Context, Error, btreemap,
     planners::{Planner, set_owner_ref},
@@ -26,6 +29,10 @@ impl Planner for ServicePlanner {
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
         let mut desired = Vec::new();
+        let mut context_map = BTreeMap::new();
+        let services = get_services_map(template, instance_name);
+        context_map.insert("params".to_string(), &template.params_map);
+        context_map.insert("services".to_string(), &services);
 
         for pod in &template.spec.pods {
             let svc_name = resource_name(instance_name, &pod.name);
@@ -35,6 +42,15 @@ impl Planner for ServicePlanner {
                 INSTANCE_LABEL => instance_name,
                 POD_LABEL => pod.name.as_str(),
             };
+
+            // grab all ports and put them into the service spec
+            let ports: BTreeSet<i32> = pod
+                .spec
+                .containers
+                .iter()
+                .filter_map(|x| x.ports.as_ref())
+                .flat_map(|x| x.iter().map(|c| c.container_port))
+                .collect();
 
             let mut svc = Service {
                 metadata: ObjectMeta {
@@ -48,10 +64,15 @@ impl Planner for ServicePlanner {
                         INSTANCE_LABEL => instance_name,
                         POD_LABEL => pod.name.as_str(),
                     }),
-                    ports: Some(vec![ServicePort {
-                        port: 80,
-                        ..Default::default()
-                    }]),
+                    ports: Some(
+                        ports
+                            .iter()
+                            .map(|p| ServicePort {
+                                port: *p,
+                                ..Default::default()
+                            })
+                            .collect(),
+                    ),
                     ..Default::default()
                 }),
                 ..Default::default()

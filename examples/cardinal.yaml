@@ -24,12 +24,11 @@ spec:
                 memory: "16Mi"
   routes:
     - name: chal
-      spec:
-        backend:
-          service: chal
-          port: 80
-        tls:
-          prefix: whoami
+      backend:
+        service: chal
+        port: 80
+      tls:
+        prefix: whoami
 ---
 apiVersion: aincrad.noctf.dev/v1
 kind: CTFInstance

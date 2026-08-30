@@ -10,6 +10,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector, O
 use k8s_openapi::jiff::Timestamp;
 use sha2::{Digest, Sha256};
 
+use crate::planners::get_services_map;
 use crate::utils::HashWriter;
 use crate::utils::naming::resource_name;
 use crate::{
@@ -25,6 +26,10 @@ use crate::{
 pub static POD_PATCH_BLACKLIST: LazyLock<GlobSet> = LazyLock::new(|| {
     let mut builder = GlobSetBuilder::new();
     builder.add(Glob::new("/containers/*/securityContext**").expect("valid glob pattern"));
+    // Container ports define the exposed topology (Services, routes); templating
+    // them lets per-instance values desync from what is actually routed.
+    builder.add(Glob::new("/containers/*/ports**").expect("valid glob pattern"));
+    builder.add(Glob::new("/initContainers/*/ports**").expect("valid glob pattern"));
     builder.add(Glob::new("/hostNetwork**").expect("valid glob pattern"));
     builder.add(Glob::new("/hostPID**").expect("valid glob pattern"));
     builder.add(Glob::new("/hostIPC**").expect("valid glob pattern"));
@@ -56,15 +61,10 @@ impl Planner for ReplicaSetPlanner {
             .and_then(|a| a.get(RESTARTED_AT_ANNOTATION))
             .map(|s| s.as_str());
 
-        let mut services_map = BTreeMap::new();
-        for pod_tmpl in &template.spec.pods {
-            let svc_name = resource_name(instance_name, &pod_tmpl.name);
-            services_map.insert(pod_tmpl.name.clone(), svc_name);
-        }
-
         let mut context_map = BTreeMap::new();
+        let services = get_services_map(template, instance_name);
         context_map.insert("params".to_string(), &template.params_map);
-        context_map.insert("services".to_string(), &services_map);
+        context_map.insert("services".to_string(), &services);
 
         let mut desired = Vec::new();
 
@@ -74,8 +74,7 @@ impl Planner for ReplicaSetPlanner {
                 .map(|p| p.replicas)
                 .unwrap_or(pod_tmpl.replicas);
 
-            let patched_pod_spec = template.get_patched_pod_spec(pod_tmpl, &context_map)?;
-            let mut patched_pod_spec = patched_pod_spec;
+            let mut patched_pod_spec = template.get_patched_pod_spec(pod_tmpl, &context_map)?;
             apply_image_aliases(&mut patched_pod_spec, &ctx.image_aliases);
 
             let rs_spec = build_replicaset_spec(
@@ -618,5 +617,33 @@ mod tests {
                 .as_deref(),
             Some("chal-web-db")
         );
+    }
+
+    #[test]
+    fn test_pod_patch_blacklist_blocks_ports() {
+        let blocked = [
+            "/containers/0/ports",
+            "/containers/0/ports/0/containerPort",
+            "/initContainers/0/ports",
+            "/initContainers/0/ports/0/containerPort",
+        ];
+        for path in blocked {
+            assert!(
+                POD_PATCH_BLACKLIST.is_match(path),
+                "path '{path}' must be blacklisted"
+            );
+        }
+
+        let allowed = [
+            "/containers/0/env/0/value",
+            "/activeDeadlineSeconds",
+            "/containers/0/resources",
+        ];
+        for path in allowed {
+            assert!(
+                !POD_PATCH_BLACKLIST.is_match(path),
+                "path '{path}' must not be blacklisted"
+            );
+        }
     }
 }
