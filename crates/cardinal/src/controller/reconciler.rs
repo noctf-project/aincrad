@@ -102,12 +102,14 @@ pub async fn handle_instance_watcher_init_done(
     system_ns: &str,
     cache: &crate::cache::InstanceCache,
     proxy_routes: &crate::cache::ResourceCache<CTFProxyRoute>,
+    managed_namespace: Option<&str>,
 ) -> Result<(), Error> {
     let live_instances: std::collections::HashSet<(String, String)> =
         cache.live_instances().into_iter().collect();
 
     info!(
         live_count = live_instances.len(),
+        managed_namespace = ?managed_namespace,
         "CTFInstance init done; checking and pruning dangling proxy routes..."
     );
     crate::reconcilers::helper::prune_unreferenced_proxy_routes(
@@ -115,6 +117,7 @@ pub async fn handle_instance_watcher_init_done(
         system_ns,
         proxy_routes,
         &live_instances,
+        managed_namespace,
     )
     .await?;
 
@@ -364,6 +367,7 @@ where
     let proxy_routes_init_done = context.caches.proxy_routes.clone();
 
     let ready_task = ready.clone();
+    let namespace_task = namespace.clone();
 
     let (fatal_tx, mut fatal_rx) = tokio::sync::broadcast::channel::<String>(1);
 
@@ -376,6 +380,7 @@ where
             let cache = instance_cache_task.clone();
             let fatal_tx = fatal_tx.clone();
             let ready = ready_task.clone();
+            let managed_ns = namespace_task.clone();
 
             async move {
                 // Hold instance events until every child cache has completed its initial sync.
@@ -389,6 +394,7 @@ where
                             &system_ns,
                             &cache,
                             &proxy_routes,
+                            managed_ns.as_deref(),
                         )
                         .await
                     {
@@ -847,9 +853,14 @@ mod tests {
 
         let proxy_routes = ResourceCache::<CTFProxyRoute>::new();
 
-        let res =
-            handle_instance_watcher_init_done(client, "aincrad-system", &cache, &proxy_routes)
-                .await;
+        let res = handle_instance_watcher_init_done(
+            client,
+            "aincrad-system",
+            &cache,
+            &proxy_routes,
+            None,
+        )
+        .await;
         assert!(res.is_ok());
     }
 
@@ -887,9 +898,14 @@ mod tests {
         };
         proxy_routes.handle(&kube::runtime::watcher::Event::Apply(orphan));
 
-        let res =
-            handle_instance_watcher_init_done(client, "aincrad-system", &cache, &proxy_routes)
-                .await;
+        let res = handle_instance_watcher_init_done(
+            client,
+            "aincrad-system",
+            &cache,
+            &proxy_routes,
+            None,
+        )
+        .await;
         assert!(res.is_err());
     }
 

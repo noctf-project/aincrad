@@ -243,12 +243,13 @@ pub async fn delete_proxy_routes_batch(
 }
 
 /// Prunes dangling CTFProxyRoute resources in the system namespace that do not
-/// belong to any active CTFInstance, driven entirely by the live cache.
+/// belong to any active CTFInstance in the managed namespace (or across all namespaces if none specified).
 pub async fn prune_unreferenced_proxy_routes(
     client: kube::Client,
     system_namespace: &str,
     proxy_routes: &ResourceCache<CTFProxyRoute>,
     live_instances: &HashSet<(String, String)>,
+    managed_namespace: Option<&str>,
 ) -> Result<usize, Error> {
     let api: Api<CTFProxyRoute> = Api::namespaced(client, system_namespace);
 
@@ -256,6 +257,11 @@ pub async fn prune_unreferenced_proxy_routes(
         .all_entries()
         .into_iter()
         .filter(|entry| {
+            if let Some(target_ns) = managed_namespace
+                && entry.key.namespace != target_ns
+            {
+                return false;
+            }
             !live_instances.contains(&(entry.key.namespace.clone(), entry.key.instance.clone()))
         })
         .map(|entry| entry.name)
@@ -534,7 +540,7 @@ mod tests {
                 .collect();
 
         let pruned =
-            prune_unreferenced_proxy_routes(client, "aincrad-system", &proxy_routes, &live)
+            prune_unreferenced_proxy_routes(client, "aincrad-system", &proxy_routes, &live, None)
                 .await
                 .expect("prune should succeed");
         assert_eq!(pruned, 1, "only the orphaned route should be pruned");
@@ -568,7 +574,7 @@ mod tests {
                 .collect();
 
         let pruned =
-            prune_unreferenced_proxy_routes(client, "aincrad-system", &proxy_routes, &live)
+            prune_unreferenced_proxy_routes(client, "aincrad-system", &proxy_routes, &live, None)
                 .await
                 .expect("prune should succeed");
         assert_eq!(pruned, 0);
@@ -576,6 +582,71 @@ mod tests {
             log.lock().unwrap().len(),
             0,
             "nothing to prune when every route's instance is live"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_unreferenced_proxy_routes_scoped_to_managed_namespace() {
+        use crate::cache::ResourceCache;
+
+        let (client, log) = recording_kube_client();
+        let proxy_routes = ResourceCache::<CTFProxyRoute>::new();
+
+        // Route in team-a (managed, live)
+        let mut r1 = proxy_route("p30001", "chal-1", "web");
+        r1.metadata.labels.as_mut().unwrap().insert(
+            crate::utils::labels::NAMESPACE_LABEL.to_string(),
+            "team-a".to_string(),
+        );
+        proxy_routes.handle(&kube::runtime::watcher::Event::Apply(r1));
+
+        // Route in team-a (managed, orphaned)
+        let mut r2 = proxy_route("p30002", "dead-chal", "pwn");
+        r2.metadata.labels.as_mut().unwrap().insert(
+            crate::utils::labels::NAMESPACE_LABEL.to_string(),
+            "team-a".to_string(),
+        );
+        proxy_routes.handle(&kube::runtime::watcher::Event::Apply(r2));
+
+        // Route in team-b (unmanaged, orphaned from team-a's perspective)
+        let mut r3 = proxy_route("p30003", "other-chal", "web");
+        r3.metadata.labels.as_mut().unwrap().insert(
+            crate::utils::labels::NAMESPACE_LABEL.to_string(),
+            "team-b".to_string(),
+        );
+        proxy_routes.handle(&kube::runtime::watcher::Event::Apply(r3));
+
+        // Live set only knows team-a instances
+        let live: std::collections::HashSet<(String, String)> =
+            [("team-a".to_string(), "chal-1".to_string())]
+                .into_iter()
+                .collect();
+
+        // Pruning scoped to team-a must only prune r2, not r3
+        let pruned = prune_unreferenced_proxy_routes(
+            client,
+            "aincrad-system",
+            &proxy_routes,
+            &live,
+            Some("team-a"),
+        )
+        .await
+        .expect("prune should succeed");
+        assert_eq!(
+            pruned, 1,
+            "only orphaned route in managed namespace should be pruned"
+        );
+
+        let log = log.lock().unwrap();
+        assert!(
+            log.iter()
+                .any(|s| s.contains("DELETE") && s.contains("p30002")),
+            "team-a orphan must be deleted"
+        );
+        assert!(
+            !log.iter()
+                .any(|s| s.contains("DELETE") && s.contains("p30003")),
+            "unmanaged team-b route must NOT be deleted"
         );
     }
 }
