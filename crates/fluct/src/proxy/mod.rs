@@ -1,7 +1,6 @@
 mod challenge;
 mod flag;
 mod handler;
-mod logger;
 
 use std::time::Duration;
 

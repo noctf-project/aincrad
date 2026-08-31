@@ -121,17 +121,6 @@ spec:
                           description: Flag string or template string for the challenge route.
                           nullable: true
                           type: string
-                        logging:
-                          description: Logging configuration for player TCP/TLS session traffic.
-                          nullable: true
-                          properties:
-                            needle:
-                              description: |-
-                                Substring to search for in the captured traffic. When set, only the
-                                portion of the log surrounding the first match is retained.
-                              nullable: true
-                              type: string
-                          type: object
                         pow:
                           description: Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
                           nullable: true
@@ -509,17 +498,6 @@ spec:
                     description: Flag string or template string for the challenge route.
                     nullable: true
                     type: string
-                  logging:
-                    description: Logging configuration for player TCP/TLS session traffic.
-                    nullable: true
-                    properties:
-                      needle:
-                        description: |-
-                          Substring to search for in the captured traffic. When set, only the
-                          portion of the log surrounding the first match is retained.
-                        nullable: true
-                        type: string
-                    type: object
                   pow:
                     description: Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
                     nullable: true

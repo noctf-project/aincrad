@@ -79,18 +79,6 @@ pub struct RoutePolicySpec {
     pub request_uid: bool,
     /// Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
     pub pow: Option<RouteSpecPOW>,
-    /// Logging configuration for player TCP/TLS session traffic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub logging: Option<RouteLoggingSpec>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RouteLoggingSpec {
-    /// Substring to search for in the captured traffic. When set, only the
-    /// portion of the log surrounding the first match is retained.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub needle: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]

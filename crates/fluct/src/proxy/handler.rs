@@ -1,12 +1,11 @@
-use std::{io::Write, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{io::Write, net::SocketAddr, sync::Arc, time::Duration};
 
-use chrono::{Timelike, Utc};
+use chrono::Utc;
 use fluct::{Error, Session};
 use k8s_common::crd::CTFProxyRoute;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
-    try_join,
 };
 use tracing::debug;
 
@@ -17,7 +16,6 @@ use crate::{
         challenge::{Challenge, ChallengeSolveState},
         flag::{FlagGenerator, V1FlagGenerator},
         get_line,
-        logger::TrafficLogger,
     },
 };
 
@@ -132,74 +130,17 @@ impl Handler {
             b_tx.write_all(&buf).await?;
         }
 
-        if spec.policy.logging.is_some() {
-            let needle = spec
-                .policy
-                .logging
-                .as_ref()
-                .and_then(|l| l.needle.as_deref());
-            let path = Path::new(&self.service.config.logs_dir).join(self.get_log_filename());
-            let log = TrafficLogger::new(self.service.config.max_log_size, needle);
-            try_join!(
-                self.pipe(log.clone(), 0, c_rx, b_tx),
-                self.pipe(log.clone(), 1, b_rx, c_tx),
-            )?;
-            if log.should_flush() {
-                log.flush(&path).await?;
-            }
-        } else {
-            let client_to_server = async {
-                tokio::io::copy(&mut c_rx, &mut b_tx).await?;
-                b_tx.shutdown().await
-            };
-            let server_to_client = async {
-                tokio::io::copy(&mut b_rx, &mut c_tx).await?;
-                c_tx.shutdown().await
-            };
-            let _ = tokio::join!(client_to_server, server_to_client);
-        }
-
+        let client_to_server = async {
+            tokio::io::copy(&mut c_rx, &mut b_tx).await?;
+            b_tx.shutdown().await
+        };
+        let server_to_client = async {
+            tokio::io::copy(&mut b_rx, &mut c_tx).await?;
+            c_tx.shutdown().await
+        };
+        let r = tokio::join!(client_to_server, server_to_client);
+        r.0.and(r.1)?;
         Ok(())
-    }
-
-    async fn pipe<R, W>(
-        &self,
-        log: Arc<TrafficLogger>,
-        stream: u8,
-        mut rx: R,
-        mut tx: W,
-    ) -> Result<(), Error>
-    where
-        R: AsyncBufReadExt + Unpin,
-        W: AsyncWrite + Unpin,
-    {
-        loop {
-            let bytes = match rx.fill_buf().await {
-                Ok(bytes) => bytes,
-                Err(err) => return Err(Box::new(err)),
-            };
-            let len = bytes.len();
-            if len == 0 {
-                let _ = tx.shutdown().await;
-                return Ok(());
-            }
-            tx.write_all(bytes).await?;
-            log.write(stream, bytes).await;
-            rx.consume(len);
-        }
-    }
-
-    fn get_log_filename(&self) -> String {
-        let timestamp_nanos = (self.session.timestamp.timestamp() as u64) * 1_000_000_000
-            + (self.session.timestamp.nanosecond() as u64);
-        let name = self.route.metadata.name.as_deref().unwrap_or("unknown");
-        let ns = self
-            .route
-            .metadata
-            .namespace
-            .as_deref()
-            .unwrap_or("default");
-        format!("{}:{}:{}", ns, name, timestamp_nanos)
     }
 }
 
@@ -213,8 +154,7 @@ mod tests {
     use k8s_common::crd::{CTFProxyRouteSpec, RoutePolicySpec, RouteSpecPOW};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::path::Path;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
     use tokio_util::sync::CancellationToken;
 
     fn create_test_service_context() -> Arc<ServiceContext> {
@@ -226,8 +166,6 @@ mod tests {
                 tls_cert: "cert.pem".into(),
                 tls_key: "key.pem".into(),
                 flag_prefix: "CTF".into(),
-                logs_dir: "./data/".into(),
-                max_log_size: 1024,
                 port_ranges: vec![PortRange(20000..=20999), PortRange(30000..=30999)],
                 system_namespace: None,
                 tproxy_port: None,
@@ -240,79 +178,6 @@ mod tests {
             ),
             shutdown: CancellationToken::new(),
         })
-    }
-
-    #[tokio::test]
-    async fn test_handler_get_log_filename() {
-        let ctx = create_test_service_context();
-        let spec = CTFProxyRouteSpec {
-            policy: RoutePolicySpec {
-                flag: Some("test_flag".into()),
-                ..Default::default()
-            },
-            backend: "127.0.0.1:8080".into(),
-        };
-        let challenge = Arc::new(CTFProxyRoute {
-            metadata: ObjectMeta {
-                name: Some("p20001".into()),
-                namespace: Some("default".into()),
-                ..Default::default()
-            },
-            spec,
-        });
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
-        let mut handler = Handler::new(ctx, challenge, addr);
-        handler.flag = "CTF{test_flag|secret_payload}".into();
-
-        let filename = handler.get_log_filename();
-        assert!(filename.starts_with("default:p20001:"));
-    }
-
-    #[tokio::test]
-    async fn test_handler_pipe() {
-        let ctx = create_test_service_context();
-        let spec = CTFProxyRouteSpec {
-            backend: "127.0.0.1:8080".into(),
-            ..Default::default()
-        };
-        let challenge = Arc::new(CTFProxyRoute {
-            metadata: ObjectMeta {
-                name: Some("p20001".into()),
-                namespace: Some("default".into()),
-                ..Default::default()
-            },
-            spec,
-        });
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
-        let handler = Handler::new(ctx, challenge, addr);
-
-        let (client_tx, server_rx) = tokio::io::duplex(64);
-        let (server_tx, mut client_rx) = tokio::io::duplex(64);
-
-        let log = TrafficLogger::new(1024, None);
-        let pipe_log = log.clone();
-
-        let rx = BufReader::new(server_rx);
-        let pipe_handle =
-            tokio::spawn(async move { handler.pipe(pipe_log, 0, rx, server_tx).await });
-
-        // Write payload to client_tx
-        tokio::spawn(async move {
-            let mut tx = client_tx;
-            tx.write_all(b"hello pipe").await.unwrap();
-        });
-
-        let mut buf = vec![0u8; 10];
-        client_rx.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"hello pipe");
-
-        pipe_handle.await.unwrap().unwrap();
-
-        let path = Path::new("/tmp/fluct-pipe-test.log");
-        log.flush(path).await.unwrap();
-        let bytes = tokio::fs::read(path).await.unwrap();
-        let _ = tokio::fs::remove_file(path).await;
-        assert_eq!(bytes, b"hello pipe\x0a\x00");
     }
 
     #[tokio::test]

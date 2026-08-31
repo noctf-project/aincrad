@@ -839,7 +839,6 @@ name = "fluct"
 version = "0.1.0"
 dependencies = [
  "aes",
- "aho-corasick",
  "aincrad-macros",
  "axum",
  "base32",

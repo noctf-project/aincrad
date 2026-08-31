@@ -27,8 +27,6 @@ pub struct ServiceConfig {
     pub tls_cert: PathBuf,
     pub tls_key: PathBuf,
     pub flag_prefix: String,
-    pub logs_dir: String,
-    pub max_log_size: usize,
 }
 
 /// Private CLI argument parser
@@ -71,14 +69,6 @@ pub struct RawServiceConfig {
     /// CTF flag prefix
     #[clap(long, default_value = "CTF")]
     pub flag_prefix: String,
-
-    /// Logs Directory
-    #[clap(long, default_value = "./data/")]
-    pub logs_dir: String,
-
-    /// Maximum size in bytes of retained traffic log per connection
-    #[clap(long, default_value = "1048576")]
-    pub max_log_size: usize,
 }
 
 impl TryFrom<RawServiceConfig> for ServiceConfig {
@@ -98,8 +88,6 @@ impl TryFrom<RawServiceConfig> for ServiceConfig {
             tls_cert: raw.tls_cert,
             tls_key: raw.tls_key,
             flag_prefix: raw.flag_prefix,
-            logs_dir: raw.logs_dir,
-            max_log_size: raw.max_log_size,
         };
         config.validate()?;
         Ok(config)
@@ -192,26 +180,10 @@ mod tests {
         assert_eq!(cfg.tls_key, PathBuf::from("key.pem"));
         assert_eq!(cfg.system_namespace, Some("aincrad-system".to_string()));
         assert_eq!(cfg.flag_prefix, "CTF");
-        assert_eq!(cfg.max_log_size, 1048576);
         assert_eq!(
             cfg.port_ranges,
             vec![PortRange(10000..=19999), PortRange(20000..=29999)]
         );
-    }
-
-    #[test]
-    fn test_service_config_max_log_size() {
-        let args = [
-            "fluct",
-            "--tls-cert",
-            "cert.pem",
-            "--tls-key",
-            "key.pem",
-            "--max-log-size",
-            "65536",
-        ];
-        let cfg = parse_config_from(args).unwrap();
-        assert_eq!(cfg.max_log_size, 65536);
     }
 
     #[test]
