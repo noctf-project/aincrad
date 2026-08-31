@@ -102,13 +102,7 @@ pub mod lifecycle {
                 name,
                 ns, "CTFInstance marked for deletion, cleaning up cross-namespace routes..."
             );
-            reconcilers::helper::cleanup_instance_routes(
-                ctx.client.clone(),
-                &ctx.system_namespace,
-                instance,
-                ctx.route_allocator.as_deref(),
-            )
-            .await?;
+            reconcilers::helper::cleanup_instance_routes(ctx, instance).await?;
             return Ok(Step::Finish(Action::await_change()));
         }
 
@@ -235,16 +229,9 @@ pub mod apply {
         apply_planner::<ServicePlanner>(flow.ctx.client.clone(), instance, template, flow.ctx)
             .await?;
 
-        if let Some(allocator) = &flow.ctx.route_allocator {
+        if flow.ctx.route_allocator.is_some() {
             let routes = ProxyRoutePlanner::plan(instance, template, flow.ctx)?;
-            apply_proxy_routes(
-                flow.ctx.client.clone(),
-                &flow.ctx.system_namespace,
-                instance,
-                routes,
-                allocator,
-            )
-            .await?;
+            apply_proxy_routes(flow.ctx, instance, routes).await?;
         }
 
         Ok(())

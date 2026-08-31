@@ -4,9 +4,9 @@ use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
 use futures::{Stream, StreamExt};
+use k8s_common::crd::CTFProxyRoute;
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::core::v1::Service;
-use k8s_common::crd::CTFProxyRoute;
 use kube::runtime::watcher::{self, Config, Event, watcher};
 use kube::runtime::{Predicate, WatchStreamExt, predicates};
 use kube::{Api, Resource};
@@ -91,9 +91,14 @@ impl<T: ResourceProjection> ResourceCache<T> {
     /// Builds a labeled, filtered watcher stream that feeds this cache from
     /// the cluster. The stream only follows objects carrying `INSTANCE_LABEL`.k
     /// The cache is marked ready when the watcher completes its initial sync.
+    ///
+    /// `observe` runs on every raw watcher event before coalescing, letting
+    /// callers react to `Apply`/`Delete` transitions while they are still
+    /// distinguishable.
     pub fn watcher_stream(
         &self,
         api: Api<T>,
+        observe: impl Fn(&Event<T>) + Send + 'static,
     ) -> impl Stream<Item = Result<T, watcher::Error>> + Send + 'static
     where
         T: Resource + Clone + DeserializeOwned + Debug + Send + 'static,
@@ -105,6 +110,7 @@ impl<T: ResourceProjection> ResourceCache<T> {
             .default_backoff()
             .inspect(move |res| {
                 if let Ok(event) = res {
+                    observe(event);
                     match event {
                         Event::Init => cache.mark_unready(),
                         Event::InitDone => cache.mark_ready(),
@@ -178,11 +184,17 @@ impl<T: ResourceProjection> ResourceCache<T> {
             .collect()
     }
 
-    /// Returns the concrete object names of every resource in the cache,
-    /// across all namespaces and instances. Used for the startup prune sweep.
-    pub fn all_names(&self) -> Vec<String> {
+    /// Returns every entry in the cache, across all namespaces and instances.
+    pub fn all_entries(&self) -> Vec<ResourceEntry<T::Value>> {
         let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        lock.index.keys().map(|k| k.name.clone()).collect()
+        lock.index
+            .iter()
+            .map(|(k, v)| ResourceEntry {
+                key: k.resource.clone(),
+                name: k.name.clone(),
+                value: v.clone(),
+            })
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -464,36 +476,6 @@ mod tests {
         assert_eq!(mine.len(), 2);
     }
 
-    #[test]
-    fn test_all_names_across_instances() {
-        let cache = ResourceCache::<TestResource>::new();
-        cache.handle(&Event::Apply(TestResource::new(
-            "chal-1", "web", "p30001", "web",
-        )));
-        cache.handle(&Event::Apply(TestResource::new(
-            "chal-1", "pwn", "p30002", "pwn",
-        )));
-        cache.handle(&Event::Apply(TestResource::new(
-            "chal-2",
-            "web",
-            "rwhoami",
-            "web-other",
-        )));
-
-        let mut names = cache.all_names();
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "p30001".to_string(),
-                "p30002".to_string(),
-                "rwhoami".to_string()
-            ]
-        );
-    }
-
-    /// ----- ResourceProjection API tests -------------------------------
-
     fn svc(name: &str, ns: &str, instance: &str, resource: &str) -> Service {
         let mut labels = std::collections::BTreeMap::new();
         if !instance.is_empty() {
@@ -542,7 +524,6 @@ mod tests {
                 observed_generation: Some(7),
                 ..Default::default()
             }),
-            ..Default::default()
         }
     }
 
@@ -575,7 +556,10 @@ mod tests {
     fn test_service_projection_extracts_key_and_name() {
         let svc = svc("chal-1-web", "team-1", "chal-1", "web");
 
-        assert_eq!(Service::key(&svc), ResourceKey::new("team-1", "chal-1", "web"));
+        assert_eq!(
+            Service::key(&svc),
+            ResourceKey::new("team-1", "chal-1", "web")
+        );
         assert_eq!(Service::name(&svc), "chal-1-web");
         assert_eq!(Service::value(&svc), ());
     }
@@ -599,12 +583,18 @@ mod tests {
         };
 
         let key = Service::key(&bare);
-        assert_eq!(key.namespace, "default", "missing namespace defaults to default");
+        assert_eq!(
+            key.namespace, "default",
+            "missing namespace defaults to default"
+        );
         assert_eq!(
             key.instance, "bare-svc",
             "missing INSTANCE_LABEL falls back to the object name"
         );
-        assert_eq!(key.resource, "", "missing RESOURCE_LABEL is an empty disambig");
+        assert_eq!(
+            key.resource, "",
+            "missing RESOURCE_LABEL is an empty disambig"
+        );
         assert_eq!(Service::name(&bare), "bare-svc");
     }
 
@@ -659,7 +649,6 @@ mod tests {
             },
             spec: Some(ReplicaSetSpec::default()),
             status: None,
-            ..Default::default()
         };
 
         assert_eq!(
@@ -713,8 +702,18 @@ mod tests {
     fn test_service_cache_tracks_reallocated_names() {
         let cache = ResourceCache::<Service>::new();
 
-        cache.handle(&Event::Apply(svc("chal-1-web-old", "team-1", "chal-1", "web")));
-        cache.handle(&Event::Apply(svc("chal-1-web-new", "team-1", "chal-1", "web")));
+        cache.handle(&Event::Apply(svc(
+            "chal-1-web-old",
+            "team-1",
+            "chal-1",
+            "web",
+        )));
+        cache.handle(&Event::Apply(svc(
+            "chal-1-web-new",
+            "team-1",
+            "chal-1",
+            "web",
+        )));
 
         assert_eq!(cache.len(), 2, "both names must coexist until pruned");
         let entries = cache.for_instance("team-1", "chal-1");
@@ -736,10 +735,7 @@ mod tests {
             1,
             "prefix 'chal' must not bleed into 'chal-1'"
         );
-        assert_eq!(
-            cache.for_instance("team-1", "chal-2").len(),
-            1
-        );
+        assert_eq!(cache.for_instance("team-1", "chal-2").len(), 1);
     }
 
     #[test]

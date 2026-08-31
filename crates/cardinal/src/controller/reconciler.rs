@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use futures::{Stream, StreamExt};
 use k8s_common::{
     RESOURCE_LABEL,
-    crd::{CTFInstance, CTFProxyRoute, CTFTemplate},
+    crd::{CTFInstance, CTFProxyRoute, CTFTemplate, ProxyRouteKey},
 };
 use k8s_openapi::api::{apps::v1::ReplicaSet, core::v1::Service};
 use kube::{
@@ -95,12 +95,13 @@ fn instance_predicate() -> impl Predicate<CTFInstance> {
         .combine(|obj: &CTFInstance| Some(u64::from(obj.metadata.deletion_timestamp.is_some())))
 }
 
-/// Handles instance watcher `InitDone` event by pruning unreferenced proxy routes in the cluster.
+/// Handles instance watcher `InitDone` event by pruning unreferenced proxy routes
+/// from the live proxy-route cache.
 pub async fn handle_instance_watcher_init_done(
     client: Client,
     system_ns: &str,
     cache: &crate::cache::InstanceCache,
-    allocator: &crate::routing::RouteAllocator,
+    proxy_routes: &crate::cache::ResourceCache<CTFProxyRoute>,
 ) -> Result<(), Error> {
     let live_instances: std::collections::HashSet<(String, String)> =
         cache.live_instances().into_iter().collect();
@@ -112,8 +113,8 @@ pub async fn handle_instance_watcher_init_done(
     crate::reconcilers::helper::prune_unreferenced_proxy_routes(
         client,
         system_ns,
+        proxy_routes,
         &live_instances,
-        allocator,
     )
     .await?;
 
@@ -206,55 +207,35 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
         hostname_suffix,
         tls_port,
     );
-    match proxy_routes.list(&Default::default()).await {
-        Ok(routes) => {
-            use k8s_common::crd::ProxyRouteKey;
-            use kube::Resource;
-
-            allocator.clear();
-            let mut count = 0;
-            for route in routes {
-                if let Some(name) = route.meta().name.as_deref()
-                    && let Ok(ProxyRouteKey::Tcp(port)) = name.parse::<ProxyRouteKey>()
-                    && let Some(labels) = route.metadata.labels.as_ref()
-                {
-                    let instance_name = labels.get(crate::utils::labels::INSTANCE_LABEL);
-                    let instance_ns = labels
-                        .get(crate::utils::labels::NAMESPACE_LABEL)
-                        .map(|s| s.as_str())
-                        .unwrap_or("default");
-                    let resource_name = labels.get(RESOURCE_LABEL);
-
-                    if let (Some(inst), Some(route)) = (instance_name, resource_name) {
-                        let route_key = ResourceKey::new(instance_ns, inst, route);
-                        allocator.sync(&route_key, port);
-                        count += 1;
-                    }
-                }
-            }
-            info!(
-                count,
-                system_namespace = %system_namespace,
-                "Bootstrapped active ports from cluster CTFProxyRoutes"
-            );
-        }
-        Err(e) => {
-            error!("fatal controller error: {e}");
-            return Err(e.into());
-        }
-    }
 
     let caches = Caches::default();
-
-    // Gates instance processing until every auxiliary cache has completed its
-    // initial sync. The gate reads readiness off the caches, so reusing the
-    // same caches across future `run_controller`s just works.
-    let ready = ReadyGate::from_caches(&caches);
     let proxy_route_cache = caches.proxy_routes.clone();
 
-    // Proxy route watcher feeds the cache; the same stream drives the
-    // controller trigger via `watches_stream`.
-    let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes);
+    // Proxy route watcher feeds the cache and keeps the allocator in sync with live TCP routes.
+    let allocator_stream = allocator.clone();
+    let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes, move |event| {
+        match event {
+            Event::Apply(route) | Event::InitApply(route) => {
+                // Bind the fixed TCP port this route owns, so a restart does not re-allocate it.
+                if let Some(key) = proxy_route_key(route)
+                    && let Ok(ProxyRouteKey::Tcp(port)) = route.route_key()
+                {
+                    allocator_stream.sync(&key, port);
+                }
+            }
+            Event::Delete(route) => {
+                // Free the port the deleted route held.
+                if let Some(key) = proxy_route_key(route) {
+                    allocator_stream.release(&key);
+                }
+            }
+            Event::Init => {
+                // Fresh list-and-watch cycle: drop stale bindings before the full state is re-applied.
+                allocator_stream.clear();
+            }
+            Event::InitDone => {}
+        }
+    });
 
     run_controller(
         client,
@@ -264,9 +245,24 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
         image_alias.into_iter().flatten().collect(),
         caches,
         proxy_route_stream,
-        ready,
     )
     .await
+}
+
+/// Derives the allocator key for a proxy route from its labels.
+fn proxy_route_key(route: &CTFProxyRoute) -> Option<ResourceKey> {
+    let labels = route.metadata.labels.as_ref()?;
+    let instance = labels.get(crate::utils::labels::INSTANCE_LABEL)?;
+    let instance_ns = labels
+        .get(crate::utils::labels::NAMESPACE_LABEL)
+        .map(|s| s.as_str())
+        .unwrap_or("default");
+    let resource = labels.get(RESOURCE_LABEL)?;
+    Some(ResourceKey::new(
+        instance_ns,
+        instance.as_str(),
+        resource.as_str(),
+    ))
 }
 
 /// Spawns and runs the `CTFInstance` controller loop.
@@ -278,7 +274,6 @@ pub async fn run_controller<S>(
     image_alias: std::collections::BTreeMap<String, String>,
     caches: Caches,
     proxy_route_stream: S,
-    ready: ReadyGate,
 ) -> Result<(), Error>
 where
     S: Stream<Item = Result<CTFProxyRoute, WatcherError>> + Send + 'static,
@@ -287,6 +282,9 @@ where
     let templates = Api::<CTFTemplate>::all(client.clone());
     let services = Api::<Service>::all(client.clone());
     let replica_sets = Api::<ReplicaSet>::all(client.clone());
+
+    // Gates instance processing until every auxiliary cache completes its initial sync.
+    let ready = ReadyGate::from_caches(&caches);
 
     let context = Arc::new(Context {
         client: client.clone(),
@@ -299,9 +297,7 @@ where
 
     let template_cache = context.caches.templates.clone();
 
-    // Template watcher updates the cache before the stream drives the
-    // controller `watches_stream` trigger. Readiness is tracked on the cache
-    // itself and consumed by the shared ReadyGate.
+    // Template watcher updates the cache before the stream drives the controller `watches_stream` trigger.
     let template_watcher_stream = watcher(templates, Config::default())
         .default_backoff()
         .inspect(move |res| {
@@ -316,10 +312,10 @@ where
     );
 
     let services_cache = context.caches.services.clone();
-    let service_stream = services_cache.watcher_stream(services);
+    let service_stream = services_cache.watcher_stream(services, |_| {});
 
     let replica_sets_cache = context.caches.replica_sets.clone();
-    let replica_set_stream = replica_sets_cache.watcher_stream(replica_sets);
+    let replica_set_stream = replica_sets_cache.watcher_stream(replica_sets, |_| {});
 
     let proxy_route_stream = proxy_route_stream;
 
@@ -331,7 +327,7 @@ where
 
     let client_init_done = client.clone();
     let system_ns_init_done = context.system_namespace.clone();
-    let allocator_init_done = context.route_allocator.clone().unwrap();
+    let proxy_routes_init_done = context.caches.proxy_routes.clone();
 
     let ready_task = ready.clone();
 
@@ -342,22 +338,23 @@ where
         .then(move |res| {
             let client = client_init_done.clone();
             let system_ns = system_ns_init_done.clone();
-            let allocator = allocator_init_done.clone();
+            let proxy_routes = proxy_routes_init_done.clone();
             let cache = instance_cache_task.clone();
             let fatal_tx = fatal_tx.clone();
             let ready = ready_task.clone();
 
             async move {
-                // Hold instance events until every child cache (templates,
-                // services, replica sets, routes) has completed its initial
-                // sync, so reconcile never runs against a hollow cache.
+                // Hold instance events until every child cache has completed its initial sync.
                 ready.wait().await;
 
                 if let Ok(ref event) = res {
                     handle_instance_watcher_event(event, &cache);
                     if let Event::InitDone = event
                         && let Err(e) = handle_instance_watcher_init_done(
-                            client, &system_ns, &cache, &allocator,
+                            client,
+                            &system_ns,
+                            &cache,
+                            &proxy_routes,
                         )
                         .await
                     {
@@ -415,12 +412,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routing::{PortsStore, RouteAllocator};
     use crate::test_utils::tests::{
         dummy_context, dummy_ctx, dummy_instance, dummy_kube_client, recording_kube_client,
     };
     use chrono::{Duration as ChronoDuration, Utc};
-    use k8s_common::PortRange;
     use k8s_common::crd::{
         CTFInstanceSpec, CTFInstanceStatus, RouteBackend, RouteSpec, RouteSpecTCP,
     };
@@ -801,7 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_instance_watcher_init_done_success() {
-        use crate::cache::InstanceCache;
+        use crate::cache::{InstanceCache, ResourceCache};
 
         let client = dummy_kube_client();
         let mut inst = dummy_instance("chal-1", None);
@@ -809,20 +804,17 @@ mod tests {
         let cache = InstanceCache::new();
         cache.update(&inst);
 
-        let ports = Arc::new(PortsStore::new(
-            PortRange(20000..=20010),
-            PortRange(30000..=30010),
-        ));
-        let allocator = RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433);
+        let proxy_routes = ResourceCache::<CTFProxyRoute>::new();
 
         let res =
-            handle_instance_watcher_init_done(client, "aincrad-system", &cache, &allocator).await;
+            handle_instance_watcher_init_done(client, "aincrad-system", &cache, &proxy_routes)
+                .await;
         assert!(res.is_ok());
     }
 
     #[tokio::test]
     async fn test_handle_instance_watcher_init_done_failure() {
-        use crate::cache::InstanceCache;
+        use crate::cache::{InstanceCache, ResourceCache};
         use tower::service_fn;
         let mock_service = service_fn(|_req: axum::http::Request<kube::client::Body>| async move {
             Ok::<_, std::convert::Infallible>(
@@ -835,14 +827,28 @@ mod tests {
         let client = kube::Client::new(mock_service, "default");
         let cache = InstanceCache::new();
 
-        let ports = Arc::new(PortsStore::new(
-            PortRange(20000..=20010),
-            PortRange(30000..=30010),
-        ));
-        let allocator = RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433);
+        // Seed an orphaned route so the prune hits the always-500 mock client.
+        let proxy_routes = ResourceCache::<CTFProxyRoute>::new();
+        let orphan = CTFProxyRoute {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("p30005".to_string()),
+                labels: Some(crate::btreemap! {
+                    crate::utils::labels::NAMESPACE_LABEL => "team-1",
+                    crate::utils::labels::INSTANCE_LABEL => "dead-chal",
+                    crate::utils::labels::RESOURCE_LABEL => "pwn",
+                }),
+                ..Default::default()
+            },
+            spec: k8s_common::crd::CTFProxyRouteSpec {
+                backend: "10.0.0.1:80".to_string(),
+                policy: Default::default(),
+            },
+        };
+        proxy_routes.handle(&kube::runtime::watcher::Event::Apply(orphan));
 
         let res =
-            handle_instance_watcher_init_done(client, "aincrad-system", &cache, &allocator).await;
+            handle_instance_watcher_init_done(client, "aincrad-system", &cache, &proxy_routes)
+                .await;
         assert!(res.is_err());
     }
 

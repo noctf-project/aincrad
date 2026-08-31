@@ -1,23 +1,16 @@
 use std::collections::HashSet;
 
-use k8s_common::{
-    RESOURCE_LABEL,
-    crd::{CTFInstance, CTFProxyRoute},
-};
+use k8s_common::crd::{CTFInstance, CTFProxyRoute};
 use kube::{
     Api, Resource,
-    api::{ListParams, Patch, PatchParams},
+    api::{Patch, PatchParams},
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{info, warn};
 
 use crate::{
-    Context, Error,
-    cache::ResourceKey,
-    planners::Planner,
-    reconcilers::template::ResolvedTemplate,
-    routing::RouteAllocator,
-    utils::labels::{INSTANCE_LABEL, NAMESPACE_LABEL, ROUTES_FINALIZER},
+    Context, Error, cache::ResourceCache, planners::Planner,
+    reconcilers::template::ResolvedTemplate, utils::labels::ROUTES_FINALIZER,
 };
 
 const PRUNE_CONCURRENCY_LIMIT: usize = 16;
@@ -31,15 +24,13 @@ pub async fn apply_planner<P: Planner>(
 ) -> Result<(), Error> {
     let desired = P::plan(instance, template, ctx)?;
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
-    let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let api: Api<P::Resource> = Api::namespaced(client, ns);
 
     let desired_names = sync_resources(&api, P::KIND, desired).await?;
-    if P::PRUNE_ORPHANS {
-        prune_orphaned_resources(&api, instance_name, &desired_names).await
-    } else {
-        Ok(())
+    if let Some(existing_names) = P::cached_names(instance, ctx) {
+        prune_orphaned_resources(&api, &desired_names, existing_names).await?;
     }
+    Ok(())
 }
 
 /// Applies a list of desired resources using Server-Side Apply and prunes orphans.
@@ -69,24 +60,19 @@ where
     Ok(desired_names)
 }
 
-/// Prunes orphaned child resources owned by `instance_name`.
+/// Deletes any of `existing_names` that are not in `desired_names`.
 pub async fn prune_orphaned_resources<K>(
     api: &Api<K>,
-    instance_name: &str,
     desired_names: &HashSet<String>,
+    existing_names: Vec<String>,
 ) -> Result<(), Error>
 where
     K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Serialize + std::fmt::Debug,
 {
-    let lp = ListParams::default().labels(&format!("{INSTANCE_LABEL}={instance_name}"));
-    let list = api.list(&lp).await?;
-
-    for existing in list {
-        if let Some(name) = existing.meta().name.as_deref()
-            && !desired_names.contains(name)
-        {
+    for name in existing_names {
+        if !desired_names.contains(&name) {
             info!(name, "Orphaned child resource detected, deleting...");
-            api.delete(name, &Default::default()).await?;
+            api.delete(&name, &Default::default()).await?;
         }
     }
 
@@ -146,15 +132,18 @@ pub async fn remove_finalizer(client: kube::Client, instance: &CTFInstance) -> R
     Ok(())
 }
 
-/// Applies cross-namespace CTFProxyRoute resources into the system namespace, deleting stale routes first.
+/// Applies cross-namespace CTFProxyRoute resources into the system namespace,
+/// pruning stale routes recorded in the live cache first.
+///
+/// The proxy-route watcher keeps the cache (and the allocator) in sync with the
+/// cluster, so this only lists the cluster to apply/delete; orphan detection
+/// reads the cache rather than re-listing every reconcile.
 pub async fn apply_proxy_routes(
-    client: kube::Client,
-    system_namespace: &str,
+    ctx: &Context,
     instance: &CTFInstance,
     desired_routes: Vec<CTFProxyRoute>,
-    allocator: &RouteAllocator,
 ) -> Result<(), Error> {
-    let api: Api<CTFProxyRoute> = Api::namespaced(client, system_namespace);
+    let api: Api<CTFProxyRoute> = Api::namespaced(ctx.client.clone(), &ctx.system_namespace);
     let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let instance_ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
@@ -163,33 +152,23 @@ pub async fn apply_proxy_routes(
         .filter_map(|r| r.meta().name.clone())
         .collect();
 
-    // 1. Delete old/orphaned CTFProxyRoute resources FIRST before creating/updating new ones
-    let lp = ListParams::default().labels(&format!(
-        "{INSTANCE_LABEL}={instance_name},{NAMESPACE_LABEL}={instance_ns}"
-    ));
-    let existing_list = api.list(&lp).await?;
-
-    for existing in existing_list {
-        if let Some(name) = existing.meta().name.as_deref()
-            && !desired_names.contains(name)
-        {
-            info!(
-                name,
-                system_namespace, "Pruning stale CTFProxyRoute before applying new routes..."
-            );
-            api.delete(name, &Default::default()).await?;
-
-            if let Ok(k8s_common::crd::ProxyRouteKey::Tcp(old_port)) =
-                name.parse::<k8s_common::crd::ProxyRouteKey>()
-                && let Some(pod_name) = existing
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| l.get(RESOURCE_LABEL))
-            {
-                let route_key = ResourceKey::new(instance_ns, instance_name, pod_name);
-                allocator.release_if_bound(&route_key, old_port);
-            }
+    // 1. Delete stale routes the cache saw but the plan no longer wants.
+    let stale = ctx
+        .caches
+        .proxy_routes
+        .names(instance_ns, instance_name)
+        .into_iter()
+        .filter(|name| !desired_names.contains(name));
+    for name in stale {
+        info!(
+            name,
+            system_namespace = %ctx.system_namespace,
+            "Pruning stale CTFProxyRoute before applying new routes..."
+        );
+        match api.delete(&name, &Default::default()).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(ref e)) if e.code == 404 => {}
+            Err(e) => return Err(e.into()),
         }
     }
 
@@ -210,84 +189,52 @@ pub async fn apply_proxy_routes(
     Ok(())
 }
 
-/// Deletes all CTFProxyRoutes belonging to a CTFInstance across namespaces and removes finalizer.
-pub async fn cleanup_instance_routes(
-    client: kube::Client,
-    system_namespace: &str,
-    instance: &CTFInstance,
-    allocator: Option<&RouteAllocator>,
-) -> Result<(), Error> {
-    let api: Api<CTFProxyRoute> = Api::namespaced(client.clone(), system_namespace);
+/// Deletes all CTFProxyRoutes belonging to a CTFInstance (found via the live
+/// cache) and removes the routes finalizer.
+///
+/// The watcher releases allocator bindings as the deleted routes stream back
+/// through; no manual release is needed here.
+pub async fn cleanup_instance_routes(ctx: &Context, instance: &CTFInstance) -> Result<(), Error> {
+    let api: Api<CTFProxyRoute> = Api::namespaced(ctx.client.clone(), &ctx.system_namespace);
     let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let instance_ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
-    let lp = ListParams::default().labels(&format!(
-        "{INSTANCE_LABEL}={instance_name},{NAMESPACE_LABEL}={instance_ns}"
-    ));
-    let list = api.list(&lp).await?;
-
-    for route in list {
-        if let Some(name) = route.meta().name.as_deref() {
-            info!(
-                name,
-                system_namespace, "Deleting CTFProxyRoute on instance finalizer cleanup..."
-            );
-            match api.delete(name, &Default::default()).await {
-                Ok(_) => {}
-                Err(kube::Error::Api(ref e)) if e.code == 404 => {}
-                Err(e) => return Err(e.into()),
-            }
+    let names = ctx.caches.proxy_routes.names(instance_ns, instance_name);
+    for name in names {
+        info!(
+            name,
+            system_namespace = %ctx.system_namespace,
+            "Deleting CTFProxyRoute on instance finalizer cleanup..."
+        );
+        match api.delete(&name, &Default::default()).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(ref e)) if e.code == 404 => {}
+            Err(e) => return Err(e.into()),
         }
     }
 
-    if let Some(alloc) = allocator {
-        alloc.release_instance(instance_ns, instance_name);
-    }
-
-    remove_finalizer(client, instance).await?;
+    remove_finalizer(ctx.client.clone(), instance).await?;
     Ok(())
 }
 
-/// Deletes a batch of CTFProxyRoutes in parallel, releasing their allocator mappings.
+/// Deletes a batch of CTFProxyRoute names in parallel. Bindings are released
+/// by the watcher when the deletions stream back as `Delete` events.
 pub async fn delete_proxy_routes_batch(
     api: &Api<CTFProxyRoute>,
-    system_namespace: &str,
-    routes: Vec<CTFProxyRoute>,
-    allocator: &RouteAllocator,
-) -> (Vec<CTFProxyRoute>, Option<Error>) {
+    names: Vec<String>,
+) -> (Vec<String>, Option<Error>) {
     use futures::StreamExt;
 
-    let results: Vec<Result<(), (CTFProxyRoute, Error)>> = futures::stream::iter(routes)
-        .map(|route| {
+    let results: Vec<Result<(), (String, Error)>> = futures::stream::iter(names)
+        .map(|name| {
             let api = api.clone();
-            let system_ns = system_namespace.to_string();
             async move {
-                if let Some(name) = route.meta().name.as_deref() {
-                    info!(
-                        name,
-                        system_namespace = %system_ns,
-                        "Pruning dangling CTFProxyRoute..."
-                    );
-
-                    match api.delete(name, &Default::default()).await {
-                        Ok(_) => {}
-                        Err(kube::Error::Api(ref e)) if e.code == 404 => {}
-                        Err(err) => return Err((route, err.into())),
-                    }
-
-                    if let Some(labels) = route.metadata.labels.as_ref()
-                        && let (Some(inst), Some(pod)) =
-                            (labels.get(INSTANCE_LABEL), labels.get(RESOURCE_LABEL))
-                    {
-                        let instance_ns = labels
-                            .get(NAMESPACE_LABEL)
-                            .map(|s| s.as_str())
-                            .unwrap_or("default");
-                        let route_key = ResourceKey::new(instance_ns, inst, pod);
-                        allocator.release(&route_key);
-                    }
+                info!(name, "Pruning dangling CTFProxyRoute...");
+                match api.delete(&name, &Default::default()).await {
+                    Ok(_) => Ok(()),
+                    Err(kube::Error::Api(ref e)) if e.code == 404 => Ok(()),
+                    Err(err) => Err((name, err.into())),
                 }
-                Ok(())
             }
         })
         .buffer_unordered(PRUNE_CONCURRENCY_LIMIT)
@@ -297,8 +244,8 @@ pub async fn delete_proxy_routes_batch(
     let mut failed = Vec::new();
     let mut last_error = None;
     for res in results {
-        if let Err((route, err)) = res {
-            failed.push(route);
+        if let Err((name, err)) = res {
+            failed.push(name);
             last_error = Some(err);
         }
     }
@@ -306,39 +253,26 @@ pub async fn delete_proxy_routes_batch(
     (failed, last_error)
 }
 
-/// Prunes dangling CTFProxyRoute resources in the system namespace that do not belong to any active CTFInstance.
+/// Prunes dangling CTFProxyRoute resources in the system namespace that do not
+/// belong to any active CTFInstance, driven entirely by the live cache.
 pub async fn prune_unreferenced_proxy_routes(
     client: kube::Client,
     system_namespace: &str,
+    proxy_routes: &ResourceCache<CTFProxyRoute>,
     live_instances: &HashSet<(String, String)>,
-    allocator: &RouteAllocator,
 ) -> Result<usize, Error> {
     let api: Api<CTFProxyRoute> = Api::namespaced(client, system_namespace);
-    let routes = api.list(&Default::default()).await?;
 
-    let orphaned_routes: Vec<_> = routes
+    let orphaned_names: Vec<String> = proxy_routes
+        .all_entries()
         .into_iter()
-        .filter(|route| {
-            if let Some(labels) = route.metadata.labels.as_ref() {
-                let instance_name = labels.get(INSTANCE_LABEL);
-                let instance_ns = labels
-                    .get(NAMESPACE_LABEL)
-                    .map(|s| s.as_str())
-                    .unwrap_or("default");
-
-                match instance_name {
-                    Some(inst) => {
-                        !live_instances.contains(&(instance_ns.to_string(), inst.to_string()))
-                    }
-                    None => true,
-                }
-            } else {
-                true
-            }
+        .filter(|entry| {
+            !live_instances.contains(&(entry.key.namespace.clone(), entry.key.instance.clone()))
         })
+        .map(|entry| entry.name)
         .collect();
 
-    let total_orphans = orphaned_routes.len();
+    let total_orphans = orphaned_names.len();
     if total_orphans == 0 {
         return Ok(0);
     }
@@ -348,13 +282,12 @@ pub async fn prune_unreferenced_proxy_routes(
         system_namespace, "Pruning dangling CTFProxyRoutes in parallel..."
     );
 
-    let mut pending = orphaned_routes;
+    let mut pending = orphaned_names;
     let mut delay = std::time::Duration::from_millis(200);
     let mut attempts = 3;
 
     while !pending.is_empty() && attempts > 0 {
-        let (failed, last_err) =
-            delete_proxy_routes_batch(&api, system_namespace, pending, allocator).await;
+        let (failed, last_err) = delete_proxy_routes_batch(&api, pending).await;
         if failed.is_empty() {
             return Ok(total_orphans);
         }
@@ -384,8 +317,12 @@ mod tests {
     use super::*;
     use crate::planners::ReplicaSetPlanner;
     use crate::test_utils::tests::{
-        dummy_context, dummy_instance, dummy_kube_client, dummy_resolved_template,
+        dummy_context, dummy_ctx, dummy_instance, dummy_kube_client, dummy_resolved_template,
+        recording_kube_client,
     };
+    use k8s_common::crd::CTFProxyRouteSpec;
+    use k8s_openapi::api::apps::v1::ReplicaSet;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
     #[tokio::test]
     async fn test_apply_planner_success() {
@@ -432,5 +369,189 @@ mod tests {
         }
     }
 
-    // ... other tests unchanged ...
+    fn proxy_route(name: &str, instance: &str, resource: &str) -> CTFProxyRoute {
+        CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("aincrad-system".to_string()),
+                labels: Some(crate::btreemap! {
+                    crate::utils::labels::NAMESPACE_LABEL => "default",
+                    crate::utils::labels::INSTANCE_LABEL => instance,
+                    crate::utils::labels::RESOURCE_LABEL => resource,
+                }),
+                ..Default::default()
+            },
+            spec: CTFProxyRouteSpec {
+                backend: "web.default.svc.cluster.local:80".to_string(),
+                policy: Default::default(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prune_orphaned_resources_deletes_only_non_desired() {
+        let (client, log) = recording_kube_client();
+        let api: Api<ReplicaSet> = Api::all(client);
+
+        let desired: HashSet<String> = ["keep-a".into(), "keep-b".into()].into_iter().collect();
+        // Existing cache names: one kept, one orphaned.
+        let existing = vec!["keep-a".to_string(), "stale-1".to_string()];
+
+        prune_orphaned_resources(&api, &desired, existing)
+            .await
+            .expect("prune should succeed");
+        let log = log.lock().unwrap();
+        assert!(
+            log.iter()
+                .any(|s| s.contains("DELETE") && s.contains("stale-1")),
+            "orphaned 'stale-1' must be deleted"
+        );
+        assert!(
+            !log.iter()
+                .any(|s| s.contains("DELETE") && s.contains("keep-a")),
+            "desired 'keep-a' must not be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_orphaned_resources_deletes_nothing_when_desired_all() {
+        let (client, log) = recording_kube_client();
+        let api: Api<ReplicaSet> = Api::all(client);
+
+        let desired: HashSet<String> = ["only".into()].into_iter().collect();
+        prune_orphaned_resources(&api, &desired, vec!["only".to_string()])
+            .await
+            .expect("prune should succeed");
+        assert_eq!(
+            log.lock().unwrap().len(),
+            0,
+            "no deletes should issue when everything is desired"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_proxy_routes_prunes_stale_from_cache() {
+        let (client, log) = recording_kube_client();
+        let (_store, ctx) = dummy_ctx(client, vec![]);
+
+        let instance = dummy_instance("chal-1", None);
+        // Seed a stale route in the cache that the plan will no longer produce.
+        ctx.caches
+            .proxy_routes
+            .handle(&kube::runtime::watcher::Event::Apply(proxy_route(
+                "p30005", "chal-1", "web",
+            )));
+
+        // Desired now wants only rwhoami.
+        let desired = vec![proxy_route("rwhoami", "chal-1", "main")];
+        apply_proxy_routes(&ctx, &instance, desired)
+            .await
+            .expect("apply should succeed");
+
+        let log = log.lock().unwrap();
+        assert!(
+            log.iter()
+                .any(|s| s.contains("DELETE") && s.contains("p30005")),
+            "stale cached route must be deleted first"
+        );
+        assert!(
+            log.iter()
+                .any(|s| s.contains("PATCH") && s.contains("rwhoami")),
+            "desired route must be applied via SSA"
+        );
+        assert!(
+            !log.iter()
+                .any(|s| s.contains("DELETE") && s.contains("rwhoami")),
+            "desired route must not be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_proxy_routes_no_stale_no_delete() {
+        let (client, log) = recording_kube_client();
+        let (_store, ctx) = dummy_ctx(client, vec![]);
+        let instance = dummy_instance("chal-1", None);
+
+        let desired = vec![proxy_route("rwhoami", "chal-1", "main")];
+        apply_proxy_routes(&ctx, &instance, desired)
+            .await
+            .expect("apply should succeed");
+
+        let log = log.lock().unwrap();
+        assert!(
+            !log.iter().any(|s| s.starts_with("DELETE")),
+            "an empty cache must not produce any deletes"
+        );
+        assert!(
+            log.iter()
+                .any(|s| s.contains("PATCH") && s.contains("rwhoami")),
+            "desired route must still be applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_unreferenced_proxy_routes_diffs_against_live_instances() {
+        use crate::cache::ResourceCache;
+
+        let (client, log) = recording_kube_client();
+        let proxy_routes = ResourceCache::<CTFProxyRoute>::new();
+        proxy_routes.handle(&kube::runtime::watcher::Event::Apply(proxy_route(
+            "p30001", "chal-1", "web",
+        )));
+        proxy_routes.handle(&kube::runtime::watcher::Event::Apply(proxy_route(
+            "p30002",
+            "orphan-chal",
+            "pwn",
+        )));
+
+        let live: std::collections::HashSet<(String, String)> =
+            [("default".to_string(), "chal-1".to_string())]
+                .into_iter()
+                .collect();
+
+        let pruned =
+            prune_unreferenced_proxy_routes(client, "aincrad-system", &proxy_routes, &live)
+                .await
+                .expect("prune should succeed");
+        assert_eq!(pruned, 1, "only the orphaned route should be pruned");
+
+        let log = log.lock().unwrap();
+        assert!(
+            log.iter()
+                .any(|s| s.contains("DELETE") && s.contains("p30002")),
+            "orphan route must be deleted"
+        );
+        assert!(
+            !log.iter()
+                .any(|s| s.contains("DELETE") && s.contains("p30001")),
+            "live instance's route must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_unreferenced_proxy_routes_zero_when_all_live() {
+        use crate::cache::ResourceCache;
+
+        let (client, log) = recording_kube_client();
+        let proxy_routes = ResourceCache::<CTFProxyRoute>::new();
+        proxy_routes.handle(&kube::runtime::watcher::Event::Apply(proxy_route(
+            "p30001", "chal-1", "web",
+        )));
+
+        let live: std::collections::HashSet<(String, String)> =
+            [("default".to_string(), "chal-1".to_string())]
+                .into_iter()
+                .collect();
+
+        let pruned =
+            prune_unreferenced_proxy_routes(client, "aincrad-system", &proxy_routes, &live)
+                .await
+                .expect("prune should succeed");
+        assert_eq!(pruned, 0);
+        assert_eq!(
+            log.lock().unwrap().len(),
+            0,
+            "nothing to prune when every route's instance is live"
+        );
+    }
 }

@@ -32,8 +32,13 @@ pub struct ProxyRoutePlanner;
 
 impl Planner for ProxyRoutePlanner {
     const KIND: &'static str = "CTFProxyRoute";
-
     type Resource = CTFProxyRoute;
+
+    fn cached_names(instance: &CTFInstance, ctx: &Context) -> Option<Vec<String>> {
+        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+        let name = instance.metadata.name.as_deref().unwrap_or("unknown");
+        Some(ctx.caches.proxy_routes.names(ns, name))
+    }
 
     fn plan(
         instance: &CTFInstance,
@@ -225,9 +230,65 @@ mod tests {
         dummy_context, dummy_context_with_routes, dummy_instance, dummy_resolved_template,
     };
     use k8s_common::crd::{
-        RouteBackend, RoutePolicySpec, RouteSpec, RouteSpecPOW, RouteSpecTCP, RouteSpecTLS,
+        CTFProxyRouteSpec, RouteBackend, RoutePolicySpec, RouteSpec, RouteSpecPOW, RouteSpecTCP,
+        RouteSpecTLS,
     };
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::sync::Arc;
+
+    fn proxy_route(name: &str, instance: &str, resource: &str) -> CTFProxyRoute {
+        CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("aincrad-system".to_string()),
+                labels: Some(crate::btreemap! {
+                    crate::utils::labels::NAMESPACE_LABEL => "default",
+                    crate::utils::labels::INSTANCE_LABEL => instance,
+                    crate::utils::labels::RESOURCE_LABEL => resource,
+                }),
+                ..Default::default()
+            },
+            spec: CTFProxyRouteSpec {
+                backend: "web.default.svc.cluster.local:80".to_string(),
+                policy: Default::default(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cached_names_returns_instance_proxy_routes() {
+        let (_store, ctx) = dummy_context();
+        ctx.caches
+            .proxy_routes
+            .handle(&kube::runtime::watcher::Event::Apply(proxy_route(
+                "p30005", "chal-1", "web",
+            )));
+
+        let instance = dummy_instance("chal-1", None);
+        let names = ProxyRoutePlanner::cached_names(&instance, &ctx).unwrap();
+        assert_eq!(
+            names,
+            vec!["p30005".to_string()],
+            "cached_names must surface proxy routes owned by the instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cached_names_ignores_other_instances() {
+        let (_store, ctx) = dummy_context();
+        ctx.caches
+            .proxy_routes
+            .handle(&kube::runtime::watcher::Event::Apply(proxy_route(
+                "p30002", "chal-2", "pwn",
+            )));
+
+        let instance = dummy_instance("chal-1", None);
+        let names = ProxyRoutePlanner::cached_names(&instance, &ctx).unwrap();
+        assert!(
+            names.is_empty(),
+            "another instance's proxy routes must not be surfaced"
+        );
+    }
 
     #[tokio::test]
     async fn test_plan_proxy_routes_tcp_and_tls() {

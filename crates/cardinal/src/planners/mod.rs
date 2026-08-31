@@ -23,7 +23,6 @@ use crate::{Context, Error, reconcilers::template::ResolvedTemplate};
 /// Pure trait for declaring the desired state of a child Kubernetes resource type.
 pub trait Planner {
     const KIND: &'static str;
-    const PRUNE_ORPHANS: bool = true;
 
     type Resource: Resource<Scope = NamespaceResourceScope, DynamicType = ()>
         + Clone
@@ -40,6 +39,14 @@ pub trait Planner {
         template: &ResolvedTemplate,
         ctx: &Context,
     ) -> Result<Vec<Self::Resource>, Error>;
+
+    /// Returns the object names of this kind owned by `instance` as known to the
+    /// cache. `None` means this kind is not pruned; the cache query lets pruning
+    /// diff against the live cluster without a per-reconcile API list.
+    fn cached_names(instance: &CTFInstance, ctx: &Context) -> Option<Vec<String>> {
+        let _ = (instance, ctx);
+        None
+    }
 
     /// Evaluates this resource's readiness and any status payload it contributes.
     ///

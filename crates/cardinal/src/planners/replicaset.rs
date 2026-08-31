@@ -46,6 +46,12 @@ impl Planner for ReplicaSetPlanner {
 
     type Resource = ReplicaSet;
 
+    fn cached_names(instance: &CTFInstance, ctx: &Context) -> Option<Vec<String>> {
+        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+        let name = instance.metadata.name.as_deref().unwrap_or("unknown");
+        Some(ctx.caches.replica_sets.names(ns, name))
+    }
+
     fn plan(
         instance: &CTFInstance,
         template: &ResolvedTemplate,
@@ -303,8 +309,66 @@ pub fn build_replicaset_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::tests::dummy_context;
     use crate::test_utils::tests::{dummy_instance, dummy_resolved_template};
     use k8s_openapi::api::core::v1::Container;
+
+    #[tokio::test]
+    async fn test_cached_names_returns_instance_replica_sets() {
+        let (_store, ctx) = dummy_context();
+        let rs = ReplicaSet {
+            metadata: ObjectMeta {
+                name: Some("chal-1-web-abc".to_string()),
+                namespace: Some("default".to_string()),
+                labels: Some(crate::btreemap! {
+                    INSTANCE_LABEL => "chal-1",
+                    RESOURCE_LABEL => "web",
+                }),
+                ..Default::default()
+            },
+            spec: Some(ReplicaSetSpec::default()),
+            status: Some(k8s_openapi::api::apps::v1::ReplicaSetStatus::default()),
+        };
+        ctx.caches
+            .replica_sets
+            .handle(&kube::runtime::watcher::Event::Apply(rs));
+
+        let instance = dummy_instance("chal-1", None);
+        let names = ReplicaSetPlanner::cached_names(&instance, &ctx).unwrap();
+        assert_eq!(
+            names,
+            vec!["chal-1-web-abc".to_string()],
+            "cached_names must surface replica sets owned by the instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cached_names_ignores_other_instances() {
+        let (_store, ctx) = dummy_context();
+        let rs = ReplicaSet {
+            metadata: ObjectMeta {
+                name: Some("chal-2-web-abc".to_string()),
+                namespace: Some("default".to_string()),
+                labels: Some(crate::btreemap! {
+                    INSTANCE_LABEL => "chal-2",
+                    RESOURCE_LABEL => "web",
+                }),
+                ..Default::default()
+            },
+            spec: Some(ReplicaSetSpec::default()),
+            status: None,
+        };
+        ctx.caches
+            .replica_sets
+            .handle(&kube::runtime::watcher::Event::Apply(rs));
+
+        let instance = dummy_instance("chal-1", None);
+        let names = ReplicaSetPlanner::cached_names(&instance, &ctx).unwrap();
+        assert!(
+            names.is_empty(),
+            "another instance's replica sets must not be surfaced"
+        );
+    }
 
     #[test]
     fn test_build_replicaset_spec() {

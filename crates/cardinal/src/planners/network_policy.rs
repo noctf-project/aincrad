@@ -27,8 +27,6 @@ pub struct NetworkPolicyPlanner;
 impl Planner for NetworkPolicyPlanner {
     const KIND: &'static str = "NetworkPolicy";
     // networkpolicies are tractable
-    const PRUNE_ORPHANS: bool = false;
-
     type Resource = NetworkPolicy;
 
     fn plan(
@@ -65,7 +63,7 @@ impl Planner for NetworkPolicyPlanner {
 
         let mut ext = NetworkPolicy {
             metadata: ObjectMeta {
-                name: Some(resource_name(instance_name, "int")),
+                name: Some(resource_name(instance_name, "ext")),
                 namespace: Some(ns.to_string()),
                 labels: Some(labels),
                 ..Default::default()

@@ -35,14 +35,10 @@ pub trait ReadyCache: Send + Sync {
     fn watch(&self) -> watch::Receiver<bool>;
 }
 
-/// Gates instance processing until a set of existing caches have all completed
-/// their initial sync.
+/// Gates instance processing until all given caches complete their initial sync.
 ///
-/// The gate reads readiness straight off the caches it is handed, so it never
-/// needs to know how many watchers there are or who created them. Reusing a
-/// cache across multiple controllers is fine: each `run_controller` builds its
-/// own gate over the shared caches, and already-synced caches report ready
-/// instantly.
+/// Reads readiness off the caches, so it is agnostic to how many watchers there
+/// are and safe to reuse across controllers.
 #[derive(Clone)]
 pub struct ReadyGate {
     rxs: Vec<watch::Receiver<bool>>,
@@ -127,7 +123,10 @@ mod tests {
         let finished = waiter.is_finished();
         caches.templates.mark_ready();
 
-        assert!(!finished, "waiter must still be pending before the last sync");
+        assert!(
+            !finished,
+            "waiter must still be pending before the last sync"
+        );
         tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
             .expect("gate must open once every cache reports ready")

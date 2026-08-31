@@ -22,6 +22,12 @@ impl Planner for ServicePlanner {
 
     type Resource = Service;
 
+    fn cached_names(instance: &CTFInstance, ctx: &Context) -> Option<Vec<String>> {
+        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+        let name = instance.metadata.name.as_deref().unwrap_or("unknown");
+        Some(ctx.caches.services.names(ns, name))
+    }
+
     fn plan(
         instance: &CTFInstance,
         template: &ResolvedTemplate,
@@ -104,5 +110,48 @@ impl Planner for ServicePlanner {
             },
             None,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::tests::{dummy_context, dummy_instance};
+
+    #[tokio::test]
+    async fn test_cached_names_returns_instance_services() {
+        let (_store, ctx) = dummy_context();
+        let svc = Service {
+            metadata: ObjectMeta {
+                name: Some("chal-1-web".to_string()),
+                namespace: Some("default".to_string()),
+                labels: Some(crate::btreemap! {
+                    INSTANCE_LABEL => "chal-1",
+                    RESOURCE_LABEL => "web",
+                }),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec::default()),
+            ..Default::default()
+        };
+        ctx.caches
+            .services
+            .handle(&kube::runtime::watcher::Event::Apply(svc));
+
+        let instance = dummy_instance("chal-1", None);
+        let names = ServicePlanner::cached_names(&instance, &ctx).unwrap();
+        assert_eq!(
+            names,
+            vec!["chal-1-web".to_string()],
+            "cached_names must surface services owned by the instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cached_names_empty_when_none_cached() {
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let names = ServicePlanner::cached_names(&instance, &ctx).unwrap();
+        assert!(names.is_empty(), "an empty cache must surface no names");
     }
 }
