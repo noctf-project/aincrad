@@ -3,6 +3,7 @@ use std::fmt::Write;
 use std::sync::LazyLock;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use k8s_common::RESOURCE_LABEL;
 use k8s_common::crd::{CTFInstance, CTFTemplateSpecPod};
 use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetSpec};
 use k8s_openapi::api::core::v1::{PodSpec, PodTemplateSpec};
@@ -17,9 +18,7 @@ use crate::{
     Context, Error, btreemap,
     planners::{Planner, set_owner_ref},
     reconcilers::template::ResolvedTemplate,
-    utils::labels::{
-        INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL, RESTARTED_AT_ANNOTATION,
-    },
+    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, RESTARTED_AT_ANNOTATION},
 };
 
 /// Default GlobSet blacklist enforced for pod JSON patches.
@@ -89,7 +88,7 @@ impl Planner for ReplicaSetPlanner {
             let labels = btreemap! {
                 MANAGED_BY_LABEL => MANAGED_BY_VALUE,
                 INSTANCE_LABEL => instance_name,
-                POD_LABEL => pod_tmpl.name.as_str(),
+                RESOURCE_LABEL => pod_tmpl.name.as_str(),
             };
 
             let mut rs = ReplicaSet {
@@ -259,12 +258,12 @@ pub fn build_replicaset_spec(
     let labels = btreemap! {
         MANAGED_BY_LABEL => MANAGED_BY_VALUE,
         INSTANCE_LABEL => instance_name,
-        POD_LABEL => pod_tmpl.name.as_str(),
+        RESOURCE_LABEL => pod_tmpl.name.as_str(),
     };
 
     let selector = btreemap! {
         INSTANCE_LABEL => instance_name,
-        POD_LABEL => pod_tmpl.name.as_str(),
+        RESOURCE_LABEL => pod_tmpl.name.as_str(),
     };
 
     let mut annotations = BTreeMap::new();
@@ -338,7 +337,7 @@ mod tests {
             selector.get(INSTANCE_LABEL),
             Some(&"team-alpha".to_string())
         );
-        assert_eq!(selector.get(POD_LABEL), Some(&"web".to_string()));
+        assert_eq!(selector.get(RESOURCE_LABEL), Some(&"web".to_string()));
 
         let pod_template = spec.template.unwrap();
         let annotations = pod_template
@@ -599,7 +598,7 @@ mod tests {
         let web_rs = desired
             .iter()
             .find(|rs| {
-                rs.metadata.labels.as_ref().unwrap().get(POD_LABEL) == Some(&"web".to_string())
+                rs.metadata.labels.as_ref().unwrap().get(RESOURCE_LABEL) == Some(&"web".to_string())
             })
             .unwrap();
         let web_pod_spec = web_rs

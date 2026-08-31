@@ -27,6 +27,12 @@ pub struct TemplateCache {
     index: Arc<Mutex<BTreeMap<TemplateKey, CachedTemplateEntry>>>,
 }
 
+impl Default for TemplateCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TemplateCache {
     pub fn new() -> Self {
         Self {

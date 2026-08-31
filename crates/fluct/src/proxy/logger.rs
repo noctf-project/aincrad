@@ -160,7 +160,7 @@ pub struct LogBuffer {
 impl LogBuffer {
     pub fn new(capacity: usize) -> Self {
         assert!(
-            capacity >= FOOTER_SIZE + 1,
+            capacity > FOOTER_SIZE,
             "Capacity must fit at least 1 byte of payload and a footer"
         );
         Self {
@@ -175,8 +175,8 @@ impl LogBuffer {
 
         while !data.is_empty() {
             // Try to continue an existing record at current pos
-            if let Some((cur_len, cur_dir)) = self.peek_current_record() {
-                if cur_dir == dir && cur_len < MAX_PAYLOAD {
+            if let Some((cur_len, cur_dir)) = self.peek_current_record()
+                && cur_dir == dir && cur_len < MAX_PAYLOAD {
                     let available_in_buf = self.buf.len() - self.pos;
                     let available_in_record = MAX_PAYLOAD - cur_len;
                     let space = available_in_buf.min(available_in_record);
@@ -195,7 +195,6 @@ impl LogBuffer {
                         continue;
                     }
                 }
-            }
 
             // Start a new record. Check if we need to wrap to index 0.
             let available_at_pos = self.buf.len().saturating_sub(self.pos);

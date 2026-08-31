@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use k8s_common::RESOURCE_LABEL;
 use k8s_common::crd::CTFInstance;
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta};
@@ -10,7 +11,7 @@ use crate::{
     Context, Error, btreemap,
     planners::{Planner, set_owner_ref},
     reconcilers::template::ResolvedTemplate,
-    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, POD_LABEL},
+    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE},
     utils::naming::resource_name,
 };
 
@@ -18,7 +19,6 @@ pub struct ServicePlanner;
 
 impl Planner for ServicePlanner {
     const KIND: &'static str = "Service";
-    const PRUNE_ORPHANS: bool = false;
 
     type Resource = Service;
 
@@ -42,7 +42,7 @@ impl Planner for ServicePlanner {
             let labels = btreemap! {
                 MANAGED_BY_LABEL => MANAGED_BY_VALUE,
                 INSTANCE_LABEL => instance_name,
-                POD_LABEL => pod.name.as_str(),
+                RESOURCE_LABEL => pod.name.as_str(),
             };
 
             // grab all ports and put them into the service spec
@@ -64,7 +64,7 @@ impl Planner for ServicePlanner {
                 spec: Some(ServiceSpec {
                     selector: Some(btreemap! {
                         INSTANCE_LABEL => instance_name,
-                        POD_LABEL => pod.name.as_str(),
+                        RESOURCE_LABEL => pod.name.as_str(),
                     }),
                     cluster_ip: Some("None".into()),
                     ports: Some(

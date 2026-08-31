@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use k8s_common::{
-    ROUTE_LABEL,
+    RESOURCE_LABEL,
     crd::{
         CTFInstance, CTFInstanceSpecRouteOverride, CTFInstanceStatusEndpoint, CTFProxyRoute,
         CTFProxyRouteSpec, RouteSpec,
@@ -17,7 +17,7 @@ use crate::{
     reconcilers::template::ResolvedTemplate,
     routing::AllocatedRoute,
     utils::{
-        labels::{INSTANCE_LABEL, INSTANCE_NAMESPACE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE},
+        labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, NAMESPACE_LABEL},
         naming::resource_name,
     },
 };
@@ -79,8 +79,8 @@ impl Planner for ProxyRoutePlanner {
             let labels = btreemap! {
                 MANAGED_BY_LABEL => MANAGED_BY_VALUE,
                 INSTANCE_LABEL => instance_name,
-                INSTANCE_NAMESPACE_LABEL => ns,
-                ROUTE_LABEL => route_tmpl.name.as_str(),
+                NAMESPACE_LABEL => ns,
+                RESOURCE_LABEL => route_tmpl.name.as_str(),
             };
 
             let proxy_spec = CTFProxyRouteSpec {

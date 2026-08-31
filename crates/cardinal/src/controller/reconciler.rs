@@ -1,7 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use k8s_common::crd::{CTFInstance, CTFProxyRoute, CTFTemplate};
+use k8s_common::{
+    RESOURCE_LABEL,
+    crd::{CTFInstance, CTFProxyRoute, CTFTemplate},
+};
 use kube::{
     Api, Client,
     runtime::{
@@ -189,12 +192,12 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
                 {
                     let instance_name = labels.get(crate::utils::labels::INSTANCE_LABEL);
                     let instance_ns = labels
-                        .get(crate::utils::labels::INSTANCE_NAMESPACE_LABEL)
+                        .get(crate::utils::labels::NAMESPACE_LABEL)
                         .map(|s| s.as_str())
                         .unwrap_or("default");
-                    let pod_name = labels.get(crate::utils::labels::POD_LABEL);
+                    let resource_name = labels.get(RESOURCE_LABEL);
 
-                    if let (Some(inst), Some(route)) = (instance_name, pod_name) {
+                    if let (Some(inst), Some(route)) = (instance_name, resource_name) {
                         let route_key = ResourceKey::new(instance_ns, inst, route);
                         allocator.sync(&route_key, port);
                         count += 1;
@@ -241,8 +244,8 @@ pub async fn run_controller(
         template_cache: Some(TemplateCache::new()),
         instance_cache: Some(InstanceCache::new()),
         route_allocator: Some(route_allocator),
-        system_namespace: system_namespace,
-        cluster_domain: cluster_domain,
+        system_namespace,
+        cluster_domain,
         image_aliases: image_alias,
     });
 

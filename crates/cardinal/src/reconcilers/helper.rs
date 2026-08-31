@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use k8s_common::{
-    ROUTE_LABEL,
+    RESOURCE_LABEL,
     crd::{CTFInstance, CTFProxyRoute},
 };
 use kube::{
@@ -17,7 +17,7 @@ use crate::{
     planners::Planner,
     reconcilers::template::ResolvedTemplate,
     routing::RouteAllocator,
-    utils::labels::{INSTANCE_LABEL, INSTANCE_NAMESPACE_LABEL, POD_LABEL, ROUTES_FINALIZER},
+    utils::labels::{INSTANCE_LABEL, NAMESPACE_LABEL, ROUTES_FINALIZER},
 };
 
 const PRUNE_CONCURRENCY_LIMIT: usize = 16;
@@ -165,7 +165,7 @@ pub async fn apply_proxy_routes(
 
     // 1. Delete old/orphaned CTFProxyRoute resources FIRST before creating/updating new ones
     let lp = ListParams::default().labels(&format!(
-        "{INSTANCE_LABEL}={instance_name},{INSTANCE_NAMESPACE_LABEL}={instance_ns}"
+        "{INSTANCE_LABEL}={instance_name},{NAMESPACE_LABEL}={instance_ns}"
     ));
     let existing_list = api.list(&lp).await?;
 
@@ -185,7 +185,7 @@ pub async fn apply_proxy_routes(
                     .metadata
                     .labels
                     .as_ref()
-                    .and_then(|l| l.get(POD_LABEL))
+                    .and_then(|l| l.get(RESOURCE_LABEL))
             {
                 let route_key = ResourceKey::new(instance_ns, instance_name, pod_name);
                 allocator.release_if_bound(&route_key, old_port);
@@ -222,7 +222,7 @@ pub async fn cleanup_instance_routes(
     let instance_ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
     let lp = ListParams::default().labels(&format!(
-        "{INSTANCE_LABEL}={instance_name},{INSTANCE_NAMESPACE_LABEL}={instance_ns}"
+        "{INSTANCE_LABEL}={instance_name},{NAMESPACE_LABEL}={instance_ns}"
     ));
     let list = api.list(&lp).await?;
 
@@ -277,10 +277,10 @@ pub async fn delete_proxy_routes_batch(
 
                     if let Some(labels) = route.metadata.labels.as_ref()
                         && let (Some(inst), Some(pod)) =
-                            (labels.get(INSTANCE_LABEL), labels.get(ROUTE_LABEL))
+                            (labels.get(INSTANCE_LABEL), labels.get(RESOURCE_LABEL))
                     {
                         let instance_ns = labels
-                            .get(INSTANCE_NAMESPACE_LABEL)
+                            .get(NAMESPACE_LABEL)
                             .map(|s| s.as_str())
                             .unwrap_or("default");
                         let route_key = ResourceKey::new(instance_ns, inst, pod);
@@ -322,7 +322,7 @@ pub async fn prune_unreferenced_proxy_routes(
             if let Some(labels) = route.metadata.labels.as_ref() {
                 let instance_name = labels.get(INSTANCE_LABEL);
                 let instance_ns = labels
-                    .get(INSTANCE_NAMESPACE_LABEL)
+                    .get(NAMESPACE_LABEL)
                     .map(|s| s.as_str())
                     .unwrap_or("default");
 

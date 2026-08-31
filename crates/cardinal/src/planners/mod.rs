@@ -23,7 +23,7 @@ use crate::{Context, Error, reconcilers::template::ResolvedTemplate};
 /// Pure trait for declaring the desired state of a child Kubernetes resource type.
 pub trait Planner {
     const KIND: &'static str;
-    const PRUNE_ORPHANS: bool = false;
+    const PRUNE_ORPHANS: bool = true;
 
     type Resource: Resource<Scope = NamespaceResourceScope, DynamicType = ()>
         + Clone
