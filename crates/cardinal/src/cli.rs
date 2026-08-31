@@ -36,11 +36,19 @@ pub struct Opts {
     pub cluster_domain: String,
 
     #[arg(
-        long,
-        value_parser = parse_image_alias,
+        long = "namespace",
+        visible_alias = "managed-namespace",
         action = clap::ArgAction::Append
     )]
-    pub image_alias: Option<Vec<(String, String)>>,
+    pub managed_namespaces: Vec<String>,
+
+    #[arg(
+        long,
+        value_parser = parse_image_alias,
+        visible_alias = "image-alias",
+        action = clap::ArgAction::Append
+    )]
+    pub image_aliases: Option<Vec<(String, String)>>,
 }
 
 /// Parses a single `key=value` image alias argument, validating the key and
@@ -113,7 +121,7 @@ impl Opts {
 
         // Duplicate image alias keys would make lookup ambiguous; reject them.
         let mut seen = std::collections::HashSet::new();
-        if let Some(aliases) = &self.image_alias {
+        if let Some(aliases) = &self.image_aliases {
             for (key, _) in aliases {
                 if !seen.insert(key) {
                     return Err(format!("duplicate image alias key '{key}'"));
@@ -126,7 +134,7 @@ impl Opts {
 
     /// Builds the deduplicated image alias map.
     pub fn image_alias_map(&self) -> std::collections::BTreeMap<String, String> {
-        self.image_alias
+        self.image_aliases
             .iter()
             .flatten()
             .cloned()
@@ -150,7 +158,8 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            image_alias: None,
+            managed_namespaces: vec![],
+            image_aliases: None,
         };
         assert!(opts.validate().is_ok());
     }
@@ -165,7 +174,8 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            image_alias: None,
+            managed_namespaces: vec![],
+            image_aliases: None,
         };
         let err = opts.validate().unwrap_err();
         assert!(err.contains("overlaps with auto_ports"));
@@ -181,7 +191,8 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            image_alias: None,
+            managed_namespaces: vec![],
+            image_aliases: None,
         };
         let err = opts.validate().unwrap_err();
         assert!(err.contains("tls_port (4433) overlaps with reserved_ports"));
@@ -197,7 +208,8 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            image_alias: None,
+            managed_namespaces: vec![],
+            image_aliases: None,
         };
         let err = opts.validate().unwrap_err();
         assert!(err.contains("tls_port (4433) overlaps with auto_ports"));
@@ -212,7 +224,8 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            image_alias: image_aliases,
+            managed_namespaces: vec![],
+            image_aliases,
         }
     }
 
@@ -285,5 +298,24 @@ mod tests {
     #[test]
     fn test_parse_image_alias_missing_equals_rejected() {
         assert!(parse_image_alias("_challenges").is_err());
+    }
+
+    #[test]
+    fn test_parse_namespace_args() {
+        let opts = Opts::try_parse_from(["cardinal", "--namespace", "ns-a", "--namespace", "ns-b"])
+            .unwrap();
+        assert_eq!(opts.managed_namespaces, vec!["ns-a", "ns-b"]);
+    }
+
+    #[test]
+    fn test_parse_managed_namespace_alias() {
+        let opts = Opts::try_parse_from(["cardinal", "--managed-namespace", "team-1"]).unwrap();
+        assert_eq!(opts.managed_namespaces, vec!["team-1"]);
+    }
+
+    #[test]
+    fn test_parse_no_namespaces_defaults_empty() {
+        let opts = Opts::try_parse_from(["cardinal"]).unwrap();
+        assert!(opts.managed_namespaces.is_empty());
     }
 }

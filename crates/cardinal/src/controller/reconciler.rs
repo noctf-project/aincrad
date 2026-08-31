@@ -185,6 +185,28 @@ fn proxy_route_owner(route: &CTFProxyRoute) -> Vec<ObjectRef<CTFInstance>> {
     vec![ObjectRef::new(instance).within(ns)]
 }
 
+/// Helper handling allocator synchronization on proxy route watcher events.
+fn handle_proxy_route_allocator_event(event: &Event<CTFProxyRoute>, allocator: &RouteAllocator) {
+    match event {
+        Event::Apply(route) | Event::InitApply(route) => {
+            if let Some(key) = proxy_route_key(route)
+                && let Ok(ProxyRouteKey::Tcp(port)) = route.route_key()
+            {
+                allocator.sync(&key, port);
+            }
+        }
+        Event::Delete(route) => {
+            if let Some(key) = proxy_route_key(route) {
+                allocator.release(&key);
+            }
+        }
+        Event::Init => {
+            allocator.clear();
+        }
+        Event::InitDone => {}
+    }
+}
+
 pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
     let Opts {
         system_namespace,
@@ -194,59 +216,72 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
         hostname_suffix,
         tls_port,
         cluster_domain,
-        image_alias,
+        managed_namespaces,
+        image_aliases: image_alias,
     } = opts;
     let system_namespace =
         system_namespace.unwrap_or_else(|| client.default_namespace().to_string());
-    let proxy_routes = Api::<CTFProxyRoute>::namespaced(client.clone(), &system_namespace);
 
-    // Initialize in-memory CTFTemplate reflector store cache and bootstrap active port allocations.
-    let allocator = RouteAllocator::new(
+    let allocator = Arc::new(RouteAllocator::new(
         Arc::new(PortsStore::new(reserved_ports, auto_ports)),
         route_seed,
         hostname_suffix,
         tls_port,
-    );
+    ));
 
-    let caches = Caches::default();
-    let proxy_route_cache = caches.proxy_routes.clone();
+    let image_alias_map = image_alias
+        .into_iter()
+        .flatten()
+        .collect::<std::collections::BTreeMap<String, String>>();
 
-    // Proxy route watcher feeds the cache and keeps the allocator in sync with live TCP routes.
-    let allocator_stream = allocator.clone();
-    let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes, move |event| {
-        match event {
-            Event::Apply(route) | Event::InitApply(route) => {
-                // Bind the fixed TCP port this route owns, so a restart does not re-allocate it.
-                if let Some(key) = proxy_route_key(route)
-                    && let Ok(ProxyRouteKey::Tcp(port)) = route.route_key()
-                {
-                    allocator_stream.sync(&key, port);
-                }
-            }
-            Event::Delete(route) => {
-                // Free the port the deleted route held.
-                if let Some(key) = proxy_route_key(route) {
-                    allocator_stream.release(&key);
-                }
-            }
-            Event::Init => {
-                // Fresh list-and-watch cycle: drop stale bindings before the full state is re-applied.
-                allocator_stream.clear();
-            }
-            Event::InitDone => {}
+    if managed_namespaces.is_empty() {
+        let context = Arc::new(Context {
+            client: client.clone(),
+            caches: Caches::default(),
+            route_allocator: Some(allocator.clone()),
+            system_namespace: system_namespace.clone(),
+            cluster_domain,
+            image_aliases: image_alias_map,
+        });
+
+        let proxy_routes = Api::<CTFProxyRoute>::namespaced(client, &system_namespace);
+        let proxy_route_cache = context.caches.proxy_routes.clone();
+        let allocator_stream = allocator.clone();
+        let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes, move |event| {
+            handle_proxy_route_allocator_event(event, &allocator_stream);
+        });
+
+        run_controller(None, context, proxy_route_stream).await
+    } else {
+        let mut tasks = Vec::new();
+        for ns in managed_namespaces {
+            let context = Arc::new(Context {
+                client: client.clone(),
+                caches: Caches::default(),
+                route_allocator: Some(allocator.clone()),
+                system_namespace: system_namespace.clone(),
+                cluster_domain: cluster_domain.clone(),
+                image_aliases: image_alias_map.clone(),
+            });
+
+            let proxy_routes = Api::<CTFProxyRoute>::namespaced(client.clone(), &system_namespace);
+            let proxy_route_cache = context.caches.proxy_routes.clone();
+            let allocator_stream = allocator.clone();
+            let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes, move |event| {
+                handle_proxy_route_allocator_event(event, &allocator_stream);
+            });
+
+            tasks.push(tokio::spawn(async move {
+                run_controller(Some(ns), context, proxy_route_stream).await
+            }));
         }
-    });
 
-    run_controller(
-        client,
-        Arc::new(allocator),
-        system_namespace,
-        cluster_domain,
-        image_alias.into_iter().flatten().collect(),
-        caches,
-        proxy_route_stream,
-    )
-    .await
+        let (res, _idx, _remaining) = futures::future::select_all(tasks).await;
+        match res {
+            Ok(controller_res) => controller_res,
+            Err(join_err) => Err(Error::Custom(join_err.to_string())),
+        }
+    }
 }
 
 /// Derives the allocator key for a proxy route from its labels.
@@ -267,33 +302,32 @@ fn proxy_route_key(route: &CTFProxyRoute) -> Option<ResourceKey> {
 
 /// Spawns and runs the `CTFInstance` controller loop.
 pub async fn run_controller<S>(
-    client: Client,
-    route_allocator: Arc<crate::routing::RouteAllocator>,
-    system_namespace: String,
-    cluster_domain: String,
-    image_alias: std::collections::BTreeMap<String, String>,
-    caches: Caches,
+    namespace: Option<String>,
+    context: Arc<Context>,
     proxy_route_stream: S,
 ) -> Result<(), Error>
 where
     S: Stream<Item = Result<CTFProxyRoute, WatcherError>> + Send + 'static,
 {
-    let instances = Api::<CTFInstance>::all(client.clone());
-    let templates = Api::<CTFTemplate>::all(client.clone());
-    let services = Api::<Service>::all(client.clone());
-    let replica_sets = Api::<ReplicaSet>::all(client.clone());
+    let client = &context.client;
+    let (instances, templates, services, replica_sets) = if let Some(ref ns) = namespace {
+        (
+            Api::<CTFInstance>::namespaced(client.clone(), ns),
+            Api::<CTFTemplate>::namespaced(client.clone(), ns),
+            Api::<Service>::namespaced(client.clone(), ns),
+            Api::<ReplicaSet>::namespaced(client.clone(), ns),
+        )
+    } else {
+        (
+            Api::<CTFInstance>::all(client.clone()),
+            Api::<CTFTemplate>::all(client.clone()),
+            Api::<Service>::all(client.clone()),
+            Api::<ReplicaSet>::all(client.clone()),
+        )
+    };
 
     // Gates instance processing until every auxiliary cache completes its initial sync.
-    let ready = ReadyGate::from_caches(&caches);
-
-    let context = Arc::new(Context {
-        client: client.clone(),
-        caches,
-        route_allocator: Some(route_allocator),
-        system_namespace,
-        cluster_domain,
-        image_aliases: image_alias,
-    });
+    let ready = ReadyGate::from_caches(&context.caches);
 
     let template_cache = context.caches.templates.clone();
 
@@ -371,7 +405,11 @@ where
         .touched_objects()
         .predicate_filter(instance_predicate(), Default::default());
 
-    info!("Starting CTFInstance controller with Template tracking");
+    if let Some(ref ns) = namespace {
+        info!(namespace = %ns, "Starting CTFInstance controller with Template tracking");
+    } else {
+        info!("Starting CTFInstance controller across all namespaces with Template tracking");
+    }
 
     tokio::select! {
         Ok(err_msg) = fatal_rx.recv() => {
