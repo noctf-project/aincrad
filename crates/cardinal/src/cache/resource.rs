@@ -9,8 +9,8 @@ use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::runtime::watcher::{self, Config, Event, watcher};
 use kube::runtime::WatchStreamExt;
+use kube::runtime::watcher::{self, Config, Event, watcher};
 use kube::{Api, Resource};
 use serde::de::DeserializeOwned;
 use tokio::sync::watch;
@@ -313,9 +313,10 @@ fn should_update(existing: &ObjectMeta, incoming: &ObjectMeta) -> bool {
     }
 
     if incoming_gen == existing_gen
-        && let (Some(inc_rv), Some(cur_rv)) = (parse_rv(incoming), parse_rv(existing)) {
-            return inc_rv >= cur_rv;
-        }
+        && let (Some(inc_rv), Some(cur_rv)) = (parse_rv(incoming), parse_rv(existing))
+    {
+        return inc_rv >= cur_rv;
+    }
 
     true
 }

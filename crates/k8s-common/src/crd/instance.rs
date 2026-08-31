@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -50,6 +52,8 @@ pub struct CTFInstanceStatus {
     pub restarted_at: Option<String>,
     #[serde(default)]
     pub resources: CTFInstanceResources,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub children: BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(schema_with = "list_schema::<Condition>")]
     pub conditions: Vec<Condition>,

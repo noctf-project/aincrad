@@ -70,7 +70,84 @@ pub trait Planner {
             Option<k8s_common::crd::CTFInstanceResources>,
         ),
         Error,
-    >;
+    > {
+        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            k8s_openapi::jiff::Timestamp::now(),
+        );
+
+        let Some(cache) = Self::cache(ctx) else {
+            return Ok((
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition {
+                    type_: Self::KIND.to_string(),
+                    status: "Unknown".to_string(),
+                    reason: "ResourceManaged".to_string(),
+                    message: "Resource applied".to_string(),
+                    last_transition_time: now,
+                    observed_generation: instance.metadata.generation,
+                },
+                None,
+            ));
+        };
+
+        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+        let name = instance.metadata.name.as_deref().unwrap_or("unknown");
+        let cached_entries = cache.for_instance(ns, name);
+
+        let expected_names = instance
+            .status
+            .as_ref()
+            .and_then(|s| s.children.get(Self::KIND));
+
+        let (status, reason, message) = if let Some(expected) = expected_names {
+            let mut missing = Vec::new();
+            for exp in expected {
+                if !cached_entries.iter().any(|e| &e.name == exp) {
+                    missing.push(exp.as_str());
+                }
+            }
+            if missing.is_empty() {
+                (
+                    "True",
+                    "Available",
+                    format!(
+                        "All {} {}(s) available",
+                        expected.len(),
+                        Self::KIND.to_lowercase()
+                    ),
+                )
+            } else {
+                (
+                    "False",
+                    "Unavailable",
+                    format!("{}(s) missing: {}", Self::KIND, missing.join(", ")),
+                )
+            }
+        } else if cached_entries.is_empty() {
+            ("Unknown", "ResourceManaged", "Resource applied".to_string())
+        } else {
+            (
+                "True",
+                "Available",
+                format!(
+                    "All {} {}(s) available",
+                    cached_entries.len(),
+                    Self::KIND.to_lowercase()
+                ),
+            )
+        };
+
+        Ok((
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition {
+                type_: Self::KIND.to_string(),
+                status: status.to_string(),
+                reason: reason.to_string(),
+                message,
+                last_transition_time: now,
+                observed_generation: instance.metadata.generation,
+            },
+            None,
+        ))
+    }
 }
 
 /// Sets controller owner reference on a resource pointing to the CTFInstance.

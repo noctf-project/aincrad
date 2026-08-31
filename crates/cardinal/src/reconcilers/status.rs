@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use k8s_common::crd::{CTFInstance, CTFInstanceStatus};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use k8s_openapi::jiff::Timestamp;
@@ -19,6 +21,7 @@ pub struct Evaluation {
     pub conditions: Vec<Condition>,
     pub template_generation: Option<i64>,
     pub resources: k8s_common::crd::CTFInstanceResources,
+    pub children: BTreeMap<String, Vec<String>>,
 }
 
 impl Evaluation {
@@ -65,14 +68,42 @@ fn fold_planner<P: Planner>(
         evaluation.resources.overlay(resources);
     }
 
+    if let Some(names) = P::cached_names(instance, ctx) {
+        evaluation.children.insert(P::KIND.to_string(), names);
+    }
+
     Ok(())
+}
+
+/// Returns true when the instance's status has observed the current spec
+/// generation and restart annotation.
+pub fn is_observed(instance: &CTFInstance) -> bool {
+    match (
+        instance.status.as_ref().and_then(|s| s.observed_generation),
+        instance.metadata.generation,
+    ) {
+        (Some(observed), Some(current)) if observed < current => return false,
+        (None, Some(_)) => return false,
+        _ => {}
+    }
+
+    let status_restarted_at = instance
+        .status
+        .as_ref()
+        .and_then(|s| s.restarted_at.as_deref());
+    let annotation_restarted_at = instance
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
+        .map(|s| s.as_str());
+
+    status_restarted_at == annotation_restarted_at
 }
 
 /// Commits the evaluated state to the instance status in a single patch. Only
 /// called after children have been applied, so the recorded observed generation
 /// and applied template generation are truthful.
-///
-/// The skip path never reaches this function; it writes nothing.
 pub async fn commit(
     instance: &CTFInstance,
     evaluation: &Evaluation,
@@ -80,6 +111,16 @@ pub async fn commit(
 ) -> Result<(), Error> {
     let name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+
+    // Preserve existing children if already observed to avoid shrinking expected child list on child deletions
+    let children = if is_observed(instance)
+        && let Some(existing) = instance.status.as_ref().map(|s| &s.children)
+        && !existing.is_empty()
+    {
+        existing.clone()
+    } else {
+        evaluation.children.clone()
+    };
 
     let mut status = CTFInstanceStatus {
         observed_generation: instance.metadata.generation,
@@ -91,6 +132,7 @@ pub async fn commit(
             .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
             .cloned(),
         resources: evaluation.resources.clone(),
+        children,
         conditions: evaluation.conditions.clone(),
     };
 
@@ -196,6 +238,7 @@ pub async fn reconcile_failure(
             restarted_at,
             conditions: vec![ready_condition],
             resources,
+            ..Default::default()
         }
     });
 
@@ -271,6 +314,7 @@ mod tests {
             restarted_at: None,
             conditions: vec![],
             resources: Default::default(),
+            ..Default::default()
         });
 
         let evaluation = evaluate_status(&synced, &ctx).unwrap();
@@ -307,6 +351,7 @@ mod tests {
             restarted_at: None,
             conditions: vec![],
             resources: Default::default(),
+            ..Default::default()
         });
 
         let template_meta = ctx
@@ -357,6 +402,7 @@ mod tests {
             restarted_at: None,
             conditions: vec![],
             resources: Default::default(),
+            ..Default::default()
         });
         assert!(
             !crate::utils::versions::requires_template_upgrade(&template_meta, &caught_up),
@@ -407,5 +453,52 @@ mod tests {
         let err = Error::TemplateBuildError("Failed to patch JSON".to_string());
         let res = reconcile_failure(&instance, &ctx, &err).await;
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_status_populates_children() {
+        use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetStatus};
+        use k8s_openapi::api::core::v1::Service;
+        use kube::runtime::watcher::Event;
+
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+
+        // Seed ReplicaSet
+        let mut rs = ReplicaSet::default();
+        rs.metadata.name = Some("chal-1-web".to_string());
+        rs.metadata.namespace = Some("default".to_string());
+        rs.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL => "default",
+            crate::utils::labels::INSTANCE_LABEL => "chal-1",
+            crate::utils::labels::RESOURCE_LABEL => "web",
+        });
+        rs.status = Some(ReplicaSetStatus {
+            ready_replicas: Some(1),
+            replicas: 1,
+            ..Default::default()
+        });
+        ctx.caches.replica_sets.handle(&Event::Apply(rs));
+
+        // Seed Service
+        let mut svc = Service::default();
+        svc.metadata.name = Some("chal-1-web".to_string());
+        svc.metadata.namespace = Some("default".to_string());
+        svc.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL => "default",
+            crate::utils::labels::INSTANCE_LABEL => "chal-1",
+            crate::utils::labels::RESOURCE_LABEL => "web",
+        });
+        ctx.caches.services.handle(&Event::Apply(svc));
+
+        let evaluation = evaluate_status(&instance, &ctx).unwrap();
+        assert_eq!(
+            evaluation.children.get("ReplicaSet"),
+            Some(&vec!["chal-1-web".to_string()])
+        );
+        assert_eq!(
+            evaluation.children.get("Service"),
+            Some(&vec!["chal-1-web".to_string()])
+        );
     }
 }

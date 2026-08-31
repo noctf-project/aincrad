@@ -3,8 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use k8s_common::RESOURCE_LABEL;
 use k8s_common::crd::CTFInstance;
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta};
-use k8s_openapi::jiff::Timestamp;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use crate::planners::get_services_map;
 use crate::{
@@ -89,25 +88,6 @@ impl Planner for ServicePlanner {
         }
 
         Ok(desired)
-    }
-
-    fn check_status(
-        instance: &CTFInstance,
-        _ctx: &Context,
-    ) -> Result<(Condition, Option<k8s_common::crd::CTFInstanceResources>), Error> {
-        Ok((
-            Condition {
-                type_: Self::KIND.to_string(),
-                status: "Unknown".to_string(),
-                reason: "ResourceManaged".to_string(),
-                message: "Resource applied".to_string(),
-                last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                    Timestamp::now(),
-                ),
-                observed_generation: instance.metadata.generation,
-            },
-            None,
-        ))
     }
 }
 

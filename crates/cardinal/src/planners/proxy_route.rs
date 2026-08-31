@@ -159,6 +159,24 @@ impl Planner for ProxyRoutePlanner {
             }
         }
 
+        let cached_entries = ctx
+            .caches
+            .proxy_routes
+            .for_instance(instance_ns, instance_name);
+
+        // Verify that every previously recorded expected child proxy route still exists in cache
+        if let Some(expected) = instance
+            .status
+            .as_ref()
+            .and_then(|s| s.children.get(Self::KIND))
+        {
+            for exp in expected {
+                if !cached_entries.iter().any(|e| &e.name == exp) {
+                    unallocated.push(exp.clone());
+                }
+            }
+        }
+
         let now: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time =
             k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Timestamp::now());
 

@@ -306,7 +306,7 @@ mod tests {
     use super::*;
     use crate::planners::ReplicaSetPlanner;
     use crate::test_utils::tests::{
-        dummy_context, dummy_ctx, dummy_instance, dummy_kube_client, dummy_resolved_template,
+        dummy_context, dummy_instance, dummy_kube_client, dummy_resolved_template,
         recording_kube_client,
     };
     use k8s_common::crd::CTFProxyRouteSpec;

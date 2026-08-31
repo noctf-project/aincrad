@@ -147,7 +147,10 @@ pub mod prepare {
         if is_observed(instance)
             && !crate::utils::versions::requires_template_upgrade(&template.metadata, instance)
         {
-            info!(name, ns, "Instance spec is synced, updating status and skipping plan/apply");
+            info!(
+                name,
+                ns, "Instance spec is synced, updating status and skipping plan/apply"
+            );
             let evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
             reconcilers::status::commit(instance, &evaluation, ctx).await?;
             return Ok(Step::Finish(completed_action(flow)));
@@ -250,34 +253,7 @@ pub mod apply {
     }
 }
 
-/// Returns true when the instance's status has observed the current spec
-/// generation and restart annotation, meaning this reconcile pass found nothing
-/// new to apply.
-fn is_observed(instance: &CTFInstance) -> bool {
-    match (
-        instance.status.as_ref().and_then(|s| s.observed_generation),
-        instance.metadata.generation,
-    ) {
-        (Some(observed), Some(current)) if observed < current => return false,
-        (None, Some(_)) => return false,
-        _ => {}
-    }
-
-    // restartedAt doesn't bump metadata.generation, so it must be checked
-    // separately or restart requests would be swallowed by the Ready gate.
-    let status_restarted_at = instance
-        .status
-        .as_ref()
-        .and_then(|s| s.restarted_at.as_deref());
-    let annotation_restarted_at = instance
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
-        .map(|s| s.as_str());
-
-    status_restarted_at == annotation_restarted_at
-}
+use crate::reconcilers::status::is_observed;
 
 /// Patches the minTemplateGeneration annotation to `target_gen`.
 async fn patch_min_template_annotation(flow: &Flow<'_>, target_gen: i64) -> Result<(), Error> {

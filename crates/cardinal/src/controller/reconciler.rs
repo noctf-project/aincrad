@@ -626,6 +626,7 @@ mod tests {
             restarted_at: None,
             conditions: vec![],
             resources: Default::default(),
+            ..Default::default()
         });
 
         reconcile(instance.clone(), ctx.clone()).await.unwrap();
@@ -683,6 +684,7 @@ mod tests {
             restarted_at: None,
             conditions: vec![],
             resources: Default::default(),
+            ..Default::default()
         });
 
         reconcile(instance.clone(), ctx.clone()).await.unwrap();
@@ -743,6 +745,7 @@ mod tests {
             restarted_at: None,
             conditions: vec![],
             resources: Default::default(),
+            ..Default::default()
         });
 
         reconcile(instance, ctx).await.unwrap();

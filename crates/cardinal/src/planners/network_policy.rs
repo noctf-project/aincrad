@@ -2,14 +2,13 @@ use k8s_common::RESOURCE_LABEL;
 use k8s_common::crd::CTFInstance;
 use k8s_openapi::api::networking::v1::NetworkPolicyIngressRule;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement;
-use k8s_openapi::jiff::Timestamp;
 use k8s_openapi::{
     api::networking::v1::{
         IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyPeer, NetworkPolicyPort,
         NetworkPolicySpec,
     },
     apimachinery::pkg::{
-        apis::meta::v1::{Condition, LabelSelector, ObjectMeta},
+        apis::meta::v1::{LabelSelector, ObjectMeta},
         util::intstr::IntOrString,
     },
 };
@@ -73,25 +72,6 @@ impl Planner for NetworkPolicyPlanner {
         set_owner_ref(&mut ext, instance);
 
         Ok(vec![int, ext])
-    }
-
-    fn check_status(
-        instance: &CTFInstance,
-        _ctx: &Context,
-    ) -> Result<(Condition, Option<k8s_common::crd::CTFInstanceResources>), Error> {
-        Ok((
-            Condition {
-                type_: Self::KIND.to_string(),
-                status: "Unknown".to_string(),
-                reason: "ResourceManaged".to_string(),
-                message: "Resource applied".to_string(),
-                last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                    Timestamp::now(),
-                ),
-                observed_generation: instance.metadata.generation,
-            },
-            None,
-        ))
     }
 }
 

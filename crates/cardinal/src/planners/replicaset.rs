@@ -177,6 +177,19 @@ impl Planner for ReplicaSetPlanner {
             }
         }
 
+        // Verify that every previously recorded expected child ReplicaSet still exists in cache
+        if let Some(expected) = instance
+            .status
+            .as_ref()
+            .and_then(|s| s.children.get(Self::KIND))
+        {
+            for exp in expected {
+                if !cached_entries.iter().any(|e| &e.name == exp) {
+                    all_available = false;
+                }
+            }
+        }
+
         let (status, reason) = if all_available {
             ("True", "Available")
         } else {
@@ -914,5 +927,42 @@ mod tests {
         assert_eq!(cond.reason, "Available");
         assert_eq!(cond.message, "0/0 pod replicas ready");
     }
-}
 
+    #[tokio::test]
+    async fn test_check_status_missing_expected_child_evaluates_unavailable() {
+        use k8s_openapi::api::apps::v1::ReplicaSetStatus;
+        use kube::runtime::watcher::Event;
+
+        let (_store, ctx) = crate::test_utils::tests::dummy_context();
+        let mut instance = dummy_instance("chal-1", None);
+
+        // Record expected ReplicaSets in status.children: web and db
+        instance.status = Some(k8s_common::crd::CTFInstanceStatus {
+            children: crate::btreemap! {
+                "ReplicaSet".to_string() => vec!["chal-1-web".to_string(), "chal-1-db".to_string()],
+            },
+            ..Default::default()
+        });
+
+        // Seed ONLY web (1/1 ready) in cache, db is missing
+        let mut rs_web = ReplicaSet::default();
+        rs_web.metadata.name = Some("chal-1-web".to_string());
+        rs_web.metadata.namespace = Some("default".to_string());
+        rs_web.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL => "default",
+            crate::utils::labels::INSTANCE_LABEL => "chal-1",
+            crate::utils::labels::RESOURCE_LABEL => "web",
+        });
+        rs_web.status = Some(ReplicaSetStatus {
+            ready_replicas: Some(1),
+            replicas: 1,
+            ..Default::default()
+        });
+        ctx.caches.replica_sets.handle(&Event::Apply(rs_web));
+
+        // Because db is missing from cache, condition must evaluate to Unavailable
+        let (cond, _) = ReplicaSetPlanner::check_status(&instance, &ctx).unwrap();
+        assert_eq!(cond.status, "False");
+        assert_eq!(cond.reason, "Unavailable");
+    }
+}
