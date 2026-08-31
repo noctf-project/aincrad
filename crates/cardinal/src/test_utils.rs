@@ -120,12 +120,19 @@ pub mod tests {
                             ("v1", "Service")
                         };
 
+                        let clean_path = path.split('?').next().unwrap_or(&path);
+                        let resource_name = clean_path.rsplit('/').next().unwrap_or("dummy");
                         let mut body = serde_json::json!({
                             "apiVersion": api_version,
                             "kind": kind,
                             "metadata": {
-                                "name": "dummy",
-                                "namespace": "default"
+                                "name": resource_name,
+                                "namespace": "default",
+                                "labels": {
+                                    "aincrad.noctf.dev/namespace": "default",
+                                    "aincrad.noctf.dev/instance": "chal-1",
+                                    "aincrad.noctf.dev/resource": "web"
+                                }
                             }
                         });
                         if kind == "CTFInstance" {
@@ -430,12 +437,19 @@ pub mod tests {
                 ("v1", "Service")
             };
 
+            let clean_path = path.split('?').next().unwrap_or(path);
+            let resource_name = clean_path.rsplit('/').next().unwrap_or("dummy");
             let mut body = serde_json::json!({
                 "apiVersion": api_version,
                 "kind": kind,
                 "metadata": {
-                    "name": "dummy",
-                    "namespace": "default"
+                    "name": resource_name,
+                    "namespace": "default",
+                    "labels": {
+                        "aincrad.noctf.dev/namespace": "default",
+                        "aincrad.noctf.dev/instance": "chal-1",
+                        "aincrad.noctf.dev/resource": "web"
+                    }
                 }
             });
             if kind == "CTFInstance" {

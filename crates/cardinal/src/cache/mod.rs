@@ -3,7 +3,7 @@ pub mod resource;
 pub mod template;
 
 pub use instance::{InstanceCache, InstanceKey};
-pub use resource::{ResourceCache, ResourceEntry, ResourceKey, ResourceProjection};
+pub use resource::{CachedItem, ResourceCache, ResourceEntry, ResourceKey, ResourceProjection};
 pub use template::{
     CachedTemplateEntry, PodPatchersMap, RoutePatchersMap, TemplateCache, TemplateKey,
 };

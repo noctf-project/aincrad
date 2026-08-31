@@ -17,6 +17,7 @@ use k8s_common::crd::CTFInstance;
 use kube::{Resource, core::NamespaceResourceScope};
 use serde::{Serialize, de::DeserializeOwned};
 
+use crate::cache::{ResourceCache, ResourceProjection};
 use crate::utils::naming::resource_name;
 use crate::{Context, Error, reconcilers::template::ResolvedTemplate};
 
@@ -25,6 +26,7 @@ pub trait Planner {
     const KIND: &'static str;
 
     type Resource: Resource<Scope = NamespaceResourceScope, DynamicType = ()>
+        + ResourceProjection
         + Clone
         + DeserializeOwned
         + Serialize
@@ -40,12 +42,18 @@ pub trait Planner {
         ctx: &Context,
     ) -> Result<Vec<Self::Resource>, Error>;
 
-    /// Returns the object names of this kind owned by `instance` as known to the
-    /// cache. `None` means this kind is not pruned; the cache query lets pruning
-    /// diff against the live cluster without a per-reconcile API list.
-    fn cached_names(instance: &CTFInstance, ctx: &Context) -> Option<Vec<String>> {
-        let _ = (instance, ctx);
+    /// Returns the cache tracking this resource type, if tracked in memory.
+    fn cache(ctx: &Context) -> Option<&ResourceCache<Self::Resource>> {
+        let _ = ctx;
         None
+    }
+
+    /// Returns the object names of this kind owned by `instance` as known to the
+    /// cache. Default implementation queries `Self::cache`.
+    fn cached_names(instance: &CTFInstance, ctx: &Context) -> Option<Vec<String>> {
+        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+        let name = instance.metadata.name.as_deref().unwrap_or("unknown");
+        Self::cache(ctx).map(|c| c.names(ns, name))
     }
 
     /// Evaluates this resource's readiness and any status payload it contributes.

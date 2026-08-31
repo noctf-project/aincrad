@@ -34,10 +34,8 @@ impl Planner for ProxyRoutePlanner {
     const KIND: &'static str = "CTFProxyRoute";
     type Resource = CTFProxyRoute;
 
-    fn cached_names(instance: &CTFInstance, ctx: &Context) -> Option<Vec<String>> {
-        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
-        let name = instance.metadata.name.as_deref().unwrap_or("unknown");
-        Some(ctx.caches.proxy_routes.names(ns, name))
+    fn cache(ctx: &Context) -> Option<&crate::cache::ResourceCache<Self::Resource>> {
+        Some(&ctx.caches.proxy_routes)
     }
 
     fn plan(

@@ -46,10 +46,8 @@ impl Planner for ReplicaSetPlanner {
 
     type Resource = ReplicaSet;
 
-    fn cached_names(instance: &CTFInstance, ctx: &Context) -> Option<Vec<String>> {
-        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
-        let name = instance.metadata.name.as_deref().unwrap_or("unknown");
-        Some(ctx.caches.replica_sets.names(ns, name))
+    fn cache(ctx: &Context) -> Option<&crate::cache::ResourceCache<Self::Resource>> {
+        Some(&ctx.caches.replica_sets)
     }
 
     fn plan(
@@ -141,15 +139,56 @@ impl Planner for ReplicaSetPlanner {
 
     fn check_status(
         instance: &CTFInstance,
-        _ctx: &Context,
+        ctx: &Context,
     ) -> Result<(Condition, Option<k8s_common::crd::CTFInstanceResources>), Error> {
-        // TODO: Query ReplicaSet cache to verify ready_replicas >= desired_replicas
+        let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
+        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+
+        let cached_entries = ctx.caches.replica_sets.for_instance(ns, instance_name);
+        if cached_entries.is_empty() {
+            return Ok((
+                Condition {
+                    type_: Self::KIND.to_string(),
+                    status: "False".to_string(),
+                    reason: "Pending".to_string(),
+                    message: "ReplicaSets not yet present in cache".to_string(),
+                    last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                        Timestamp::now(),
+                    ),
+                    observed_generation: instance.metadata.generation,
+                },
+                None,
+            ));
+        }
+
+        let mut total_desired = 0;
+        let mut total_ready = 0;
+        let mut all_available = true;
+
+        for entry in &cached_entries {
+            let desired = entry.value.replicas;
+            let ready = entry.value.ready_replicas.unwrap_or(0);
+            total_desired += desired;
+            total_ready += ready;
+
+            // A ReplicaSet is available if at least 1 replica is ready (or desired is 0).
+            if desired > 0 && ready < 1 {
+                all_available = false;
+            }
+        }
+
+        let (status, reason) = if all_available {
+            ("True", "Available")
+        } else {
+            ("False", "Unavailable")
+        };
+
         Ok((
             Condition {
                 type_: Self::KIND.to_string(),
-                status: "Unknown".to_string(),
-                reason: "ResourceManaged".to_string(),
-                message: "Resource applied".to_string(),
+                status: status.to_string(),
+                reason: reason.to_string(),
+                message: format!("{total_ready}/{total_desired} pod replicas ready"),
                 last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                     Timestamp::now(),
                 ),
@@ -710,4 +749,170 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn test_check_status_evaluates_replica_availability() {
+        use k8s_openapi::api::apps::v1::ReplicaSetStatus;
+        use kube::runtime::watcher::Event;
+
+        let (_store, ctx) = crate::test_utils::tests::dummy_context();
+        let instance = dummy_instance("chal-1", None);
+
+        // Initially no ReplicaSets in cache -> False
+        let (cond, _) = ReplicaSetPlanner::check_status(&instance, &ctx).unwrap();
+        assert_eq!(cond.status, "False");
+        assert_eq!(cond.reason, "Pending");
+
+        // Seed ReplicaSet with ready_replicas = 0 < desired (1) -> False
+        let mut rs = ReplicaSet::default();
+        rs.metadata.name = Some("chal-1-web".to_string());
+        rs.metadata.namespace = Some("default".to_string());
+        rs.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL => "default",
+            crate::utils::labels::INSTANCE_LABEL => "chal-1",
+            crate::utils::labels::RESOURCE_LABEL => "web",
+        });
+        rs.status = Some(ReplicaSetStatus {
+            ready_replicas: Some(0),
+            replicas: 1,
+            ..Default::default()
+        });
+        ctx.caches.replica_sets.handle(&Event::Apply(rs.clone()));
+
+        let (cond, _) = ReplicaSetPlanner::check_status(&instance, &ctx).unwrap();
+        assert_eq!(cond.status, "False");
+        assert_eq!(cond.reason, "Unavailable");
+
+        // Update ReplicaSet with ready_replicas = 1 -> True
+        rs.status = Some(ReplicaSetStatus {
+            ready_replicas: Some(1),
+            replicas: 1,
+            ..Default::default()
+        });
+        ctx.caches.replica_sets.handle(&Event::Apply(rs));
+
+        let (cond, _) = ReplicaSetPlanner::check_status(&instance, &ctx).unwrap();
+        assert_eq!(cond.status, "True");
+        assert_eq!(cond.reason, "Available");
+    }
+
+    #[tokio::test]
+    async fn test_check_status_multi_replicaset_partial_and_full_readiness() {
+        use k8s_openapi::api::apps::v1::ReplicaSetStatus;
+        use kube::runtime::watcher::Event;
+
+        let (_store, ctx) = crate::test_utils::tests::dummy_context();
+        let instance = dummy_instance("chal-1", None);
+
+        // Seed web: 2/2 ready
+        let mut rs_web = ReplicaSet::default();
+        rs_web.metadata.name = Some("chal-1-web".to_string());
+        rs_web.metadata.namespace = Some("default".to_string());
+        rs_web.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL => "default",
+            crate::utils::labels::INSTANCE_LABEL => "chal-1",
+            crate::utils::labels::RESOURCE_LABEL => "web",
+        });
+        rs_web.status = Some(ReplicaSetStatus {
+            ready_replicas: Some(2),
+            replicas: 2,
+            ..Default::default()
+        });
+        ctx.caches.replica_sets.handle(&Event::Apply(rs_web));
+
+        // Seed db: 0/1 ready
+        let mut rs_db = ReplicaSet::default();
+        rs_db.metadata.name = Some("chal-1-db".to_string());
+        rs_db.metadata.namespace = Some("default".to_string());
+        rs_db.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL => "default",
+            crate::utils::labels::INSTANCE_LABEL => "chal-1",
+            crate::utils::labels::RESOURCE_LABEL => "db",
+        });
+        rs_db.status = Some(ReplicaSetStatus {
+            ready_replicas: Some(0),
+            replicas: 1,
+            ..Default::default()
+        });
+        ctx.caches.replica_sets.handle(&Event::Apply(rs_db.clone()));
+
+        // Partial readiness -> False (2/3 ready)
+        let (cond, _) = ReplicaSetPlanner::check_status(&instance, &ctx).unwrap();
+        assert_eq!(cond.status, "False");
+        assert_eq!(cond.reason, "Unavailable");
+        assert_eq!(cond.message, "2/3 pod replicas ready");
+
+        // Update db: 1/1 ready -> True (3/3 ready)
+        rs_db.status = Some(ReplicaSetStatus {
+            ready_replicas: Some(1),
+            replicas: 1,
+            ..Default::default()
+        });
+        ctx.caches.replica_sets.handle(&Event::Apply(rs_db));
+
+        let (cond, _) = ReplicaSetPlanner::check_status(&instance, &ctx).unwrap();
+        assert_eq!(cond.status, "True");
+        assert_eq!(cond.reason, "Available");
+        assert_eq!(cond.message, "3/3 pod replicas ready");
+    }
+
+    #[tokio::test]
+    async fn test_check_status_partial_replicas_at_least_one_ready_is_available() {
+        use k8s_openapi::api::apps::v1::ReplicaSetStatus;
+        use kube::runtime::watcher::Event;
+
+        let (_store, ctx) = crate::test_utils::tests::dummy_context();
+        let instance = dummy_instance("chal-1", None);
+
+        // Seed web: desired 3, ready 1 (at least 1 is ready -> Available)
+        let mut rs_web = ReplicaSet::default();
+        rs_web.metadata.name = Some("chal-1-web".to_string());
+        rs_web.metadata.namespace = Some("default".to_string());
+        rs_web.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL => "default",
+            crate::utils::labels::INSTANCE_LABEL => "chal-1",
+            crate::utils::labels::RESOURCE_LABEL => "web",
+        });
+        rs_web.status = Some(ReplicaSetStatus {
+            ready_replicas: Some(1),
+            replicas: 3,
+            ..Default::default()
+        });
+        ctx.caches.replica_sets.handle(&Event::Apply(rs_web));
+
+        let (cond, _) = ReplicaSetPlanner::check_status(&instance, &ctx).unwrap();
+        assert_eq!(cond.status, "True");
+        assert_eq!(cond.reason, "Available");
+        assert_eq!(cond.message, "1/3 pod replicas ready");
+    }
+
+    #[tokio::test]
+    async fn test_check_status_zero_replicas_is_available() {
+        use k8s_openapi::api::apps::v1::ReplicaSetStatus;
+        use kube::runtime::watcher::Event;
+
+        let (_store, ctx) = crate::test_utils::tests::dummy_context();
+        let instance = dummy_instance("chal-1", None);
+
+        let mut rs = ReplicaSet::default();
+        rs.metadata.name = Some("chal-1-worker".to_string());
+        rs.metadata.namespace = Some("default".to_string());
+        rs.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL => "default",
+            crate::utils::labels::INSTANCE_LABEL => "chal-1",
+            crate::utils::labels::RESOURCE_LABEL => "worker",
+        });
+        rs.status = Some(ReplicaSetStatus {
+            ready_replicas: None,
+            replicas: 0,
+            ..Default::default()
+        });
+        ctx.caches.replica_sets.handle(&Event::Apply(rs));
+
+        let (cond, _) = ReplicaSetPlanner::check_status(&instance, &ctx).unwrap();
+        assert_eq!(cond.status, "True");
+        assert_eq!(cond.reason, "Available");
+        assert_eq!(cond.message, "0/0 pod replicas ready");
+    }
 }
+

@@ -7,8 +7,10 @@ use futures::{Stream, StreamExt};
 use k8s_common::crd::CTFProxyRoute;
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::core::v1::Service;
+use k8s_openapi::api::networking::v1::NetworkPolicy;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::runtime::watcher::{self, Config, Event, watcher};
-use kube::runtime::{Predicate, WatchStreamExt, predicates};
+use kube::runtime::WatchStreamExt;
 use kube::{Api, Resource};
 use serde::de::DeserializeOwned;
 use tokio::sync::watch;
@@ -58,23 +60,38 @@ impl CacheKey {
     }
 }
 
-pub trait ResourceProjection: Send {
-    type Value: Clone;
+pub trait ResourceProjection: Send + Sync + 'static {
+    type Value: Clone + Send + Sync + 'static;
 
     fn key(resource: &Self) -> ResourceKey;
     fn name(resource: &Self) -> String;
+    fn meta(resource: &Self) -> ObjectMeta;
     fn value(resource: &Self) -> Self::Value;
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedItem<V> {
+    pub meta: ObjectMeta,
+    pub value: V,
 }
 
 #[derive(Debug, Clone)]
 pub struct ResourceEntry<V> {
     pub key: ResourceKey,
     pub name: String,
-    pub value: V,
+    pub item: Arc<CachedItem<V>>,
+}
+
+impl<V> std::ops::Deref for ResourceEntry<V> {
+    type Target = CachedItem<V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.item
+    }
 }
 
 struct Inner<T: ResourceProjection> {
-    index: BTreeMap<CacheKey, T::Value>,
+    index: BTreeMap<CacheKey, Arc<CachedItem<T::Value>>>,
 }
 
 pub struct ResourceCache<T: ResourceProjection> {
@@ -103,7 +120,6 @@ impl<T: ResourceProjection> ResourceCache<T> {
     where
         T: Resource + Clone + DeserializeOwned + Debug + Send + 'static,
         T::DynamicType: Default + Eq + Hash + Debug,
-        T::Value: Send,
     {
         let cache = self.clone();
         watcher(api, Config::default().labels(INSTANCE_LABEL))
@@ -120,10 +136,6 @@ impl<T: ResourceProjection> ResourceCache<T> {
                 }
             })
             .touched_objects()
-            .predicate_filter(
-                predicates::generation.combine(predicates::annotations),
-                Default::default(),
-            )
     }
 
     /// Marks the cache as having completed an initial sync.
@@ -141,11 +153,35 @@ impl<T: ResourceProjection> ResourceCache<T> {
             Event::Apply(resource) | Event::InitApply(resource) => {
                 let key = CacheKey::new(T::key(resource), T::name(resource));
                 let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                lock.index.insert(key, T::value(resource));
+
+                let incoming_meta = T::meta(resource);
+                if let Some(existing) = lock.index.get(&key)
+                    && !should_update(&existing.meta, &incoming_meta)
+                {
+                    return;
+                }
+
+                lock.index.insert(
+                    key,
+                    Arc::new(CachedItem {
+                        meta: incoming_meta,
+                        value: T::value(resource),
+                    }),
+                );
             }
             Event::Delete(resource) => {
                 let key = CacheKey::new(T::key(resource), T::name(resource));
                 let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+
+                let incoming_meta = T::meta(resource);
+                if let Some(existing) = lock.index.get(&key)
+                    && let (Some(incoming_uid), Some(existing_uid)) =
+                        (incoming_meta.uid.as_deref(), existing.meta.uid.as_deref())
+                    && incoming_uid != existing_uid
+                {
+                    return;
+                }
+
                 lock.index.remove(&key);
             }
             Event::Init => self.clear(),
@@ -167,10 +203,10 @@ impl<T: ResourceProjection> ResourceCache<T> {
             .take_while(|(k, _)| {
                 k.resource.namespace == namespace && k.resource.instance == instance
             })
-            .map(|(k, v)| ResourceEntry {
+            .map(|(k, item)| ResourceEntry {
                 key: k.resource.clone(),
                 name: k.name.clone(),
-                value: v.clone(),
+                item: Arc::clone(item),
             })
             .collect()
     }
@@ -189,12 +225,46 @@ impl<T: ResourceProjection> ResourceCache<T> {
         let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         lock.index
             .iter()
-            .map(|(k, v)| ResourceEntry {
+            .map(|(k, item)| ResourceEntry {
                 key: k.resource.clone(),
                 name: k.name.clone(),
-                value: v.clone(),
+                item: Arc::clone(item),
             })
             .collect()
+    }
+
+    /// Eagerly removes an entry matching `(namespace, instance, name)`.
+    pub fn remove_entry(&self, namespace: &str, instance: &str, name: &str) {
+        let start = CacheKey::new(ResourceKey::new(namespace, instance, ""), "");
+        let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let to_remove: Vec<CacheKey> = lock
+            .index
+            .range(start..)
+            .take_while(|(k, _)| {
+                k.resource.namespace == namespace && k.resource.instance == instance
+            })
+            .filter(|(k, _)| k.name == name)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for key in to_remove {
+            lock.index.remove(&key);
+        }
+    }
+
+    /// Eagerly removes any entry matching `name`.
+    pub fn remove_by_name(&self, name: &str) {
+        let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let to_remove: Vec<CacheKey> = lock
+            .index
+            .keys()
+            .filter(|k| k.name == name)
+            .cloned()
+            .collect();
+
+        for key in to_remove {
+            lock.index.remove(&key);
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -205,6 +275,53 @@ impl<T: ResourceProjection> ResourceCache<T> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Determines whether an incoming object update is newer than the cached metadata.
+fn should_update(existing: &ObjectMeta, incoming: &ObjectMeta) -> bool {
+    let incoming_uid = incoming.uid.as_deref();
+    let existing_uid = existing.uid.as_deref();
+
+    // When UIDs differ, the resource was recreated under the same name.
+    if let (Some(inc_uid), Some(cur_uid)) = (incoming_uid, existing_uid)
+        && inc_uid != cur_uid
+    {
+        if let (Some(inc_time), Some(cur_time)) =
+            (&incoming.creation_timestamp, &existing.creation_timestamp)
+        {
+            if inc_time < cur_time {
+                return false;
+            }
+            if inc_time > cur_time {
+                return true;
+            }
+        }
+
+        if let (Some(inc_rv), Some(cur_rv)) = (parse_rv(incoming), parse_rv(existing)) {
+            return inc_rv >= cur_rv;
+        }
+
+        return true;
+    }
+
+    // Same incarnation (or UID absent): check spec generation first.
+    let incoming_gen = incoming.generation.unwrap_or(0);
+    let existing_gen = existing.generation.unwrap_or(0);
+
+    if incoming_gen < existing_gen {
+        return false;
+    }
+
+    if incoming_gen == existing_gen
+        && let (Some(inc_rv), Some(cur_rv)) = (parse_rv(incoming), parse_rv(existing)) {
+            return inc_rv >= cur_rv;
+        }
+
+    true
+}
+
+fn parse_rv(meta: &ObjectMeta) -> Option<u64> {
+    meta.resource_version.as_deref()?.parse::<u64>().ok()
 }
 
 impl<T: ResourceProjection> Default for ResourceCache<T> {
@@ -220,10 +337,7 @@ impl<T: ResourceProjection> Default for ResourceCache<T> {
     }
 }
 
-impl<T: ResourceProjection> ReadyCache for ResourceCache<T>
-where
-    T::Value: Send,
-{
+impl<T: ResourceProjection> ReadyCache for ResourceCache<T> {
     fn is_ready(&self) -> bool {
         *self.ready_rx.borrow()
     }
@@ -294,6 +408,10 @@ impl ResourceProjection for Service {
         meta_key(resource, RESOURCE_LABEL).1
     }
 
+    fn meta(resource: &Self) -> ObjectMeta {
+        resource.meta().clone()
+    }
+
     fn value(_resource: &Self) -> Self::Value {}
 }
 
@@ -334,6 +452,10 @@ impl ResourceProjection for CTFProxyRoute {
             .to_string()
     }
 
+    fn meta(resource: &Self) -> ObjectMeta {
+        resource.meta().clone()
+    }
+
     fn value(_resource: &Self) -> Self::Value {}
 }
 
@@ -348,9 +470,31 @@ impl ResourceProjection for ReplicaSet {
         meta_key(resource, RESOURCE_LABEL).1
     }
 
+    fn meta(resource: &Self) -> ObjectMeta {
+        resource.meta().clone()
+    }
+
     fn value(resource: &Self) -> Self::Value {
         resource.status.clone().unwrap_or_default()
     }
+}
+
+impl ResourceProjection for NetworkPolicy {
+    type Value = ();
+
+    fn key(resource: &Self) -> ResourceKey {
+        meta_key(resource, RESOURCE_LABEL).0
+    }
+
+    fn name(resource: &Self) -> String {
+        meta_key(resource, RESOURCE_LABEL).1
+    }
+
+    fn meta(resource: &Self) -> ObjectMeta {
+        resource.meta().clone()
+    }
+
+    fn value(_resource: &Self) -> Self::Value {}
 }
 
 #[cfg(test)]
@@ -391,6 +535,14 @@ mod tests {
 
         fn name(resource: &Self) -> String {
             resource.name.clone()
+        }
+
+        fn meta(resource: &Self) -> ObjectMeta {
+            ObjectMeta {
+                name: Some(resource.name.clone()),
+                namespace: Some(resource.namespace.clone()),
+                ..Default::default()
+            }
         }
 
         fn value(resource: &Self) -> Self::Value {
@@ -826,5 +978,161 @@ mod tests {
             clone.is_ready(),
             "cloned handles observe the same readiness state"
         );
+    }
+
+    #[test]
+    fn test_resource_cache_preserves_object_meta() {
+        let cache = ResourceCache::<ReplicaSet>::new();
+        let mut replica_set = rs("chal-1-web-8f3xq", "team-1", "chal-1", "web", 2, 2);
+        replica_set.metadata.generation = Some(42);
+        replica_set.metadata.uid = Some("uid-12345".to_string());
+        replica_set.metadata.resource_version = Some("999".to_string());
+
+        cache.handle(&Event::Apply(replica_set));
+
+        let entries = cache.for_instance("team-1", "chal-1");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meta.generation, Some(42));
+        assert_eq!(entries[0].meta.uid.as_deref(), Some("uid-12345"));
+        assert_eq!(entries[0].meta.resource_version.as_deref(), Some("999"));
+        assert_eq!(
+            entries[0]
+                .meta
+                .labels
+                .as_ref()
+                .unwrap()
+                .get(INSTANCE_LABEL)
+                .map(|s| s.as_str()),
+            Some("chal-1")
+        );
+        assert_eq!(entries[0].name, "chal-1-web-8f3xq");
+    }
+
+    #[test]
+    fn test_handle_ignores_stale_generation() {
+        let cache = ResourceCache::<ReplicaSet>::new();
+        let mut rs_gen2 = rs("chal-1-web", "team-1", "chal-1", "web", 2, 2);
+        rs_gen2.metadata.generation = Some(2);
+        cache.handle(&Event::Apply(rs_gen2));
+
+        let mut rs_gen1 = rs("chal-1-web", "team-1", "chal-1", "web", 1, 1);
+        rs_gen1.metadata.generation = Some(1);
+        cache.handle(&Event::Apply(rs_gen1));
+
+        let entries = cache.for_instance("team-1", "chal-1");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meta.generation, Some(2));
+        assert_eq!(entries[0].value.replicas, 2);
+    }
+
+    #[test]
+    fn test_handle_ignores_stale_resource_version_same_generation() {
+        let cache = ResourceCache::<ReplicaSet>::new();
+        let mut rs_v2 = rs("chal-1-web", "team-1", "chal-1", "web", 2, 2);
+        rs_v2.metadata.generation = Some(1);
+        rs_v2.metadata.resource_version = Some("200".to_string());
+        cache.handle(&Event::Apply(rs_v2));
+
+        let mut rs_v1 = rs("chal-1-web", "team-1", "chal-1", "web", 2, 0);
+        rs_v1.metadata.generation = Some(1);
+        rs_v1.metadata.resource_version = Some("100".to_string());
+        cache.handle(&Event::Apply(rs_v1));
+
+        let entries = cache.for_instance("team-1", "chal-1");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meta.resource_version.as_deref(), Some("200"));
+        assert_eq!(entries[0].value.ready_replicas, Some(2));
+    }
+
+    #[test]
+    fn test_handle_accepts_newer_resource_version_same_generation() {
+        let cache = ResourceCache::<ReplicaSet>::new();
+        let mut rs_v1 = rs("chal-1-web", "team-1", "chal-1", "web", 2, 0);
+        rs_v1.metadata.generation = Some(1);
+        rs_v1.metadata.resource_version = Some("100".to_string());
+        cache.handle(&Event::Apply(rs_v1));
+
+        let mut rs_v2 = rs("chal-1-web", "team-1", "chal-1", "web", 2, 2);
+        rs_v2.metadata.generation = Some(1);
+        rs_v2.metadata.resource_version = Some("101".to_string());
+        cache.handle(&Event::Apply(rs_v2));
+
+        let entries = cache.for_instance("team-1", "chal-1");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meta.resource_version.as_deref(), Some("101"));
+        assert_eq!(entries[0].value.ready_replicas, Some(2));
+    }
+
+    #[test]
+    fn test_handle_delete_ignores_mismatched_uid() {
+        let cache = ResourceCache::<ReplicaSet>::new();
+        let mut rs_new = rs("chal-1-web", "team-1", "chal-1", "web", 2, 2);
+        rs_new.metadata.uid = Some("uid-new".to_string());
+        cache.handle(&Event::Apply(rs_new));
+
+        let mut rs_old = rs("chal-1-web", "team-1", "chal-1", "web", 2, 2);
+        rs_old.metadata.uid = Some("uid-old".to_string());
+        cache.handle(&Event::Delete(rs_old));
+
+        assert_eq!(
+            cache.len(),
+            1,
+            "mismatched UID delete must not remove the newer object"
+        );
+    }
+
+    #[test]
+    fn test_handle_delete_removes_matching_uid() {
+        let cache = ResourceCache::<ReplicaSet>::new();
+        let mut rs_obj = rs("chal-1-web", "team-1", "chal-1", "web", 2, 2);
+        rs_obj.metadata.uid = Some("uid-123".to_string());
+        cache.handle(&Event::Apply(rs_obj.clone()));
+        assert_eq!(cache.len(), 1);
+
+        cache.handle(&Event::Delete(rs_obj));
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_handle_apply_accepts_recreated_object_with_new_uid() {
+        let cache = ResourceCache::<ReplicaSet>::new();
+        let mut rs_old = rs("chal-1-web", "team-1", "chal-1", "web", 2, 2);
+        rs_old.metadata.uid = Some("uid-old".to_string());
+        rs_old.metadata.generation = Some(5);
+        rs_old.metadata.resource_version = Some("100".to_string());
+        cache.handle(&Event::Apply(rs_old));
+
+        // Recreated object starts at generation 1 with new UID and higher RV
+        let mut rs_new = rs("chal-1-web", "team-1", "chal-1", "web", 1, 1);
+        rs_new.metadata.uid = Some("uid-new".to_string());
+        rs_new.metadata.generation = Some(1);
+        rs_new.metadata.resource_version = Some("105".to_string());
+        cache.handle(&Event::Apply(rs_new));
+
+        let entries = cache.for_instance("team-1", "chal-1");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meta.uid.as_deref(), Some("uid-new"));
+        assert_eq!(entries[0].meta.generation, Some(1));
+    }
+
+    #[test]
+    fn test_handle_apply_ignores_stale_old_uid() {
+        let cache = ResourceCache::<ReplicaSet>::new();
+        let mut rs_new = rs("chal-1-web", "team-1", "chal-1", "web", 1, 1);
+        rs_new.metadata.uid = Some("uid-new".to_string());
+        rs_new.metadata.generation = Some(1);
+        rs_new.metadata.resource_version = Some("105".to_string());
+        cache.handle(&Event::Apply(rs_new));
+
+        // Stale event from older deleted incarnation arrives late
+        let mut rs_old = rs("chal-1-web", "team-1", "chal-1", "web", 2, 2);
+        rs_old.metadata.uid = Some("uid-old".to_string());
+        rs_old.metadata.generation = Some(5);
+        rs_old.metadata.resource_version = Some("100".to_string());
+        cache.handle(&Event::Apply(rs_old));
+
+        let entries = cache.for_instance("team-1", "chal-1");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meta.uid.as_deref(), Some("uid-new"));
     }
 }

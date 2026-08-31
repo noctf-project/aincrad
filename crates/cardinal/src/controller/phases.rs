@@ -41,10 +41,9 @@ pub enum Step<T> {
     Finish(Action),
 }
 
-/// Prepared state consumed by the apply and commit phases.
+/// Prepared state consumed by the apply phase.
 pub struct Prepared {
     pub template: reconcilers::template::ResolvedTemplate,
-    pub evaluation: reconcilers::status::Evaluation,
 }
 
 /// Drives the reconcile pipeline: lifecycle, prepare, apply, commit.
@@ -61,7 +60,8 @@ pub async fn run(instance: &CTFInstance, ctx: &Context) -> Result<Action, Error>
     };
 
     apply::reconcile(&flow, &prepared).await?;
-    reconcilers::status::commit(instance, &prepared.evaluation, ctx).await?;
+    let evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
+    reconcilers::status::commit(instance, &evaluation, ctx).await?;
 
     Ok(completed_action(&flow))
 }
@@ -140,18 +140,22 @@ pub mod prepare {
         // rather than silently ignoring them.
         crate::planners::validate_overrides(instance, &template)?;
 
-        // Evaluate every child condition without writing. Only when all are True,
-        // nothing has changed since the last apply, and the instance no longer
-        // requires an upgrade can we skip reconciling.
-        let evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
-        if evaluation.is_ready()
-            && is_observed(instance)
+        // Skip planning and applying if the instance is already synced with its
+        // observed spec generation and template version. Runtime child unreadiness
+        // (e.g. transient pod crashes) must not trigger re-application or roll
+        // template generations for non-synced instances.
+        if is_observed(instance)
             && !crate::utils::versions::requires_template_upgrade(&template.metadata, instance)
         {
-            info!(name, ns, "Instance ready, skipping reconciliation");
+            info!(name, ns, "Instance spec is synced, updating status and skipping plan/apply");
+            let evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
+            reconcilers::status::commit(instance, &evaluation, ctx).await?;
             return Ok(Step::Finish(completed_action(flow)));
         }
-        info!(name, ns, "Instance not ready, reconciling children");
+        info!(
+            name,
+            ns, "Instance spec out of sync, planning and applying children"
+        );
 
         // A non-numeric or non-positive minTemplateGeneration is rewritten to the
         // template's current generation, short-circuiting the reconcile.
@@ -198,10 +202,7 @@ pub mod prepare {
             return Ok(Step::Finish(Action::requeue(Duration::from_millis(100))));
         }
 
-        Ok(Step::Continue(Prepared {
-            template,
-            evaluation,
-        }))
+        Ok(Step::Continue(Prepared { template }))
     }
 }
 
@@ -209,29 +210,40 @@ pub mod prepare {
 pub mod apply {
     use super::*;
     use crate::planners::{
-        NetworkPolicyPlanner, Planner, ProxyRoutePlanner, ReplicaSetPlanner, ServicePlanner,
+        NetworkPolicyPlanner, ProxyRoutePlanner, ReplicaSetPlanner, ServicePlanner,
     };
-    use crate::reconcilers::helper::{apply_planner, apply_proxy_routes};
+    use crate::reconcilers::helper::apply_planner;
 
     pub async fn reconcile(flow: &Flow<'_>, prepared: &Prepared) -> Result<(), Error> {
         let instance = flow.instance;
         let template = &prepared.template;
+        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
-        apply_planner::<ReplicaSetPlanner>(flow.ctx.client.clone(), instance, template, flow.ctx)
-            .await?;
-        apply_planner::<NetworkPolicyPlanner>(
-            flow.ctx.client.clone(),
+        apply_planner::<ReplicaSetPlanner>(
+            Api::namespaced(flow.ctx.client.clone(), ns),
             instance,
             template,
             flow.ctx,
         )
         .await?;
-        apply_planner::<ServicePlanner>(flow.ctx.client.clone(), instance, template, flow.ctx)
-            .await?;
+        apply_planner::<NetworkPolicyPlanner>(
+            Api::namespaced(flow.ctx.client.clone(), ns),
+            instance,
+            template,
+            flow.ctx,
+        )
+        .await?;
+        apply_planner::<ServicePlanner>(
+            Api::namespaced(flow.ctx.client.clone(), ns),
+            instance,
+            template,
+            flow.ctx,
+        )
+        .await?;
 
         if flow.ctx.route_allocator.is_some() {
-            let routes = ProxyRoutePlanner::plan(instance, template, flow.ctx)?;
-            apply_proxy_routes(flow.ctx, instance, routes).await?;
+            let api = Api::namespaced(flow.ctx.client.clone(), &flow.ctx.system_namespace);
+            apply_planner::<ProxyRoutePlanner>(api, instance, template, flow.ctx).await?;
         }
 
         Ok(())

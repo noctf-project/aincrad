@@ -22,10 +22,8 @@ impl Planner for ServicePlanner {
 
     type Resource = Service;
 
-    fn cached_names(instance: &CTFInstance, ctx: &Context) -> Option<Vec<String>> {
-        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
-        let name = instance.metadata.name.as_deref().unwrap_or("unknown");
-        Some(ctx.caches.services.names(ns, name))
+    fn cache(ctx: &Context) -> Option<&crate::cache::ResourceCache<Self::Resource>> {
+        Some(&ctx.caches.services)
     }
 
     fn plan(

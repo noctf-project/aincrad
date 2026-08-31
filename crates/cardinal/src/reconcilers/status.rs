@@ -245,6 +245,23 @@ mod tests {
         };
         let (_store, ctx) = dummy_context_with_routes(vec![tcp_route]);
 
+        let mut rs = k8s_openapi::api::apps::v1::ReplicaSet::default();
+        rs.metadata.name = Some("chal-1-web".to_string());
+        rs.metadata.namespace = Some("default".to_string());
+        rs.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL => "default",
+            crate::utils::labels::INSTANCE_LABEL => "chal-1",
+            crate::utils::labels::RESOURCE_LABEL => "web",
+        });
+        rs.status = Some(k8s_openapi::api::apps::v1::ReplicaSetStatus {
+            ready_replicas: Some(1),
+            replicas: 1,
+            ..Default::default()
+        });
+        ctx.caches
+            .replica_sets
+            .handle(&kube::runtime::watcher::Event::Apply(rs));
+
         let mut synced = dummy_instance("chal-1", None);
         synced.spec.sync = true;
         synced.metadata.generation = Some(1);
