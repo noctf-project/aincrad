@@ -323,9 +323,7 @@ pub mod tests {
             },
             status: None,
         };
-        if let Some(cache) = &ctx.template_cache {
-            cache.update(&tmpl);
-        }
+        ctx.caches.templates.update(&tmpl);
 
         (template_store, Arc::new(ctx))
     }

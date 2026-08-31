@@ -67,9 +67,9 @@ pub async fn reconcile(instance: &CTFInstance, ctx: &Context) -> Result<Resolved
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
     let entry = ctx
-        .template_cache
-        .as_ref()
-        .and_then(|cache| cache.get(ns, template_name))
+        .caches
+        .templates
+        .get(ns, template_name)
         .ok_or_else(|| Error::TemplateNotFound(template_name.clone()))?;
 
     let pod_patchers = entry.pod_patchers.map_err(Error::TemplateBuildError)?;

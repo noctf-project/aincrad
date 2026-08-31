@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use globset::GlobSet;
 use k8s_common::{SpecPatcher, crd::CTFTemplate};
+use tokio::sync::watch;
 
+use crate::cache::ReadyCache;
 use crate::planners::replicaset::{POD_PATCH_BLACKLIST, ROUTE_POLICY_PATCH_BLACKLIST};
 
 pub type PodPatchersMap = Arc<HashMap<String, Option<SpecPatcher>>>;
@@ -25,6 +27,8 @@ pub struct CachedTemplateEntry {
 #[derive(Clone)]
 pub struct TemplateCache {
     index: Arc<Mutex<BTreeMap<TemplateKey, CachedTemplateEntry>>>,
+    ready: watch::Sender<bool>,
+    ready_rx: watch::Receiver<bool>,
 }
 
 impl Default for TemplateCache {
@@ -35,9 +39,22 @@ impl Default for TemplateCache {
 
 impl TemplateCache {
     pub fn new() -> Self {
+        let (ready, ready_rx) = watch::channel(false);
         Self {
             index: Arc::new(Mutex::new(BTreeMap::new())),
+            ready,
+            ready_rx,
         }
+    }
+
+    /// Marks the cache as having completed an initial sync.
+    pub fn mark_ready(&self) {
+        let _ = self.ready.send(true);
+    }
+
+    /// Marks the cache as beginning (or restarting) an initial sync.
+    pub fn mark_unready(&self) {
+        let _ = self.ready.send(false);
     }
 
     pub fn get(&self, namespace: &str, name: &str) -> Option<CachedTemplateEntry> {
@@ -103,6 +120,16 @@ impl TemplateCache {
     pub fn clear(&self) {
         let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
         lock.clear();
+    }
+}
+
+impl ReadyCache for TemplateCache {
+    fn is_ready(&self) -> bool {
+        *self.ready_rx.borrow()
+    }
+
+    fn watch(&self) -> watch::Receiver<bool> {
+        self.ready.subscribe()
     }
 }
 

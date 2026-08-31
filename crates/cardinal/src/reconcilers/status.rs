@@ -128,9 +128,9 @@ fn current_template_generation(instance: &CTFInstance, ctx: &Context) -> Option<
     let tmpl_name = &instance.spec.template;
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
-    ctx.template_cache
-        .as_ref()
-        .and_then(|cache| cache.get(ns, tmpl_name))
+    ctx.caches
+        .templates
+        .get(ns, tmpl_name)
         .and_then(|entry| entry.template.metadata.generation)
 }
 
@@ -293,9 +293,8 @@ mod tests {
         });
 
         let template_meta = ctx
-            .template_cache
-            .as_ref()
-            .unwrap()
+            .caches
+            .templates
             .get("default", "whoami-template")
             .unwrap()
             .template
@@ -319,12 +318,11 @@ mod tests {
             },
             status: None,
         };
-        ctx.template_cache.as_ref().unwrap().update(&bump_tmpl);
+        ctx.caches.templates.update(&bump_tmpl);
 
         let template_meta = ctx
-            .template_cache
-            .as_ref()
-            .unwrap()
+            .caches
+            .templates
             .get("default", "whoami-template")
             .unwrap()
             .template

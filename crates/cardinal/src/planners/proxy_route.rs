@@ -106,9 +106,9 @@ impl Planner for ProxyRoutePlanner {
         let instance_ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
         let entry = ctx
-            .template_cache
-            .as_ref()
-            .and_then(|cache| cache.get(instance_ns, &instance.spec.template));
+            .caches
+            .templates
+            .get(instance_ns, &instance.spec.template);
 
         let Some(entry) = entry else {
             return Ok((

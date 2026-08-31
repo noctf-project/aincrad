@@ -1,10 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use k8s_common::{
     RESOURCE_LABEL,
     crd::{CTFInstance, CTFProxyRoute, CTFTemplate},
 };
+use k8s_openapi::api::{apps::v1::ReplicaSet, core::v1::Service};
 use kube::{
     Api, Client,
     runtime::{
@@ -12,18 +13,21 @@ use kube::{
         controller::{Action, Controller},
         predicates,
         reflector::{ObjectRef, reflector, store},
-        watcher::{Config, Event, watcher},
+        watcher::{Config, Error as WatcherError, Event, watcher},
     },
 };
 use tracing::{error, info, instrument, warn};
 
 use crate::{
     Context, Error,
-    cache::{ResourceKey, TemplateCache},
+    cache::{Caches, ReadyGate, ResourceKey},
     reconcilers,
     routing::{PortsStore, RouteAllocator},
 };
-use crate::{cache::InstanceCache, cli::Opts};
+use crate::{
+    cli::Opts,
+    utils::labels::{INSTANCE_LABEL, NAMESPACE_LABEL},
+};
 
 /// Reconciles a single `CTFInstance` resource state.
 #[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
@@ -150,10 +154,34 @@ pub fn handle_template_watcher_event(
         }
         Event::Init => {
             cache.clear();
+            cache.mark_unready();
             info!("Cleared CTFTemplate cache on watcher init");
         }
-        Event::InitDone => {}
+        Event::InitDone => {
+            cache.mark_ready();
+            info!("CTFTemplate initial sync complete");
+        }
     }
+}
+
+/// Maps a `CTFProxyRoute` event to the `CTFInstance` it belongs to via labels.
+fn proxy_route_owner(route: &CTFProxyRoute) -> Vec<ObjectRef<CTFInstance>> {
+    let Some(instance) = route
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(INSTANCE_LABEL))
+    else {
+        return Vec::new();
+    };
+    let ns = route
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(NAMESPACE_LABEL))
+        .map(String::as_str)
+        .unwrap_or("default");
+    vec![ObjectRef::new(instance).within(ns)]
 }
 
 pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
@@ -216,77 +244,96 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
         }
     }
 
+    let caches = Caches::default();
+
+    // Gates instance processing until every auxiliary cache has completed its
+    // initial sync. The gate reads readiness off the caches, so reusing the
+    // same caches across future `run_controller`s just works.
+    let ready = ReadyGate::from_caches(&caches);
+    let proxy_route_cache = caches.proxy_routes.clone();
+
+    // Proxy route watcher feeds the cache; the same stream drives the
+    // controller trigger via `watches_stream`.
+    let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes);
+
     run_controller(
         client,
         Arc::new(allocator),
         system_namespace,
         cluster_domain,
         image_alias.into_iter().flatten().collect(),
+        caches,
+        proxy_route_stream,
+        ready,
     )
     .await
 }
 
 /// Spawns and runs the `CTFInstance` controller loop.
-pub async fn run_controller(
+pub async fn run_controller<S>(
     client: Client,
     route_allocator: Arc<crate::routing::RouteAllocator>,
     system_namespace: String,
     cluster_domain: String,
     image_alias: std::collections::BTreeMap<String, String>,
-) -> Result<(), Error> {
+    caches: Caches,
+    proxy_route_stream: S,
+    ready: ReadyGate,
+) -> Result<(), Error>
+where
+    S: Stream<Item = Result<CTFProxyRoute, WatcherError>> + Send + 'static,
+{
     let instances = Api::<CTFInstance>::all(client.clone());
     let templates = Api::<CTFTemplate>::all(client.clone());
-
-    let (_, template_writer) = store();
+    let services = Api::<Service>::all(client.clone());
+    let replica_sets = Api::<ReplicaSet>::all(client.clone());
 
     let context = Arc::new(Context {
         client: client.clone(),
-        template_cache: Some(TemplateCache::new()),
-        instance_cache: Some(InstanceCache::new()),
+        caches,
         route_allocator: Some(route_allocator),
         system_namespace,
         cluster_domain,
         image_aliases: image_alias,
     });
 
-    let template_cache = context.template_cache.clone().unwrap();
+    let template_cache = context.caches.templates.clone();
 
-    // Used to gate instance events on the initial CTFTemplate sync. A watch
-    // channel (rather than flag + Notify) because notify_waiters() loses the
-    // wakeup if it fires before a waiter registers: a watch stores the value.
-    let (template_ready_tx, template_ready_rx) = tokio::sync::watch::channel(false);
-    let template_ready_tx_task = template_ready_tx.clone();
-
-    // Template watch stream updates template cache before populating the template store
-    let template_watcher_stream = watcher(templates.clone(), Config::default())
+    // Template watcher updates the cache before the stream drives the
+    // controller `watches_stream` trigger. Readiness is tracked on the cache
+    // itself and consumed by the shared ReadyGate.
+    let template_watcher_stream = watcher(templates, Config::default())
         .default_backoff()
         .inspect(move |res| {
             if let Ok(event) = res {
                 handle_template_watcher_event(event, &template_cache);
-                if let Event::InitDone = event {
-                    info!("CTFTemplate initial sync complete");
-                    let _ = template_ready_tx_task.send(true);
-                }
             }
         });
 
-    let template_reflector = reflector(template_writer, template_watcher_stream);
-    let template_stream = template_reflector.touched_objects().predicate_filter(
+    let template_stream = template_watcher_stream.touched_objects().predicate_filter(
         predicates::generation.combine(predicates::annotations),
         Default::default(),
     );
 
+    let services_cache = context.caches.services.clone();
+    let service_stream = services_cache.watcher_stream(services);
+
+    let replica_sets_cache = context.caches.replica_sets.clone();
+    let replica_set_stream = replica_sets_cache.watcher_stream(replica_sets);
+
+    let proxy_route_stream = proxy_route_stream;
+
     // Initialize in-memory CTFInstance reflector store cache for watches mapping
     let (instance_store, instance_writer) = store();
 
-    let instance_cache = InstanceCache::new();
+    let instance_cache = context.caches.instances.clone();
     let instance_cache_task = instance_cache.clone();
 
     let client_init_done = client.clone();
     let system_ns_init_done = context.system_namespace.clone();
     let allocator_init_done = context.route_allocator.clone().unwrap();
 
-    let instance_template_rx = template_ready_rx.clone();
+    let ready_task = ready.clone();
 
     let (fatal_tx, mut fatal_rx) = tokio::sync::broadcast::channel::<String>(1);
 
@@ -298,16 +345,13 @@ pub async fn run_controller(
             let allocator = allocator_init_done.clone();
             let cache = instance_cache_task.clone();
             let fatal_tx = fatal_tx.clone();
-            let mut template_rx = instance_template_rx.clone();
+            let ready = ready_task.clone();
 
             async move {
-                // Race-free wait for the initial CTFTemplate sync: watch stores
-                // the latest value, so a send racing this check cannot be lost.
-                while !*template_rx.borrow() {
-                    if template_rx.changed().await.is_err() {
-                        break;
-                    }
-                }
+                // Hold instance events until every child cache (templates,
+                // services, replica sets, routes) has completed its initial
+                // sync, so reconcile never runs against a hollow cache.
+                ready.wait().await;
 
                 if let Ok(ref event) = res {
                     handle_instance_watcher_event(event, &cache);
@@ -349,6 +393,9 @@ pub async fn run_controller(
                     .map(|inst| ObjectRef::from_obj(&*inst))
                     .collect::<Vec<_>>()
             })
+            .watches_stream(proxy_route_stream, move |route| proxy_route_owner(&route))
+            .owns_stream(service_stream)
+            .owns_stream(replica_set_stream)
             .run(reconcile, error_policy, context)
             .for_each(|res| async {
                 match res {
@@ -373,7 +420,6 @@ mod tests {
         dummy_context, dummy_ctx, dummy_instance, dummy_kube_client, recording_kube_client,
     };
     use chrono::{Duration as ChronoDuration, Utc};
-    use futures::StreamExt;
     use k8s_common::PortRange;
     use k8s_common::crd::{
         CTFInstanceSpec, CTFInstanceStatus, RouteBackend, RouteSpec, RouteSpecTCP,
@@ -690,7 +736,7 @@ mod tests {
             },
             status: None,
         };
-        ctx.template_cache.as_ref().unwrap().update(&tmpl);
+        ctx.caches.templates.update(&tmpl);
 
         let mut instance = Arc::new(dummy_instance("chal-1", None));
         let inst = Arc::get_mut(&mut instance).unwrap();

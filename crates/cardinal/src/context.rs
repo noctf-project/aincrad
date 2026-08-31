@@ -3,15 +3,14 @@ use std::sync::Arc;
 
 use kube::Client;
 
-use crate::cache::{InstanceCache, TemplateCache};
+use crate::cache::Caches;
 use crate::routing::RouteAllocator;
 
 /// Contextual data shared across controller reconciliation passes.
 #[derive(Clone)]
 pub struct Context {
     pub client: Client,
-    pub template_cache: Option<TemplateCache>,
-    pub instance_cache: Option<InstanceCache>,
+    pub caches: Caches,
     pub route_allocator: Option<Arc<RouteAllocator>>,
     pub system_namespace: String,
     pub cluster_domain: String,
@@ -24,14 +23,13 @@ mod tests {
 
     use kube::Client;
 
-    use crate::{Context, cache::TemplateCache, routing::RouteAllocator};
+    use crate::{Context, cache::Caches, routing::RouteAllocator};
     impl Context {
         pub fn new_stub(client: Client) -> Self {
             let system_ns = client.default_namespace().to_string();
             Self {
                 client,
-                template_cache: None,
-                instance_cache: None,
+                caches: Caches::default(),
                 route_allocator: None,
                 system_namespace: system_ns,
                 cluster_domain: "cluster.local".to_string(),
@@ -46,11 +44,9 @@ mod tests {
             cluster_domain: impl Into<String>,
             image_aliases: BTreeMap<String, String>,
         ) -> Self {
-            let template_cache = TemplateCache::new();
             Self {
                 client,
-                template_cache: Some(template_cache),
-                instance_cache: None,
+                caches: Caches::default(),
                 route_allocator: Some(allocator),
                 system_namespace: system_namespace.into(),
                 cluster_domain: cluster_domain.into(),
