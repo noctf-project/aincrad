@@ -189,22 +189,42 @@ fn proxy_route_owner(route: &CTFProxyRoute) -> Vec<ObjectRef<CTFInstance>> {
 }
 
 /// Helper handling allocator synchronization on proxy route watcher events.
-fn handle_proxy_route_allocator_event(event: &Event<CTFProxyRoute>, allocator: &RouteAllocator) {
+fn handle_proxy_route_allocator_event(
+    event: &Event<CTFProxyRoute>,
+    allocator: &RouteAllocator,
+    managed_namespace: Option<&str>,
+) {
     match event {
         Event::Apply(route) | Event::InitApply(route) => {
             if let Some(key) = proxy_route_key(route)
                 && let Ok(ProxyRouteKey::Tcp(port)) = route.route_key()
             {
-                allocator.sync(&key, port);
+                if let Some(ns) = managed_namespace {
+                    if key.namespace == ns {
+                        allocator.sync(&key, port);
+                    }
+                } else {
+                    allocator.sync(&key, port);
+                }
             }
         }
         Event::Delete(route) => {
             if let Some(key) = proxy_route_key(route) {
-                allocator.release(&key);
+                if let Some(ns) = managed_namespace {
+                    if key.namespace == ns {
+                        allocator.release(&key);
+                    }
+                } else {
+                    allocator.release(&key);
+                }
             }
         }
         Event::Init => {
-            allocator.clear();
+            if let Some(ns) = managed_namespace {
+                allocator.release_namespace(ns);
+            } else {
+                allocator.clear();
+            }
         }
         Event::InitDone => {}
     }
@@ -251,7 +271,7 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
         let proxy_route_cache = context.caches.proxy_routes.clone();
         let allocator_stream = allocator.clone();
         let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes, move |event| {
-            handle_proxy_route_allocator_event(event, &allocator_stream);
+            handle_proxy_route_allocator_event(event, &allocator_stream, None);
         });
 
         run_controller(None, context, proxy_route_stream).await
@@ -270,8 +290,9 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
             let proxy_routes = Api::<CTFProxyRoute>::namespaced(client.clone(), &system_namespace);
             let proxy_route_cache = context.caches.proxy_routes.clone();
             let allocator_stream = allocator.clone();
+            let ns_clone = ns.clone();
             let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes, move |event| {
-                handle_proxy_route_allocator_event(event, &allocator_stream);
+                handle_proxy_route_allocator_event(event, &allocator_stream, Some(&ns_clone));
             });
 
             tasks.push(tokio::spawn(async move {

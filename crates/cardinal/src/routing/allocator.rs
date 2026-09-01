@@ -100,6 +100,40 @@ impl RouteAllocator {
         }
     }
 
+    /// Non-mutating lookup to get the endpoint of an already allocated or deterministic route.
+    pub fn get_endpoint(
+        &self,
+        key: &ResourceKey,
+        spec: &RouteSpec,
+    ) -> Option<CTFInstanceStatusEndpoint> {
+        match spec.target() {
+            Some(RouteTarget::Tcp(_)) => {
+                let port = self.ports.get_port(key)?;
+                Some(CTFInstanceStatusEndpoint {
+                    name: key.resource.clone(),
+                    type_: "tcp".to_string(),
+                    target: EndpointTarget {
+                        host: self.hostname_suffix.clone(),
+                        port,
+                    },
+                })
+            }
+            Some(RouteTarget::Tls(tls)) => {
+                let hostname = self.derive_hostname(key, tls.prefix.as_deref());
+                let fqdn = self.format_tls_host(&hostname);
+                Some(CTFInstanceStatusEndpoint {
+                    name: key.resource.clone(),
+                    type_: "tls".to_string(),
+                    target: EndpointTarget {
+                        host: fqdn,
+                        port: self.tls_port,
+                    },
+                })
+            }
+            None => None,
+        }
+    }
+
     /// Releases any port allocated for the given RouteKey.
     pub fn release(&self, key: &ResourceKey) -> Option<u16> {
         self.ports.release(key)
@@ -108,6 +142,11 @@ impl RouteAllocator {
     /// Releases all ports allocated to any route belonging to the given namespace and instance.
     pub fn release_instance(&self, namespace: &str, instance: &str) -> Vec<u16> {
         self.ports.release_instance(namespace, instance)
+    }
+
+    /// Releases all ports allocated to any route belonging to the given namespace.
+    pub fn release_namespace(&self, namespace: &str) -> Vec<u16> {
+        self.ports.release_namespace(namespace)
     }
 
     /// Releases the port only if it is currently mapped to this exact port for the given RouteKey.
@@ -299,5 +338,69 @@ mod tests {
         let sanitized = sanitize_prefix(&long_input);
         assert_eq!(sanitized.len(), MAX_PREFIX_LEN);
         assert_eq!(sanitized, "a".repeat(MAX_PREFIX_LEN));
+    }
+
+    #[test]
+    fn test_get_endpoint_non_mutating() {
+        let allocator = make_allocator();
+        let key_tcp = ResourceKey::new("default", "chal-1", "pwn");
+        let spec_tcp = RouteSpec {
+            backend: RouteBackend {
+                service: "pwn".into(),
+                port: 1337,
+            },
+            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            ..Default::default()
+        };
+
+        // Before allocate, get_endpoint returns None for unallocated TCP route
+        assert_eq!(allocator.get_endpoint(&key_tcp, &spec_tcp), None);
+        assert_eq!(allocator.ports().active_ports().len(), 0);
+
+        // Allocate the TCP route
+        let allocated = allocator.allocate(&key_tcp, &spec_tcp).unwrap();
+        let ep = allocator.get_endpoint(&key_tcp, &spec_tcp).unwrap();
+        assert_eq!(ep, allocated.endpoint);
+        assert_eq!(allocator.ports().active_ports().len(), 1);
+
+        // For TLS route, get_endpoint returns deterministic endpoint without PortsStore mutation
+        let key_tls = ResourceKey::new("default", "chal-1", "web");
+        let spec_tls = RouteSpec {
+            backend: RouteBackend {
+                service: "web".into(),
+                port: 80,
+            },
+            tls: Some(k8s_common::crd::RouteSpecTLS {
+                prefix: Some("whoami".into()),
+            }),
+            ..Default::default()
+        };
+        let tls_ep = allocator.get_endpoint(&key_tls, &spec_tls).unwrap();
+        assert_eq!(tls_ep.type_, "tls");
+        assert_eq!(allocator.ports().active_ports().len(), 1); // PortsStore unchanged
+    }
+
+    #[test]
+    fn test_allocator_release_namespace() {
+        let allocator = make_allocator();
+        let key1 = ResourceKey::new("team-1", "chal-1", "pwn");
+        let key2 = ResourceKey::new("team-2", "chal-1", "pwn");
+        let spec = RouteSpec {
+            backend: RouteBackend {
+                service: "pwn".into(),
+                port: 1337,
+            },
+            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            ..Default::default()
+        };
+
+        allocator.allocate(&key1, &spec).unwrap();
+        allocator.allocate(&key2, &spec).unwrap();
+        assert_eq!(allocator.ports().active_ports().len(), 2);
+
+        allocator.release_namespace("team-1");
+        assert_eq!(allocator.ports().active_ports().len(), 1);
+        assert_eq!(allocator.get_endpoint(&key1, &spec), None);
+        assert!(allocator.get_endpoint(&key2, &spec).is_some());
     }
 }

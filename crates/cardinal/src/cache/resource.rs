@@ -425,21 +425,23 @@ impl ResourceProjection for CTFProxyRoute {
             .labels
             .as_ref()
             .and_then(|l| l.get(NAMESPACE_LABEL))
-            .cloned()
-            .unwrap_or_default();
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("default");
         let instance = resource
             .meta()
             .labels
             .as_ref()
             .and_then(|l| l.get(INSTANCE_LABEL))
-            .cloned()
-            .unwrap_or_default();
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("unknown");
         let disambig = resource
             .meta()
             .labels
             .as_ref()
             .and_then(|l| l.get(RESOURCE_LABEL))
-            .cloned()
+            .map(|s| s.as_str())
             .unwrap_or_default();
         ResourceKey::new(ns, instance, disambig)
     }
@@ -840,12 +842,12 @@ mod tests {
     }
 
     #[test]
-    fn test_proxy_route_projection_defaults_labels_to_empty() {
+    fn test_proxy_route_projection_defaults_labels() {
         let route = proxy_route("p30001", "sys", "", "", "");
         assert_eq!(
             CTFProxyRoute::key(&route),
-            ResourceKey::new("", "", ""),
-            "unlabeled proxy routes fall back to empty key dimensions"
+            ResourceKey::new("default", "unknown", ""),
+            "unlabeled proxy routes fall back to default namespace and unknown instance"
         );
     }
 

@@ -114,6 +114,24 @@ impl Inner {
         released
     }
 
+    fn release_namespace(&mut self, namespace: &str) -> Vec<u16> {
+        let keys_to_remove: Vec<ResourceKey> = self
+            .mappings
+            .keys()
+            .filter(|k| k.namespace == namespace)
+            .cloned()
+            .collect();
+
+        let mut released = Vec::new();
+        for key in keys_to_remove {
+            if let Some(port) = self.mappings.remove(&key) {
+                self.bindings[port as usize] = None;
+                released.push(port);
+            }
+        }
+        released
+    }
+
     fn sync(&mut self, key: &ResourceKey, port: u16) {
         if port == 0 {
             self.release(key);
@@ -202,6 +220,16 @@ impl PortsStore {
         let released = inner.release_instance(namespace, instance);
         for &port in &released {
             info!("instance {namespace}/{instance} released port {port}");
+        }
+        released
+    }
+
+    /// Releases all ports allocated to any route belonging to the given namespace.
+    pub fn release_namespace(&self, namespace: &str) -> Vec<u16> {
+        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        let released = inner.release_namespace(namespace);
+        for &port in &released {
+            info!("namespace {namespace} released port {port}");
         }
         released
     }
@@ -478,5 +506,30 @@ mod tests {
                 .any(|(k, p)| k.resource == "web" && *p == 20001)
         );
         assert!(routes.iter().any(|(k, _)| k.resource == "pwn"));
+    }
+
+    #[test]
+    fn test_release_namespace() {
+        let store = make_store();
+        let k_ns1_a = ResourceKey::new("team-1", "chal-1", "web");
+        let k_ns1_b = ResourceKey::new("team-1", "chal-2", "pwn");
+        let k_ns2 = ResourceKey::new("team-2", "chal-1", "web");
+
+        let p1 = store.allocate(&k_ns1_a, 20001).unwrap();
+        let p2 = store.allocate(&k_ns1_b, 0).unwrap();
+        let p3 = store.allocate(&k_ns2, 20002).unwrap();
+
+        assert_eq!(store.active_ports().len(), 3);
+
+        // Releasing team-1 should release k_ns1_a and k_ns1_b, but preserve team-2's k_ns2
+        let released = store.release_namespace("team-1");
+        assert_eq!(released.len(), 2);
+        assert!(released.contains(&p1));
+        assert!(released.contains(&p2));
+
+        assert_eq!(store.get_port(&k_ns1_a), None);
+        assert_eq!(store.get_port(&k_ns1_b), None);
+        assert_eq!(store.get_port(&k_ns2), Some(p3));
+        assert_eq!(store.active_ports(), vec![p3]);
     }
 }

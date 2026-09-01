@@ -317,6 +317,9 @@ mod tests {
             ..Default::default()
         });
 
+        let resolved = crate::reconcilers::template::reconcile(&synced, &ctx).await.unwrap();
+        let _ = ProxyRoutePlanner::plan(&synced, &resolved, &ctx).unwrap();
+
         let evaluation = evaluate_status(&synced, &ctx).unwrap();
         assert!(
             evaluation.is_ready(),

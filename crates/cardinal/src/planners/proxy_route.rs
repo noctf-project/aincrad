@@ -144,13 +144,8 @@ impl Planner for ProxyRoutePlanner {
             let route_key = ResourceKey::new(instance_ns, instance_name, &route_tmpl.name);
 
             if let Some(allocator) = allocator {
-                // TLS hostnames are derived deterministically from the route key,
-                // so a planned route is considered successful once applied.
-                if let Some(_target) = merged_spec.target() {
-                    match allocator.allocate(&route_key, &merged_spec) {
-                        Ok(alloc) => endpoints.push(alloc.endpoint),
-                        Err(_) => unallocated.push(route_tmpl.name.clone()),
-                    }
+                if let Some(endpoint) = allocator.get_endpoint(&route_key, &merged_spec) {
+                    endpoints.push(endpoint);
                 } else {
                     unallocated.push(route_tmpl.name.clone());
                 }
@@ -591,5 +586,37 @@ mod tests {
         );
         assert_eq!(cond.status, "True");
         assert_eq!(cond.reason, "RoutesAllocated");
+    }
+
+    #[tokio::test]
+    async fn test_check_status_does_not_allocate_tcp_ports() {
+        let tcp_route = RouteSpec {
+            name: "pwn".to_string(),
+            backend: RouteBackend {
+                service: "pwn".into(),
+                port: 1337,
+            },
+            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            ..Default::default()
+        };
+        let (_store, ctx) = dummy_context_with_routes(vec![tcp_route]);
+
+        assert_eq!(
+            ctx.route_allocator.as_ref().unwrap().ports().active_ports().len(),
+            0
+        );
+
+        // check_status must NOT allocate a port in PortsStore
+        let (cond, payload) =
+            ProxyRoutePlanner::check_status(&dummy_instance("chal-1", None), &ctx).unwrap();
+
+        assert_eq!(cond.status, "False");
+        assert_eq!(cond.reason, "RoutesNotAllocated");
+        assert_eq!(
+            ctx.route_allocator.as_ref().unwrap().ports().active_ports().len(),
+            0,
+            "check_status must not mutate PortsStore"
+        );
+        assert!(payload.unwrap().endpoints.unwrap().is_empty());
     }
 }
