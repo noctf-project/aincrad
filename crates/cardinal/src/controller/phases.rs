@@ -274,3 +274,43 @@ async fn patch_min_template_annotation(flow: &Flow<'_>, target_gen: i64) -> Resu
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::tests::{dummy_context, dummy_instance};
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    #[tokio::test]
+    async fn test_completed_action_without_expiry() {
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let flow = Flow::new(&instance, &ctx);
+        assert_eq!(completed_action(&flow), Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_completed_action_with_future_expiry() {
+        let (_store, ctx) = dummy_context();
+        let mut instance = dummy_instance("chal-1", None);
+        let future_time = Utc::now() + ChronoDuration::seconds(60);
+        instance.metadata.annotations = Some(crate::btreemap! {
+            crate::utils::labels::EXPIRES_AT_ANNOTATION.to_string() => future_time.to_rfc3339(),
+        });
+        let flow = Flow::new(&instance, &ctx);
+        let action = completed_action(&flow);
+        assert!(format!("{action:?}").contains("requeue"));
+    }
+
+    #[tokio::test]
+    async fn test_completed_action_with_past_expiry() {
+        let (_store, ctx) = dummy_context();
+        let mut instance = dummy_instance("chal-1", None);
+        let past_time = Utc::now() - ChronoDuration::seconds(60);
+        instance.metadata.annotations = Some(crate::btreemap! {
+            crate::utils::labels::EXPIRES_AT_ANNOTATION.to_string() => past_time.to_rfc3339(),
+        });
+        let flow = Flow::new(&instance, &ctx);
+        assert_eq!(completed_action(&flow), Action::await_change());
+    }
+}

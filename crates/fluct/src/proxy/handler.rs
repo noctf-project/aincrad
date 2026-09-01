@@ -269,4 +269,63 @@ mod tests {
 
         assert!(handle.await.unwrap().is_ok());
     }
+
+    #[tokio::test]
+    async fn test_handler_request_uid_and_backend_stream() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = listener.local_addr().unwrap();
+
+        let ctx = create_test_service_context();
+        let spec = CTFProxyRouteSpec {
+            policy: RoutePolicySpec {
+                request_uid: true,
+                flag: Some("FLAG_SECRET".into()),
+                ..Default::default()
+            },
+            backend: backend_addr.to_string(),
+        };
+        let challenge = Arc::new(CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("p20001".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec,
+        });
+        let client_ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
+        let mut handler = Handler::new(ctx, challenge, client_ip);
+
+        // Spawn mock backend server
+        let backend_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(&mut socket);
+            let mut received_flag = String::new();
+            reader.read_line(&mut received_flag).await.unwrap();
+            socket.write_all(b"hello from backend\n").await.unwrap();
+            received_flag
+        });
+
+        let (client_rx, mut client_tx) = tokio::io::duplex(1024);
+        let (server_rx, server_tx) = tokio::io::duplex(1024);
+
+        let handle = tokio::spawn(async move { handler.handle(client_rx, server_tx).await });
+
+        let mut reader = BufReader::new(server_rx);
+        let mut prompt = String::new();
+        reader.read_line(&mut prompt).await.unwrap();
+        assert_eq!(prompt, "== input: competitor id (max 64 chars) ==\n");
+
+        // Send competitor UID
+        client_tx.write_all(b"team-42\n").await.unwrap();
+
+        // Read backend response forwarded to client
+        let mut backend_msg = String::new();
+        reader.read_line(&mut backend_msg).await.unwrap();
+        assert_eq!(backend_msg, "hello from backend\n");
+
+        drop(client_tx);
+        let flag = backend_task.await.unwrap();
+        assert!(flag.starts_with("CTF{"));
+        assert!(handle.await.unwrap().is_ok());
+    }
 }

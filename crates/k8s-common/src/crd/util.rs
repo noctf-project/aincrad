@@ -119,3 +119,41 @@ impl<T: JsonSchema> JsonSchema for PatchValue<T> {
         schema
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct OverrideSpec {
+        #[serde(default)]
+        port: PatchValue<u16>,
+    }
+
+    #[test]
+    fn test_patch_value_deserialization() {
+        let unset: OverrideSpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(unset.port, PatchValue::Unset);
+
+        let explicit_val: OverrideSpec = serde_json::from_str(r#"{"port": 8080}"#).unwrap();
+        assert_eq!(explicit_val.port, PatchValue::Value(8080));
+
+        let explicit_null: OverrideSpec = serde_json::from_str(r#"{"port": null}"#).unwrap();
+        assert_eq!(explicit_null.port, PatchValue::Null);
+    }
+
+    #[test]
+    fn test_patch_value_serialization() {
+        let val = OverrideSpec {
+            port: PatchValue::Value(8080),
+        };
+        let json = serde_json::to_string(&val).unwrap();
+        assert_eq!(json, r#"{"port":8080}"#);
+
+        let null_val = OverrideSpec {
+            port: PatchValue::Null,
+        };
+        let json_null = serde_json::to_string(&null_val).unwrap();
+        assert_eq!(json_null, r#"{"port":null}"#);
+    }
+}

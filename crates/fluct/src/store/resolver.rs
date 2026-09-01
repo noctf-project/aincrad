@@ -137,3 +137,91 @@ impl Resolver {
         Ok(SocketAddr::new(selected, port))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_host_strict_valid() {
+        assert_eq!(
+            normalize_host_strict("example.com").unwrap().as_ref(),
+            "example.com"
+        );
+        assert_eq!(
+            normalize_host_strict("EXAMPLE.COM.").unwrap().as_ref(),
+            "example.com"
+        );
+        assert_eq!(
+            normalize_host_strict("sub.domain.local").unwrap().as_ref(),
+            "sub.domain.local"
+        );
+    }
+
+    #[test]
+    fn test_normalize_host_strict_invalid() {
+        assert_eq!(
+            normalize_host_strict("").unwrap_err(),
+            ResolverError::InvalidHostname
+        );
+        assert_eq!(
+            normalize_host_strict(".example.com").unwrap_err(),
+            ResolverError::InvalidHostname
+        );
+        assert_eq!(
+            normalize_host_strict("example..com").unwrap_err(),
+            ResolverError::InvalidHostname
+        );
+        assert_eq!(
+            normalize_host_strict("host:80").unwrap_err(),
+            ResolverError::InvalidHostname
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_direct_socket_addr() {
+        let resolver = Resolver::new(100, ResolverExpiryPolicy::default());
+
+        let addr = resolver.resolve("127.0.0.1:8080").await.unwrap();
+        assert_eq!(addr, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
+
+        let addr_v6 = resolver.resolve("[::1]:9090").await.unwrap();
+        assert_eq!(addr_v6, "[::1]:9090".parse::<SocketAddr>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_invalid_inputs() {
+        let resolver = Resolver::new(100, ResolverExpiryPolicy::default());
+
+        assert_eq!(
+            resolver.resolve("").await.unwrap_err(),
+            ResolverError::EmptyInput
+        );
+        assert_eq!(
+            resolver.resolve("   ").await.unwrap_err(),
+            ResolverError::EmptyInput
+        );
+        assert_eq!(
+            resolver.resolve("localhost").await.unwrap_err(),
+            ResolverError::InvalidPort
+        );
+        assert_eq!(
+            resolver.resolve("localhost:999999").await.unwrap_err(),
+            ResolverError::InvalidPort
+        );
+        assert_eq!(
+            resolver.resolve("localhost:abc").await.unwrap_err(),
+            ResolverError::InvalidPort
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_localhost() {
+        let resolver = Resolver::new(100, ResolverExpiryPolicy::default());
+        let res = resolver.resolve("localhost:8080").await;
+        assert!(res.is_ok());
+        let addr = res.unwrap();
+        assert_eq!(addr.port(), 8080);
+        assert!(addr.ip().is_loopback());
+    }
+}

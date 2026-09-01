@@ -85,10 +85,66 @@ impl Challenge {
 
 #[cfg(test)]
 mod tests {
-    use crate::proxy::challenge::ChallengeSolveState;
+    use super::*;
+    use tokio::io::AsyncBufReadExt;
 
     #[test]
     fn test_challenge_solve_state_ordering() {
         assert!(ChallengeSolveState::Bypassed > ChallengeSolveState::Solved);
+    }
+
+    #[tokio::test]
+    async fn test_challenge_admin_bypass_success() {
+        let (mut client_rx, mut client_tx) = tokio::io::duplex(1024);
+        let (server_rx, mut server_tx) = tokio::io::duplex(1024);
+
+        let secret = b"supersecret";
+
+        let solve_task = tokio::spawn(async move {
+            let mut rx = server_rx;
+            Challenge::solve(100, secret, &mut rx, &mut client_tx).await
+        });
+
+        let mut reader = tokio::io::BufReader::new(&mut client_rx);
+        let mut banner = String::new();
+        reader.read_line(&mut banner).await.unwrap();
+        let mut chall_str = String::new();
+        reader.read_line(&mut chall_str).await.unwrap();
+        let chall_trimmed = chall_str.trim();
+
+        let token = hmac_sha256(secret, chall_trimmed.as_bytes());
+        let token_b64 = BASE64_URL_SAFE.encode(token);
+
+        server_tx
+            .write_all(format!("{token_b64}\n").as_bytes())
+            .await
+            .unwrap();
+
+        let state = solve_task.await.unwrap();
+        assert_eq!(state, Some(ChallengeSolveState::Bypassed));
+    }
+
+    #[tokio::test]
+    async fn test_challenge_admin_bypass_wrong_token() {
+        let (mut client_rx, mut client_tx) = tokio::io::duplex(1024);
+        let (server_rx, mut server_tx) = tokio::io::duplex(1024);
+
+        let secret = b"supersecret";
+
+        let solve_task = tokio::spawn(async move {
+            let mut rx = server_rx;
+            Challenge::solve(100, secret, &mut rx, &mut client_tx).await
+        });
+
+        let mut reader = tokio::io::BufReader::new(&mut client_rx);
+        let mut banner = String::new();
+        reader.read_line(&mut banner).await.unwrap();
+        let mut chall_str = String::new();
+        reader.read_line(&mut chall_str).await.unwrap();
+
+        server_tx.write_all(b"wrong_token\n").await.unwrap();
+
+        let state = solve_task.await.unwrap();
+        assert_eq!(state, None);
     }
 }

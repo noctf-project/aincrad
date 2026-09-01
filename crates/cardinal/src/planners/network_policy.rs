@@ -172,3 +172,155 @@ fn plan_external_spec(instance_name: &str, allowed_pods: &[&str]) -> NetworkPoli
         ingress: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::tests::{dummy_context, dummy_instance, dummy_resolved_template};
+    use k8s_common::crd::CTFTemplateSpecPod;
+    use k8s_openapi::api::core::v1::{Container, PodSpec};
+
+    #[tokio::test]
+    async fn test_plan_network_policy_default_isolated() {
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let template = dummy_resolved_template(1); // default pod has allow_internet: false
+
+        let policies = NetworkPolicyPlanner::plan(&instance, &template, &ctx).unwrap();
+        assert_eq!(policies.len(), 2);
+
+        let int_policy = &policies[0];
+        assert_eq!(int_policy.metadata.name.as_deref(), Some("chal-1-int"));
+        let int_spec = int_policy.spec.as_ref().unwrap();
+        assert_eq!(
+            int_spec.policy_types,
+            Some(vec!["Ingress".to_string(), "Egress".to_string()])
+        );
+        assert_eq!(int_spec.ingress.as_ref().unwrap().len(), 1);
+        assert_eq!(int_spec.egress.as_ref().unwrap().len(), 2);
+
+        let ext_policy = &policies[1];
+        assert_eq!(ext_policy.metadata.name.as_deref(), Some("chal-1-ext"));
+        let ext_spec = ext_policy.spec.as_ref().unwrap();
+        assert_eq!(ext_spec.policy_types, Some(vec!["Egress".to_string()]));
+        assert!(
+            ext_spec.egress.is_none(),
+            "isolated challenge must have no egress rules in ext policy"
+        );
+        assert!(
+            ext_spec
+                .pod_selector
+                .as_ref()
+                .unwrap()
+                .match_expressions
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plan_network_policy_with_internet_allowed() {
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let mut template = dummy_resolved_template(1);
+
+        template.spec.pods = vec![
+            CTFTemplateSpecPod {
+                name: "web".to_string(),
+                allow_internet: true,
+                replicas: 1,
+                patch_spec: None,
+                spec: PodSpec {
+                    containers: vec![Container {
+                        name: "app".to_string(),
+                        image: Some("nginx".to_string()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            },
+            CTFTemplateSpecPod {
+                name: "db".to_string(),
+                allow_internet: false,
+                replicas: 1,
+                patch_spec: None,
+                spec: PodSpec {
+                    containers: vec![Container {
+                        name: "db".to_string(),
+                        image: Some("redis".to_string()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            },
+        ];
+
+        let policies = NetworkPolicyPlanner::plan(&instance, &template, &ctx).unwrap();
+        assert_eq!(policies.len(), 2);
+
+        let ext_policy = &policies[1];
+        let ext_spec = ext_policy.spec.as_ref().unwrap();
+        assert!(ext_spec.egress.is_some());
+        let egress_rules = ext_spec.egress.as_ref().unwrap();
+        assert_eq!(egress_rules.len(), 1);
+
+        let ip_block = egress_rules[0].to.as_ref().unwrap()[0]
+            .ip_block
+            .as_ref()
+            .unwrap();
+        assert_eq!(ip_block.cidr, "0.0.0.0/0");
+        assert_eq!(
+            ip_block.except.as_ref().unwrap(),
+            &["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+        );
+
+        let match_exprs = ext_spec
+            .pod_selector
+            .as_ref()
+            .unwrap()
+            .match_expressions
+            .as_ref()
+            .unwrap();
+        assert_eq!(match_exprs.len(), 1);
+        assert_eq!(match_exprs[0].key, RESOURCE_LABEL);
+        assert_eq!(match_exprs[0].values, Some(vec!["web".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn test_plan_network_policy_multi_pod_internet_allowed() {
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let mut template = dummy_resolved_template(1);
+
+        template.spec.pods = vec![
+            CTFTemplateSpecPod {
+                name: "web".to_string(),
+                allow_internet: true,
+                replicas: 1,
+                patch_spec: None,
+                spec: PodSpec::default(),
+            },
+            CTFTemplateSpecPod {
+                name: "api".to_string(),
+                allow_internet: true,
+                replicas: 1,
+                patch_spec: None,
+                spec: PodSpec::default(),
+            },
+        ];
+
+        let policies = NetworkPolicyPlanner::plan(&instance, &template, &ctx).unwrap();
+        let ext_spec = policies[1].spec.as_ref().unwrap();
+        let match_exprs = ext_spec
+            .pod_selector
+            .as_ref()
+            .unwrap()
+            .match_expressions
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(
+            match_exprs[0].values,
+            Some(vec!["web".to_string(), "api".to_string()])
+        );
+    }
+}
