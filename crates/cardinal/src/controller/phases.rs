@@ -229,13 +229,6 @@ pub mod apply {
             flow.ctx,
         )
         .await?;
-        apply_planner::<NetworkPolicyPlanner>(
-            Api::namespaced(flow.ctx.client.clone(), ns),
-            instance,
-            template,
-            flow.ctx,
-        )
-        .await?;
         apply_planner::<ServicePlanner>(
             Api::namespaced(flow.ctx.client.clone(), ns),
             instance,
@@ -243,8 +236,15 @@ pub mod apply {
             flow.ctx,
         )
         .await?;
+        apply_planner::<NetworkPolicyPlanner>(
+            Api::namespaced(flow.ctx.client.clone(), ns),
+            instance,
+            template,
+            flow.ctx,
+        )
+        .await?;
 
-        if flow.ctx.route_allocator.is_some() {
+        if flow.ctx.port_map.is_some() {
             let api = Api::namespaced(flow.ctx.client.clone(), &flow.ctx.system_namespace);
             apply_planner::<ProxyRoutePlanner>(api, instance, template, flow.ctx).await?;
         }

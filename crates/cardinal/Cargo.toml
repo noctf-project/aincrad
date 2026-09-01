@@ -28,7 +28,6 @@ base32 = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
-siphasher = { workspace = true }
 tokio-rustls = { workspace = true }
 
 [dev-dependencies]

@@ -174,18 +174,20 @@ pub mod tests {
         kube::runtime::reflector::Store<CTFTemplate>,
         Arc<crate::Context>,
     ) {
-        use crate::routing::{PortsStore, RouteAllocator};
+        use crate::routing::PortMap;
         use k8s_common::PortRange;
 
         let (template_store, _) = kube::runtime::reflector::store();
-        let ports = Arc::new(PortsStore::new(
+        let port_map = Arc::new(PortMap::new(
             PortRange(20000..=20010),
             PortRange(30000..=30010),
         ));
-        let allocator = Arc::new(RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433));
-        let ctx = crate::Context::new_stub_with_allocator(
+        let ctx = crate::Context::new_stub_with_port_map(
             client,
-            allocator,
+            port_map,
+            "seed",
+            "c.noctf.dev",
+            4433,
             "aincrad-system",
             "cluster.local",
             std::collections::BTreeMap::new(),
@@ -326,11 +328,12 @@ pub mod tests {
                 .body(axum::body::Body::from(body_str))
                 .unwrap())
         } else {
-            if clean_path.ends_with("/replicasets")
-                || clean_path.ends_with("/services")
-                || clean_path.ends_with("/networkpolicies")
-                || clean_path.ends_with("/ctfinstances")
-                || clean_path.ends_with("/ctfproxyroutes")
+            if method == axum::http::Method::DELETE
+                && (clean_path.ends_with("/replicasets")
+                    || clean_path.ends_with("/services")
+                    || clean_path.ends_with("/networkpolicies")
+                    || clean_path.ends_with("/ctfinstances")
+                    || clean_path.ends_with("/ctfproxyroutes"))
             {
                 let list = serde_json::json!({
                     "apiVersion": "v1",

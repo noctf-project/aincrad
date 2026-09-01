@@ -21,11 +21,9 @@ use tracing::{error, info, instrument, warn};
 use crate::{
     Context, Error,
     cache::{Caches, ReadyGate, ResourceKey},
-    reconcilers,
-    routing::{PortsStore, RouteAllocator},
-};
-use crate::{
     cli::Opts,
+    reconcilers,
+    routing::PortMap,
     utils::labels::{INSTANCE_LABEL, NAMESPACE_LABEL},
 };
 
@@ -188,10 +186,10 @@ fn proxy_route_owner(route: &CTFProxyRoute) -> Vec<ObjectRef<CTFInstance>> {
     vec![ObjectRef::new(instance).within(ns)]
 }
 
-/// Helper handling allocator synchronization on proxy route watcher events.
-fn handle_proxy_route_allocator_event(
+/// Helper handling port map synchronization on proxy route watcher events.
+fn handle_proxy_route_port_map_event(
     event: &Event<CTFProxyRoute>,
-    allocator: &RouteAllocator,
+    port_map: &PortMap,
     managed_namespace: Option<&str>,
 ) {
     match event {
@@ -201,30 +199,20 @@ fn handle_proxy_route_allocator_event(
             {
                 if let Some(ns) = managed_namespace {
                     if key.namespace == ns {
-                        allocator.sync(&key, port);
+                        port_map.bind(port, key);
                     }
                 } else {
-                    allocator.sync(&key, port);
+                    port_map.bind(port, key);
                 }
             }
         }
         Event::Delete(route) => {
-            if let Some(key) = proxy_route_key(route) {
-                if let Some(ns) = managed_namespace {
-                    if key.namespace == ns {
-                        allocator.release(&key);
-                    }
-                } else {
-                    allocator.release(&key);
-                }
+            if let Ok(ProxyRouteKey::Tcp(port)) = route.route_key() {
+                port_map.unbind(port);
             }
         }
         Event::Init => {
-            if let Some(ns) = managed_namespace {
-                allocator.release_namespace(ns);
-            } else {
-                allocator.clear();
-            }
+            port_map.clear();
         }
         Event::InitDone => {}
     }
@@ -245,12 +233,7 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
     let system_namespace =
         system_namespace.unwrap_or_else(|| client.default_namespace().to_string());
 
-    let allocator = Arc::new(RouteAllocator::new(
-        Arc::new(PortsStore::new(reserved_ports, auto_ports)),
-        route_seed,
-        hostname_suffix,
-        tls_port,
-    ));
+    let port_map = Arc::new(PortMap::new(reserved_ports, auto_ports));
 
     let image_alias_map = image_alias
         .into_iter()
@@ -261,7 +244,10 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
         let context = Arc::new(Context {
             client: client.clone(),
             caches: Caches::default(),
-            route_allocator: Some(allocator.clone()),
+            port_map: Some(port_map.clone()),
+            route_seed,
+            hostname_suffix,
+            tls_port,
             system_namespace: system_namespace.clone(),
             cluster_domain,
             image_aliases: image_alias_map,
@@ -269,9 +255,9 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
 
         let proxy_routes = Api::<CTFProxyRoute>::namespaced(client, &system_namespace);
         let proxy_route_cache = context.caches.proxy_routes.clone();
-        let allocator_stream = allocator.clone();
+        let port_map_stream = port_map.clone();
         let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes, move |event| {
-            handle_proxy_route_allocator_event(event, &allocator_stream, None);
+            handle_proxy_route_port_map_event(event, &port_map_stream, None);
         });
 
         run_controller(None, context, proxy_route_stream).await
@@ -281,7 +267,10 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
             let context = Arc::new(Context {
                 client: client.clone(),
                 caches: Caches::default(),
-                route_allocator: Some(allocator.clone()),
+                port_map: Some(port_map.clone()),
+                route_seed: route_seed.clone(),
+                hostname_suffix: hostname_suffix.clone(),
+                tls_port,
                 system_namespace: system_namespace.clone(),
                 cluster_domain: cluster_domain.clone(),
                 image_aliases: image_alias_map.clone(),
@@ -289,10 +278,10 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
 
             let proxy_routes = Api::<CTFProxyRoute>::namespaced(client.clone(), &system_namespace);
             let proxy_route_cache = context.caches.proxy_routes.clone();
-            let allocator_stream = allocator.clone();
+            let port_map_stream = port_map.clone();
             let ns_clone = ns.clone();
             let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes, move |event| {
-                handle_proxy_route_allocator_event(event, &allocator_stream, Some(&ns_clone));
+                handle_proxy_route_port_map_event(event, &port_map_stream, Some(&ns_clone));
             });
 
             tasks.push(tokio::spawn(async move {
@@ -946,15 +935,15 @@ mod tests {
         let gate = ReadyGate::from_caches(&ctx.caches);
         assert!(gate.is_ready(), "gate must be ready initially");
 
-        // Route allocator receives Event::Init (e.g. reconnection / re-list)
-        let allocator = ctx.route_allocator.as_ref().unwrap();
-        handle_proxy_route_allocator_event(&Event::Init, allocator, None);
+        // Port map receives Event::Init (e.g. reconnection / re-list)
+        let port_map = ctx.port_map.as_ref().unwrap();
+        handle_proxy_route_port_map_event(&Event::Init, port_map, None);
         // ProxyRoute watcher stream marks proxy_routes unready on Event::Init
         ctx.caches.proxy_routes.mark_unready();
 
         assert!(
             !gate.is_ready(),
-            "gate must not be ready while route allocator is re-allocating"
+            "gate must not be ready while port map is re-syncing"
         );
 
         // Spawn a task that waits on the gate (simulating instance reconcile stream)
@@ -969,7 +958,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             unlocked_rx.try_recv().is_err(),
-            "instance processing must be locked while route allocator is re-allocating"
+            "instance processing must be locked while port map is re-syncing"
         );
 
         // Re-stream routes during InitApply
@@ -989,11 +978,11 @@ mod tests {
                 policy: Default::default(),
             },
         };
-        handle_proxy_route_allocator_event(&Event::InitApply(route.clone()), allocator, None);
+        handle_proxy_route_port_map_event(&Event::InitApply(route.clone()), port_map, None);
         ctx.caches.proxy_routes.handle(&Event::InitApply(route));
 
         // Re-allocation finishes: Event::InitDone arrives
-        handle_proxy_route_allocator_event(&Event::InitDone, allocator, None);
+        handle_proxy_route_port_map_event(&Event::InitDone, port_map, None);
         ctx.caches.proxy_routes.mark_ready();
 
         // Verify gate is ready and waiter task unlocks

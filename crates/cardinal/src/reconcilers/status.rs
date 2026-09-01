@@ -305,6 +305,16 @@ mod tests {
             .replica_sets
             .handle(&kube::runtime::watcher::Event::Apply(rs));
 
+        let mut pr = k8s_common::crd::CTFProxyRoute::new("p30005", Default::default());
+        pr.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL => "default",
+            crate::utils::labels::INSTANCE_LABEL => "chal-1",
+            crate::utils::labels::RESOURCE_LABEL => "chal",
+        });
+        ctx.caches
+            .proxy_routes
+            .handle(&kube::runtime::watcher::Event::Apply(pr));
+
         let mut synced = dummy_instance("chal-1", None);
         synced.spec.sync = true;
         synced.metadata.generation = Some(1);

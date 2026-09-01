@@ -363,7 +363,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
- "siphasher",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -867,7 +866,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
- "siphasher",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -2405,12 +2403,6 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
-
-[[package]]
-name = "siphasher"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "slab"

@@ -42,6 +42,18 @@ pub trait Planner {
         ctx: &Context,
     ) -> Result<Vec<Self::Resource>, Error>;
 
+    /// Applies the planned desired resources to the cluster.
+    /// Default implementation uses Server-Side Apply.
+    #[allow(async_fn_in_trait)]
+    async fn apply(
+        api: &kube::Api<Self::Resource>,
+        desired: Vec<Self::Resource>,
+        _ctx: &Context,
+    ) -> Result<(), Error> {
+        crate::reconcilers::helper::sync_resources(api, Self::KIND, desired).await?;
+        Ok(())
+    }
+
     /// Returns the cache tracking this resource type, if tracked in memory.
     fn cache(ctx: &Context) -> Option<&ResourceCache<Self::Resource>> {
         let _ = ctx;

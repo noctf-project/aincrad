@@ -1,5 +1,4 @@
 use k8s_common::PortRange;
-use siphasher::sip::SipHasher24;
 
 pub(crate) struct PortFinderIter {
     n: u64,
@@ -12,7 +11,6 @@ pub(crate) struct PortFinderIter {
 
 #[derive(Clone, Debug)]
 pub(crate) struct PortFinderFactory {
-    hasher: SipHasher24,
     p: u64,
     n: u64,
     start: u16,
@@ -22,10 +20,6 @@ impl PortFinderFactory {
     /// Creates a PortFinder that yields every value in `0..n`
     /// exactly once, in a pseudo-random order.
     pub(crate) fn new(range: &PortRange) -> Self {
-        let key1: u64 = rand::random();
-        let key2: u64 = rand::random();
-        let hasher = SipHasher24::new_with_keys(key1, key2);
-
         let start = *range.0.start();
         let end = *range.0.end();
         let n = if end >= start {
@@ -34,12 +28,7 @@ impl PortFinderFactory {
             0
         };
         if n <= 1 {
-            return Self {
-                hasher,
-                p: 0,
-                n,
-                start,
-            };
+            return Self { p: 0, n, start };
         }
 
         // Product of distinct prime factors of n.
@@ -68,15 +57,10 @@ impl PortFinderFactory {
             p *= 2;
         }
 
-        Self {
-            hasher,
-            p,
-            n,
-            start,
-        }
+        Self { p, n, start }
     }
 
-    pub(crate) fn cycle(&self, key: &str) -> PortFinderIter {
+    pub(crate) fn random_cycle(&self) -> PortFinderIter {
         if self.n <= 1 {
             return PortFinderIter {
                 n: self.n,
@@ -88,7 +72,7 @@ impl PortFinderFactory {
             };
         }
 
-        let seed = self.hasher.hash(key.as_bytes());
+        let seed: u64 = rand::random();
 
         // Use the highest 32 bits for k
         let k = ((seed >> 32) % 100) + 1;
@@ -151,22 +135,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_same_factory_same_string_same_sequence() {
+    fn test_full_permutation_coverage() {
         let range = PortRange(30000..=35000);
         let factory = PortFinderFactory::new(&range);
 
-        let key = "test-route-key";
-        let seq1: Vec<u16> = factory.cycle(key).collect();
-        let seq2: Vec<u16> = factory.cycle(key).collect();
-
-        assert_eq!(
-            seq1, seq2,
-            "Same factory and key must produce identical sequences"
-        );
-        assert_eq!(seq1.len(), 5001);
+        let seq: Vec<u16> = factory.random_cycle().collect();
+        assert_eq!(seq.len(), 5001);
 
         // Verify full permutation coverage (every port in range yielded exactly once)
-        let mut sorted_seq = seq1.clone();
+        let mut sorted_seq = seq.clone();
         sorted_seq.sort();
         let expected: Vec<u16> = (30000..=35000).collect();
         assert_eq!(
@@ -176,33 +153,16 @@ mod tests {
     }
 
     #[test]
-    fn test_different_factories_different_sequences() {
+    fn test_different_cycles_produce_different_sequences() {
         let range = PortRange(30000..=35000);
-        let keys = [
-            "route-alpha",
-            "route-beta",
-            "route-gamma",
-            "route-delta",
-            "route-epsilon",
-        ];
+        let factory = PortFinderFactory::new(&range);
 
-        let factory1 = PortFinderFactory::new(&range);
-        let factory2 = PortFinderFactory::new(&range);
+        let seq1: Vec<u16> = factory.random_cycle().collect();
+        let seq2: Vec<u16> = factory.random_cycle().collect();
 
-        // Compare sequences across keys to avoid rare 1-in-60,000 random seed collision
-        let mut any_different = false;
-        for key in keys {
-            let seq1: Vec<u16> = factory1.cycle(key).collect();
-            let seq2: Vec<u16> = factory2.cycle(key).collect();
-            if seq1 != seq2 {
-                any_different = true;
-                break;
-            }
-        }
-
-        assert!(
-            any_different,
-            "Different factory instances with independent RandomStates should produce different sequences"
+        assert_ne!(
+            seq1, seq2,
+            "Independent cycles should produce different random permutations"
         );
     }
 
@@ -211,7 +171,7 @@ mod tests {
     fn test_edge_case_n_equals_0() {
         let range = PortRange(50000..=49999);
         let factory = PortFinderFactory::new(&range);
-        let mut iter = factory.cycle("any-key");
+        let mut iter = factory.random_cycle();
         assert_eq!(iter.next(), None, "n=0 range must return None immediately");
     }
 
@@ -220,8 +180,8 @@ mod tests {
         let range = PortRange(30000..=30000);
         let factory = PortFinderFactory::new(&range);
 
-        for key in ["key1", "key2", "key3"] {
-            let mut iter = factory.cycle(key);
+        for _ in 0..3 {
+            let mut iter = factory.random_cycle();
             assert_eq!(iter.next(), Some(30000), "n=1 must yield the single port");
             assert_eq!(iter.next(), None, "n=1 must return None on second call");
         }
@@ -232,7 +192,7 @@ mod tests {
         let range = PortRange(20000..=20001);
         let factory = PortFinderFactory::new(&range);
 
-        let seq: Vec<u16> = factory.cycle("key-two").collect();
+        let seq: Vec<u16> = factory.random_cycle().collect();
         assert_eq!(seq.len(), 2);
         assert!(seq.contains(&20000));
         assert!(seq.contains(&20001));
@@ -249,7 +209,7 @@ mod tests {
             let range = PortRange(start..=end);
             let factory = PortFinderFactory::new(&range);
 
-            let seq: Vec<u16> = factory.cycle("pow2-key").collect();
+            let seq: Vec<u16> = factory.random_cycle().collect();
             assert_eq!(
                 seq.len(),
                 size as usize,
@@ -275,7 +235,7 @@ mod tests {
             let range = PortRange(start..=end);
             let factory = PortFinderFactory::new(&range);
 
-            let seq: Vec<u16> = factory.cycle("prime-key").collect();
+            let seq: Vec<u16> = factory.random_cycle().collect();
             assert_eq!(seq.len(), prime as usize);
 
             let mut sorted = seq.clone();
@@ -297,7 +257,7 @@ mod tests {
             let range = PortRange(start..=end);
             let factory = PortFinderFactory::new(&range);
 
-            let seq: Vec<u16> = factory.cycle("composite-key").collect();
+            let seq: Vec<u16> = factory.random_cycle().collect();
             assert_eq!(seq.len(), comp as usize);
 
             let mut sorted = seq.clone();

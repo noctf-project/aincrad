@@ -50,7 +50,7 @@ pub async fn apply_planner<P: Planner>(
         labels.insert(INSTANCE_GENERATION_LABEL.to_string(), gen_str.clone());
     }
 
-    sync_resources(&api, P::KIND, desired).await?;
+    P::apply(&api, desired, ctx).await?;
 
     let prune_lp = ListParams::default().labels(&format!(
         "{NAMESPACE_LABEL}={instance_ns},{INSTANCE_LABEL}={instance_name},{INSTANCE_GENERATION_LABEL}!={current_gen}"
@@ -176,12 +176,6 @@ pub async fn cleanup_instance_routes(ctx: &Context, instance: &CTFInstance) -> R
                 source: Box::new(e),
             });
         }
-    }
-
-    if let Some(allocator) = &ctx.route_allocator {
-        allocator
-            .ports()
-            .release_instance(instance_ns, instance_name);
     }
 
     remove_finalizer(ctx.client.clone(), instance).await?;
