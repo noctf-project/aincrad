@@ -17,8 +17,7 @@ use crate::{
     Context, Error, btreemap,
     planners::{Planner, set_owner_ref},
     reconcilers::template::ResolvedTemplate,
-    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE},
-    utils::naming::resource_name,
+    utils::{labels::INSTANCE_LABEL, naming::resource_name},
 };
 
 pub struct NetworkPolicyPlanner;
@@ -36,11 +35,6 @@ impl Planner for NetworkPolicyPlanner {
         let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
-        let labels = btreemap! {
-            MANAGED_BY_LABEL => MANAGED_BY_VALUE,
-            INSTANCE_LABEL => instance_name,
-        };
-
         let allowed_internet_pods: Vec<&str> = template
             .spec
             .pods
@@ -53,7 +47,6 @@ impl Planner for NetworkPolicyPlanner {
             metadata: ObjectMeta {
                 name: Some(resource_name(instance_name, "int")),
                 namespace: Some(ns.to_string()),
-                labels: Some(labels.clone()),
                 ..Default::default()
             },
             spec: Some(plan_internal_spec(instance_name)),
@@ -64,7 +57,6 @@ impl Planner for NetworkPolicyPlanner {
             metadata: ObjectMeta {
                 name: Some(resource_name(instance_name, "ext")),
                 namespace: Some(ns.to_string()),
-                labels: Some(labels),
                 ..Default::default()
             },
             spec: Some(plan_external_spec(instance_name, &allowed_internet_pods)),

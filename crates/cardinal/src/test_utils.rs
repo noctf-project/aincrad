@@ -351,7 +351,7 @@ pub mod tests {
             async move {
                 log.lock()
                     .unwrap()
-                    .push(format!("{} {}", req.method(), req.uri().path()));
+                    .push(format!("{} {}", req.method(), req.uri()));
                 respond_like_dummy(req.method(), req.uri().path())
             }
         });

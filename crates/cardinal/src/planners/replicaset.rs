@@ -90,8 +90,6 @@ impl Planner for ReplicaSetPlanner {
             );
 
             let labels = btreemap! {
-                MANAGED_BY_LABEL => MANAGED_BY_VALUE,
-                INSTANCE_LABEL => instance_name,
                 RESOURCE_LABEL => pod_tmpl.name.as_str(),
             };
 

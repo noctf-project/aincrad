@@ -10,8 +10,7 @@ use crate::{
     Context, Error, btreemap,
     planners::{Planner, set_owner_ref},
     reconcilers::template::ResolvedTemplate,
-    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE},
-    utils::naming::resource_name,
+    utils::{labels::INSTANCE_LABEL, naming::resource_name},
 };
 
 pub struct ServicePlanner;
@@ -43,8 +42,6 @@ impl Planner for ServicePlanner {
             let svc_name = resource_name(instance_name, &pod.name);
 
             let labels = btreemap! {
-                MANAGED_BY_LABEL => MANAGED_BY_VALUE,
-                INSTANCE_LABEL => instance_name,
                 RESOURCE_LABEL => pod.name.as_str(),
             };
 

@@ -7,6 +7,7 @@ pub const INSTANCE_LABEL: &str = "aincrad.noctf.dev/instance";
 pub const NAMESPACE_LABEL: &str = "aincrad.noctf.dev/namespace";
 pub const TEMPLATE_LABEL: &str = "aincrad.noctf.dev/template";
 pub const RESOURCE_LABEL: &str = "aincrad.noctf.dev/resource";
+pub const INSTANCE_GENERATION_LABEL: &str = "aincrad.noctf.dev/instance-generation";
 
 pub const ROUTES_FINALIZER: &str = "aincrad.noctf.dev/routes";
 

@@ -11,15 +11,8 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use k8s_openapi::jiff::Timestamp;
 
 use crate::{
-    Context, Error, btreemap,
-    cache::ResourceKey,
-    planners::Planner,
-    reconcilers::template::ResolvedTemplate,
-    routing::AllocatedRoute,
-    utils::{
-        labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, NAMESPACE_LABEL},
-        naming::resource_name,
-    },
+    Context, Error, btreemap, cache::ResourceKey, planners::Planner,
+    reconcilers::template::ResolvedTemplate, routing::AllocatedRoute, utils::naming::resource_name,
 };
 
 #[derive(Debug, Clone)]
@@ -80,9 +73,6 @@ impl Planner for ProxyRoutePlanner {
             );
 
             let labels = btreemap! {
-                MANAGED_BY_LABEL => MANAGED_BY_VALUE,
-                INSTANCE_LABEL => instance_name,
-                NAMESPACE_LABEL => ns,
                 RESOURCE_LABEL => route_tmpl.name.as_str(),
             };
 
@@ -602,7 +592,12 @@ mod tests {
         let (_store, ctx) = dummy_context_with_routes(vec![tcp_route]);
 
         assert_eq!(
-            ctx.route_allocator.as_ref().unwrap().ports().active_ports().len(),
+            ctx.route_allocator
+                .as_ref()
+                .unwrap()
+                .ports()
+                .active_ports()
+                .len(),
             0
         );
 
@@ -613,7 +608,12 @@ mod tests {
         assert_eq!(cond.status, "False");
         assert_eq!(cond.reason, "RoutesNotAllocated");
         assert_eq!(
-            ctx.route_allocator.as_ref().unwrap().ports().active_ports().len(),
+            ctx.route_allocator
+                .as_ref()
+                .unwrap()
+                .ports()
+                .active_ports()
+                .len(),
             0,
             "check_status must not mutate PortsStore"
         );
