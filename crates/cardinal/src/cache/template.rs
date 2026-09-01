@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use globset::GlobSet;
 use k8s_common::{SpecPatcher, crd::CTFTemplate};
+use parking_lot::RwLock;
 use tokio::sync::watch;
 
 use crate::cache::ReadyCache;
@@ -26,7 +27,7 @@ pub struct CachedTemplateEntry {
 
 #[derive(Clone)]
 pub struct TemplateCache {
-    index: Arc<Mutex<BTreeMap<TemplateKey, CachedTemplateEntry>>>,
+    index: Arc<RwLock<BTreeMap<TemplateKey, CachedTemplateEntry>>>,
     ready: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
 }
@@ -41,7 +42,7 @@ impl TemplateCache {
     pub fn new() -> Self {
         let (ready, ready_rx) = watch::channel(false);
         Self {
-            index: Arc::new(Mutex::new(BTreeMap::new())),
+            index: Arc::new(RwLock::new(BTreeMap::new())),
             ready,
             ready_rx,
         }
@@ -62,7 +63,7 @@ impl TemplateCache {
             namespace: namespace.to_string(),
             name: name.to_string(),
         };
-        let lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = self.index.read();
         lock.get(&key).cloned()
     }
 
@@ -75,7 +76,7 @@ impl TemplateCache {
         };
 
         if template.metadata.deletion_timestamp.is_some() {
-            let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+            let mut lock = self.index.write();
             lock.remove(&key);
             return;
         }
@@ -102,7 +103,7 @@ impl TemplateCache {
             route_patchers,
         };
 
-        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.index.write();
         lock.insert(key, entry);
     }
 
@@ -113,12 +114,12 @@ impl TemplateCache {
             namespace: ns.to_string(),
             name: name.to_string(),
         };
-        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.index.write();
         lock.remove(&key);
     }
 
     pub fn clear(&self) {
-        let mut lock = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.index.write();
         lock.clear();
     }
 }

@@ -1,7 +1,6 @@
-use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::{Stream, StreamExt};
 use k8s_common::crd::CTFProxyRoute;
@@ -12,6 +11,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::runtime::WatchStreamExt;
 use kube::runtime::watcher::{self, Config, Event, watcher};
 use kube::{Api, Resource};
+use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use tokio::sync::watch;
 
@@ -91,11 +91,11 @@ impl<V> std::ops::Deref for ResourceEntry<V> {
 }
 
 struct Inner<T: ResourceProjection> {
-    index: BTreeMap<CacheKey, Arc<CachedItem<T::Value>>>,
+    index: std::collections::BTreeMap<CacheKey, Arc<CachedItem<T::Value>>>,
 }
 
 pub struct ResourceCache<T: ResourceProjection> {
-    inner: Arc<Mutex<Inner<T>>>,
+    inner: Arc<RwLock<Inner<T>>>,
     ready: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
 }
@@ -152,7 +152,7 @@ impl<T: ResourceProjection> ResourceCache<T> {
         match event {
             Event::Apply(resource) | Event::InitApply(resource) => {
                 let key = CacheKey::new(T::key(resource), T::name(resource));
-                let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                let mut lock = self.inner.write();
 
                 let incoming_meta = T::meta(resource);
                 if let Some(existing) = lock.index.get(&key)
@@ -171,7 +171,7 @@ impl<T: ResourceProjection> ResourceCache<T> {
             }
             Event::Delete(resource) => {
                 let key = CacheKey::new(T::key(resource), T::name(resource));
-                let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                let mut lock = self.inner.write();
 
                 let incoming_meta = T::meta(resource);
                 if let Some(existing) = lock.index.get(&key)
@@ -190,14 +190,14 @@ impl<T: ResourceProjection> ResourceCache<T> {
     }
 
     fn clear(&self) {
-        let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.inner.write();
         lock.index.clear();
     }
 
     /// Returns every resource owned by `(namespace, instance)`.
     pub fn for_instance(&self, namespace: &str, instance: &str) -> Vec<ResourceEntry<T::Value>> {
         let start = CacheKey::new(ResourceKey::new(namespace, instance, ""), "");
-        let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = self.inner.read();
         lock.index
             .range(start..)
             .take_while(|(k, _)| {
@@ -222,7 +222,7 @@ impl<T: ResourceProjection> ResourceCache<T> {
 
     /// Returns every entry in the cache, across all namespaces and instances.
     pub fn all_entries(&self) -> Vec<ResourceEntry<T::Value>> {
-        let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = self.inner.read();
         lock.index
             .iter()
             .map(|(k, item)| ResourceEntry {
@@ -236,7 +236,7 @@ impl<T: ResourceProjection> ResourceCache<T> {
     /// Eagerly removes an entry matching `(namespace, instance, name)`.
     pub fn remove_entry(&self, namespace: &str, instance: &str, name: &str) {
         let start = CacheKey::new(ResourceKey::new(namespace, instance, ""), "");
-        let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.inner.write();
         let to_remove: Vec<CacheKey> = lock
             .index
             .range(start..)
@@ -254,7 +254,7 @@ impl<T: ResourceProjection> ResourceCache<T> {
 
     /// Eagerly removes any entry matching `name`.
     pub fn remove_by_name(&self, name: &str) {
-        let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.inner.write();
         let to_remove: Vec<CacheKey> = lock
             .index
             .keys()
@@ -268,7 +268,7 @@ impl<T: ResourceProjection> ResourceCache<T> {
     }
 
     pub fn len(&self) -> usize {
-        let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = self.inner.read();
         lock.index.len()
     }
 
@@ -329,8 +329,8 @@ impl<T: ResourceProjection> Default for ResourceCache<T> {
     fn default() -> Self {
         let (ready, ready_rx) = watch::channel(false);
         Self {
-            inner: Arc::new(Mutex::new(Inner {
-                index: BTreeMap::new(),
+            inner: Arc::new(RwLock::new(Inner {
+                index: std::collections::BTreeMap::new(),
             })),
             ready,
             ready_rx,

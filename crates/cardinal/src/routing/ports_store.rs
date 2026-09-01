@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
-use std::sync::RwLock;
 
 use k8s_common::PortRange;
+use parking_lot::RwLock;
 use thiserror::Error;
 use tracing::info;
 
@@ -9,7 +9,6 @@ use crate::cache::ResourceKey;
 
 use super::port_finder::PortFinderFactory;
 
-const LOCK_POISONED_ERROR: &str = "PortsStore lock was poisoned";
 const PORTS: usize = 65536;
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -200,13 +199,13 @@ impl PortsStore {
 
     /// Allocates a port for a given ResourceKey (port == 0 for auto, port != 0 for fixed).
     pub fn allocate(&self, key: &ResourceKey, port: u16) -> Result<u16, PortError> {
-        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        let mut inner = self.inner.write();
         inner.allocate(key, port)
     }
 
     /// Releases any port allocated to the given ResourceKey.
     pub fn release(&self, key: &ResourceKey) -> Option<u16> {
-        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        let mut inner = self.inner.write();
         let port = inner.release(key);
         if let Some(p) = port {
             info!("route {key} released port {p}");
@@ -216,7 +215,7 @@ impl PortsStore {
 
     /// Releases all ports allocated to any route belonging to the given namespace and instance.
     pub fn release_instance(&self, namespace: &str, instance: &str) -> Vec<u16> {
-        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        let mut inner = self.inner.write();
         let released = inner.release_instance(namespace, instance);
         for &port in &released {
             info!("instance {namespace}/{instance} released port {port}");
@@ -226,7 +225,7 @@ impl PortsStore {
 
     /// Releases all ports allocated to any route belonging to the given namespace.
     pub fn release_namespace(&self, namespace: &str) -> Vec<u16> {
-        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        let mut inner = self.inner.write();
         let released = inner.release_namespace(namespace);
         for &port in &released {
             info!("namespace {namespace} released port {port}");
@@ -236,7 +235,7 @@ impl PortsStore {
 
     /// Releases the port only if it is currently mapped to this exact port for the given ResourceKey.
     pub fn release_if_bound(&self, key: &ResourceKey, port: u16) -> bool {
-        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        let mut inner = self.inner.write();
         let released = inner.release_if_bound(key, port);
         if released {
             info!("route {key} released port {port}");
@@ -246,37 +245,34 @@ impl PortsStore {
 
     /// Synchronizes an authoritative port assignment observed from external resources.
     pub fn sync(&self, key: &ResourceKey, port: u16) {
-        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        let mut inner = self.inner.write();
         inner.sync(key, port);
     }
 
     /// Gets the allocated port for a ResourceKey if present.
     pub fn get_port(&self, key: &ResourceKey) -> Option<u16> {
-        self.inner.read().expect(LOCK_POISONED_ERROR).get_port(key)
+        self.inner.read().get_port(key)
     }
 
     /// Gets the ResourceKey bound to a port if present.
     pub fn get_route(&self, port: u16) -> Option<ResourceKey> {
-        self.inner
-            .read()
-            .expect(LOCK_POISONED_ERROR)
-            .get_route(port)
+        self.inner.read().get_route(port)
     }
 
     /// Returns all (ResourceKey, port) pairs for a given namespace and instance.
     pub fn instance_routes(&self, namespace: &str, instance: &str) -> Vec<(ResourceKey, u16)> {
-        let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
+        let inner = self.inner.read();
         inner.instance_routes(namespace, instance)
     }
 
     /// Returns a list of all currently allocated ports.
     pub fn active_ports(&self) -> Vec<u16> {
-        self.inner.read().expect(LOCK_POISONED_ERROR).active_ports()
+        self.inner.read().active_ports()
     }
 
     /// Clears all bindings and mappings.
     pub fn clear(&self) {
-        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        let mut inner = self.inner.write();
         inner.clear();
     }
 }

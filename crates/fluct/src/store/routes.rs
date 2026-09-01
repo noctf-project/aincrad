@@ -1,11 +1,11 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use k8s_common::crd::{CTFProxyRoute, ProxyRouteKey};
+use parking_lot::RwLock;
 
 use crate::config::PortRange;
 
 const MAX_PORTS: usize = 65536;
-pub const LOCK_POISONED_ERROR: &str = "ProxyStore lock poisoned";
 
 #[derive(Default)]
 struct StoreInner {
@@ -33,7 +33,7 @@ impl ProxyStore {
     pub fn insert(&self, route: CTFProxyRoute) {
         if let Ok(key) = route.route_key() {
             let entry = Arc::new(route);
-            let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+            let mut inner = self.inner.write();
             match key {
                 ProxyRouteKey::Tcp(port) => {
                     if self.port_ranges.is_empty()
@@ -52,7 +52,7 @@ impl ProxyStore {
     /// Removes a route identified by its metadata name (e.g. `p30005` or `rwhoami`).
     pub fn remove(&self, name: &str) {
         if let Ok(key) = std::str::FromStr::from_str(name) {
-            let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+            let mut inner = self.inner.write();
             match key {
                 ProxyRouteKey::Tcp(port) => {
                     inner.ports[port as usize] = None;
@@ -66,20 +66,20 @@ impl ProxyStore {
 
     /// Retrieves an active TCP route by listening port number via direct O(1) array indexing.
     pub fn get_tcp_route(&self, port: u16) -> Option<Arc<CTFProxyRoute>> {
-        let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
+        let inner = self.inner.read();
         inner.ports.get(port as usize).and_then(|opt| opt.clone())
     }
 
     /// Retrieves an active named/SNI route by hostname.
     pub fn get_named_route(&self, hostname: &str) -> Option<Arc<CTFProxyRoute>> {
         let clean_name = hostname.split('.').next().unwrap_or(hostname);
-        let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
+        let inner = self.inner.read();
         inner.routes.get(clean_name).cloned()
     }
 
     /// Returns a list of all active TCP ports with bound routes.
     pub fn active_tcp_ports(&self) -> Vec<u16> {
-        let inner = self.inner.read().expect(LOCK_POISONED_ERROR);
+        let inner = self.inner.read();
         inner
             .ports
             .iter()
@@ -90,7 +90,7 @@ impl ProxyStore {
 
     /// Clears all routes from the store.
     pub fn clear(&self) {
-        let mut inner = self.inner.write().expect(LOCK_POISONED_ERROR);
+        let mut inner = self.inner.write();
         inner.ports.fill(None);
         inner.routes.clear();
     }

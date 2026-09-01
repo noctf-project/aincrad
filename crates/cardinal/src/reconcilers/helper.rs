@@ -33,6 +33,10 @@ pub async fn apply_planner<P: Planner>(
     let instance_ns = instance.metadata.namespace.as_deref().unwrap_or("default");
     let current_gen = instance.metadata.generation.unwrap_or(1);
 
+    let ns_str = instance_ns.to_string();
+    let name_str = instance_name.to_string();
+    let gen_str = current_gen.to_string();
+
     for resource in &mut desired {
         let meta = resource.meta_mut();
         meta.managed_fields = None;
@@ -41,12 +45,9 @@ pub async fn apply_planner<P: Planner>(
         }
         let labels = meta.labels.get_or_insert_with(Default::default);
         labels.insert(MANAGED_BY_LABEL.to_string(), MANAGED_BY_VALUE.to_string());
-        labels.insert(NAMESPACE_LABEL.to_string(), instance_ns.to_string());
-        labels.insert(INSTANCE_LABEL.to_string(), instance_name.to_string());
-        labels.insert(
-            INSTANCE_GENERATION_LABEL.to_string(),
-            current_gen.to_string(),
-        );
+        labels.insert(NAMESPACE_LABEL.to_string(), ns_str.clone());
+        labels.insert(INSTANCE_LABEL.to_string(), name_str.clone());
+        labels.insert(INSTANCE_GENERATION_LABEL.to_string(), gen_str.clone());
     }
 
     sync_resources(&api, P::KIND, desired).await?;

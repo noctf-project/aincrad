@@ -22,6 +22,7 @@ kctf-pow = "2.1"
 kube = { workspace = true }
 libc = "0.2"
 moka = { version = "0.12", features = ["future"] }
+parking_lot = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 rustls-pemfile = "2"

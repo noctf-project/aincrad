@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use k8s_common::crd::{CTFInstance, CTFTemplate};
+use parking_lot::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InstanceKey {
@@ -18,7 +19,7 @@ struct Inner {
 
 #[derive(Clone, Default)]
 pub struct InstanceCache {
-    inner: Arc<Mutex<Inner>>,
+    inner: Arc<RwLock<Inner>>,
 }
 
 impl InstanceCache {
@@ -32,7 +33,7 @@ impl InstanceCache {
         let inst_id = (ns.to_string(), name.to_string());
         let new_template = instance.spec.template.clone();
 
-        let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.inner.write();
 
         // Remove old indexed entry if the instance migrated from a different template
         if let Some(old_template) = lock.instance_templates.remove(&inst_id) {
@@ -60,7 +61,7 @@ impl InstanceCache {
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
         let inst_id = (ns.to_string(), name.to_string());
 
-        let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.inner.write();
         if let Some(template) = lock.instance_templates.remove(&inst_id) {
             let key = InstanceKey {
                 namespace: ns.to_string(),
@@ -79,7 +80,7 @@ impl InstanceCache {
     }
 
     pub fn clear(&self) {
-        let mut lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = self.inner.write();
         lock.index.clear();
         lock.instance_templates.clear();
     }
@@ -93,7 +94,7 @@ impl InstanceCache {
             instance: String::new(),
         };
 
-        let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = self.inner.read();
         lock.index
             .range(start_key..)
             .take_while(|(k, _)| k.namespace == tmpl_ns && k.template == tmpl_name)
@@ -108,7 +109,7 @@ impl InstanceCache {
     /// the cluster as seen by the cache. The index only holds non-deleted
     /// instances, so every entry is live.
     pub fn live_instances(&self) -> Vec<(String, String)> {
-        let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = self.inner.read();
         lock.index
             .values()
             .map(|inst| {
