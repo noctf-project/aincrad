@@ -15,7 +15,7 @@ use k8s_openapi::{
 
 use crate::{
     Context, Error, btreemap,
-    planners::{Planner, set_owner_ref},
+    planners::Planner,
     reconcilers::template::ResolvedTemplate,
     utils::{labels::INSTANCE_LABEL, naming::resource_name},
 };
@@ -43,7 +43,7 @@ impl Planner for NetworkPolicyPlanner {
             .map(|pod| pod.name.as_str())
             .collect();
 
-        let mut int = NetworkPolicy {
+        let int = NetworkPolicy {
             metadata: ObjectMeta {
                 name: Some(resource_name(instance_name, "int")),
                 namespace: Some(ns.to_string()),
@@ -51,9 +51,8 @@ impl Planner for NetworkPolicyPlanner {
             },
             spec: Some(plan_internal_spec(instance_name)),
         };
-        set_owner_ref(&mut int, instance);
 
-        let mut ext = NetworkPolicy {
+        let ext = NetworkPolicy {
             metadata: ObjectMeta {
                 name: Some(resource_name(instance_name, "ext")),
                 namespace: Some(ns.to_string()),
@@ -61,7 +60,6 @@ impl Planner for NetworkPolicyPlanner {
             },
             spec: Some(plan_external_spec(instance_name, &allowed_internet_pods)),
         };
-        set_owner_ref(&mut ext, instance);
 
         Ok(vec![int, ext])
     }

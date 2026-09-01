@@ -8,7 +8,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use crate::planners::get_services_map;
 use crate::{
     Context, Error, btreemap,
-    planners::{Planner, set_owner_ref},
+    planners::Planner,
     reconcilers::template::ResolvedTemplate,
     utils::{labels::INSTANCE_LABEL, naming::resource_name},
 };
@@ -54,7 +54,7 @@ impl Planner for ServicePlanner {
                 .flat_map(|x| x.iter().map(|c| c.container_port))
                 .collect();
 
-            let mut svc = Service {
+            let svc = Service {
                 metadata: ObjectMeta {
                     name: Some(svc_name),
                     namespace: Some(ns.to_string()),
@@ -80,7 +80,6 @@ impl Planner for ServicePlanner {
                 }),
                 ..Default::default()
             };
-            set_owner_ref(&mut svc, instance);
             desired.push(svc);
         }
 

@@ -364,10 +364,12 @@ fn meta_key<K: Resource<DynamicType = ()>>(
 ) -> (ResourceKey, String) {
     let namespace = resource
         .meta()
-        .namespace
-        .as_deref()
-        .unwrap_or("default")
-        .to_string();
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(NAMESPACE_LABEL))
+        .cloned()
+        .or_else(|| resource.meta().namespace.clone())
+        .unwrap_or_else(|| "default".to_string());
     let instance = resource
         .meta()
         .labels

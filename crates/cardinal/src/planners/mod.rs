@@ -150,15 +150,6 @@ pub trait Planner {
     }
 }
 
-/// Sets controller owner reference on a resource pointing to the CTFInstance.
-pub fn set_owner_ref<K: Resource>(resource: &mut K, instance: &CTFInstance) {
-    let meta = resource.meta_mut();
-    meta.managed_fields = None;
-    if let Some(owner) = instance.controller_owner_ref(&()) {
-        meta.owner_references = Some(vec![owner]);
-    }
-}
-
 pub fn get_services_map(
     template: &ResolvedTemplate,
     instance_name: &str,

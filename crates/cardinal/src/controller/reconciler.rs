@@ -930,33 +930,78 @@ mod tests {
         assert!(res.is_err());
     }
 
-    // #[tokio::test]
-    // async fn test_controller_run_fatal_list_error() {
-    //     use tower::service_fn;
-    //     let mock_service = service_fn(|_req: axum::http::Request<kube::client::Body>| async move {
-    //         Ok::<_, std::convert::Infallible>(
-    //             axum::http::Response::builder()
-    //                 .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-    //                 .body(axum::body::Body::from("Internal Server Error"))
-    //                 .unwrap(),
-    //         )
-    //     });
-    //     let client = kube::Client::new(mock_service, "default");
+    #[tokio::test]
+    async fn test_instances_lock_when_route_allocator_reallocating() {
+        use crate::cache::ReadyGate;
+        use std::time::Duration;
 
-    //     let ports = Arc::new(PortsStore::new(
-    //         PortRange(20000..=20010),
-    //         PortRange(30000..=30010),
-    //     ));
-    //     let allocator = Arc::new(RouteAllocator::new(ports, "seed", "c.sk8.dog", 4433));
+        let (_store, ctx) = dummy_context();
 
-    //     let res = run_controller(
-    //         client,
-    //         allocator,
-    //         "aincrad-system".into(),
-    //         "cluster.local".into(),
-    //         std::collections::BTreeMap::new(),
-    //     )
-    //     .await;
-    //     assert!(res.is_err());
-    // }
+        // Mark all auxiliary caches as initially ready
+        ctx.caches.replica_sets.mark_ready();
+        ctx.caches.services.mark_ready();
+        ctx.caches.templates.mark_ready();
+        ctx.caches.proxy_routes.mark_ready();
+
+        let gate = ReadyGate::from_caches(&ctx.caches);
+        assert!(gate.is_ready(), "gate must be ready initially");
+
+        // Route allocator receives Event::Init (e.g. reconnection / re-list)
+        let allocator = ctx.route_allocator.as_ref().unwrap();
+        handle_proxy_route_allocator_event(&Event::Init, allocator, None);
+        // ProxyRoute watcher stream marks proxy_routes unready on Event::Init
+        ctx.caches.proxy_routes.mark_unready();
+
+        assert!(
+            !gate.is_ready(),
+            "gate must not be ready while route allocator is re-allocating"
+        );
+
+        // Spawn a task that waits on the gate (simulating instance reconcile stream)
+        let gate_waiter = gate.clone();
+        let (unlocked_tx, mut unlocked_rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            gate_waiter.wait().await;
+            let _ = unlocked_tx.send(()).await;
+        });
+
+        // Verify the gate remains locked while routes are being reloaded
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            unlocked_rx.try_recv().is_err(),
+            "instance processing must be locked while route allocator is re-allocating"
+        );
+
+        // Re-stream routes during InitApply
+        let route = CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("r30000".to_string()),
+                namespace: Some("aincrad-system".to_string()),
+                labels: Some(crate::btreemap! {
+                    crate::utils::labels::NAMESPACE_LABEL => "default",
+                    crate::utils::labels::INSTANCE_LABEL => "chal-1",
+                    crate::utils::labels::RESOURCE_LABEL => "web",
+                }),
+                ..Default::default()
+            },
+            spec: k8s_common::crd::CTFProxyRouteSpec {
+                backend: "web.default.svc.cluster.local:80".to_string(),
+                policy: Default::default(),
+            },
+        };
+        handle_proxy_route_allocator_event(&Event::InitApply(route.clone()), allocator, None);
+        ctx.caches.proxy_routes.handle(&Event::InitApply(route));
+
+        // Re-allocation finishes: Event::InitDone arrives
+        handle_proxy_route_allocator_event(&Event::InitDone, allocator, None);
+        ctx.caches.proxy_routes.mark_ready();
+
+        // Verify gate is ready and waiter task unlocks
+        assert!(gate.is_ready(), "gate must be ready after InitDone");
+        let unlocked = tokio::time::timeout(Duration::from_secs(1), unlocked_rx.recv()).await;
+        assert!(
+            unlocked.is_ok(),
+            "instance processing must resume once route allocator finishes"
+        );
+    }
 }

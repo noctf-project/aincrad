@@ -16,7 +16,7 @@ use crate::utils::HashWriter;
 use crate::utils::naming::resource_name;
 use crate::{
     Context, Error, btreemap,
-    planners::{Planner, set_owner_ref},
+    planners::Planner,
     reconcilers::template::ResolvedTemplate,
     utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, RESTARTED_AT_ANNOTATION},
 };
@@ -93,7 +93,7 @@ impl Planner for ReplicaSetPlanner {
                 RESOURCE_LABEL => pod_tmpl.name.as_str(),
             };
 
-            let mut rs = ReplicaSet {
+            let rs = ReplicaSet {
                 metadata: ObjectMeta {
                     name: None,
                     namespace: Some(ns.to_string()),
@@ -103,7 +103,6 @@ impl Planner for ReplicaSetPlanner {
                 spec: Some(rs_spec),
                 ..Default::default()
             };
-            set_owner_ref(&mut rs, instance);
             desired.push(rs);
         }
 
@@ -486,7 +485,6 @@ mod tests {
                 .unwrap()
                 .starts_with("chal-1-web-")
         );
-        assert_eq!(rs.metadata.owner_references.as_ref().unwrap().len(), 1);
     }
 
     #[tokio::test]

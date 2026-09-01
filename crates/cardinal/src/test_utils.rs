@@ -35,121 +35,10 @@ pub mod tests {
             }
 
             fn call(&mut self, req: axum::http::Request<B>) -> Self::Future {
-                let path = req.uri().path().to_string();
-                let is_get = req.method() == axum::http::Method::GET;
+                let uri = req.uri().to_string();
+                let method = req.method().clone();
 
-                Box::pin(async move {
-                    if is_get {
-                        if path.contains("ctftemplates") {
-                            let tmpl = serde_json::json!({
-                                "apiVersion": "aincrad.noctf.dev/v1",
-                                "kind": "CTFTemplate",
-                                "metadata": {
-                                    "name": "whoami-template",
-                                    "namespace": "default",
-                                    "generation": 1
-                                },
-                                "spec": {
-                                    "params": [],
-                                    "pods": [
-                                        {
-                                            "name": "web",
-                                            "replicas": 1,
-                                            "spec": {
-                                                "containers": [
-                                                    { "name": "web", "image": "nginx" }
-                                                ]
-                                            }
-                                        }
-                                    ],
-                                    "routes": []
-                                }
-                            });
-                            let body_str = serde_json::to_string(&tmpl).unwrap();
-                            return Ok(axum::http::Response::builder()
-                                .status(axum::http::StatusCode::OK)
-                                .header("content-type", "application/json")
-                                .body(axum::body::Body::from(body_str))
-                                .unwrap());
-                        }
-
-                        if path.ends_with("/replicasets")
-                            || path.ends_with("/services")
-                            || path.ends_with("/networkpolicies")
-                            || path.ends_with("/ctfinstances")
-                            || path.ends_with("/ctfproxyroutes")
-                        {
-                            let list = serde_json::json!({
-                                "apiVersion": "v1",
-                                "kind": "List",
-                                "metadata": {},
-                                "items": []
-                            });
-                            let body_str = serde_json::to_string(&list).unwrap();
-                            return Ok(axum::http::Response::builder()
-                                .status(axum::http::StatusCode::OK)
-                                .header("content-type", "application/json")
-                                .body(axum::body::Body::from(body_str))
-                                .unwrap());
-                        }
-
-                        let status = serde_json::json!({
-                            "kind": "Status",
-                            "apiVersion": "v1",
-                            "status": "Failure",
-                            "message": "not found",
-                            "reason": "NotFound",
-                            "code": 404
-                        });
-                        let body_str = serde_json::to_string(&status).unwrap();
-                        Ok(axum::http::Response::builder()
-                            .status(axum::http::StatusCode::NOT_FOUND)
-                            .header("content-type", "application/json")
-                            .body(axum::body::Body::from(body_str))
-                            .unwrap())
-                    } else {
-                        let (api_version, kind) = if path.contains("networkpolicies") {
-                            ("networking.k8s.io/v1", "NetworkPolicy")
-                        } else if path.contains("replicasets") {
-                            ("apps/v1", "ReplicaSet")
-                        } else if path.contains("ctfproxyroutes") {
-                            ("aincrad.noctf.dev/v1", "CTFProxyRoute")
-                        } else if path.contains("ctfinstances") {
-                            ("aincrad.noctf.dev/v1", "CTFInstance")
-                        } else {
-                            ("v1", "Service")
-                        };
-
-                        let clean_path = path.split('?').next().unwrap_or(&path);
-                        let resource_name = clean_path.rsplit('/').next().unwrap_or("dummy");
-                        let mut body = serde_json::json!({
-                            "apiVersion": api_version,
-                            "kind": kind,
-                            "metadata": {
-                                "name": resource_name,
-                                "namespace": "default",
-                                "labels": {
-                                    "aincrad.noctf.dev/namespace": "default",
-                                    "aincrad.noctf.dev/instance": "chal-1",
-                                    "aincrad.noctf.dev/resource": "web"
-                                }
-                            }
-                        });
-                        if kind == "CTFInstance" {
-                            body["spec"] = serde_json::json!({ "template": "whoami-template" });
-                        } else if kind == "CTFProxyRoute" {
-                            body["spec"] = serde_json::json!({
-                                "backend": "web.default.svc.cluster.local:80"
-                            });
-                        }
-                        let body_str = serde_json::to_string(&body).unwrap();
-                        Ok(axum::http::Response::builder()
-                            .status(axum::http::StatusCode::OK)
-                            .header("content-type", "application/json")
-                            .body(axum::body::Body::from(body_str))
-                            .unwrap())
-                    }
-                })
+                Box::pin(async move { respond_like_dummy(&method, &uri) })
             }
         }
 
@@ -366,8 +255,10 @@ pub mod tests {
     ) -> Result<axum::http::Response<axum::body::Body>, std::convert::Infallible> {
         let is_get = method == axum::http::Method::GET;
 
+        let clean_path = path.split('?').next().unwrap_or(path);
+
         if is_get {
-            if path.contains("ctftemplates") {
+            if clean_path.contains("ctftemplates") {
                 let tmpl = serde_json::json!({
                     "apiVersion": "aincrad.noctf.dev/v1",
                     "kind": "CTFTemplate",
@@ -378,7 +269,17 @@ pub mod tests {
                     },
                     "spec": {
                         "params": [],
-                        "pods": [],
+                        "pods": [
+                            {
+                                "name": "web",
+                                "replicas": 1,
+                                "spec": {
+                                    "containers": [
+                                        { "name": "web", "image": "nginx" }
+                                    ]
+                                }
+                            }
+                        ],
                         "routes": []
                     }
                 });
@@ -390,11 +291,11 @@ pub mod tests {
                     .unwrap());
             }
 
-            if path.ends_with("/replicasets")
-                || path.ends_with("/services")
-                || path.ends_with("/networkpolicies")
-                || path.ends_with("/ctfinstances")
-                || path.ends_with("/ctfproxyroutes")
+            if clean_path.ends_with("/replicasets")
+                || clean_path.ends_with("/services")
+                || clean_path.ends_with("/networkpolicies")
+                || clean_path.ends_with("/ctfinstances")
+                || clean_path.ends_with("/ctfproxyroutes")
             {
                 let list = serde_json::json!({
                     "apiVersion": "v1",
@@ -425,6 +326,26 @@ pub mod tests {
                 .body(axum::body::Body::from(body_str))
                 .unwrap())
         } else {
+            if clean_path.ends_with("/replicasets")
+                || clean_path.ends_with("/services")
+                || clean_path.ends_with("/networkpolicies")
+                || clean_path.ends_with("/ctfinstances")
+                || clean_path.ends_with("/ctfproxyroutes")
+            {
+                let list = serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "List",
+                    "metadata": {},
+                    "items": []
+                });
+                let body_str = serde_json::to_string(&list).unwrap();
+                return Ok(axum::http::Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body_str))
+                    .unwrap());
+            }
+
             let (api_version, kind) = if path.contains("networkpolicies") {
                 ("networking.k8s.io/v1", "NetworkPolicy")
             } else if path.contains("replicasets") {

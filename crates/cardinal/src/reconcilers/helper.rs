@@ -36,6 +36,9 @@ pub async fn apply_planner<P: Planner>(
     for resource in &mut desired {
         let meta = resource.meta_mut();
         meta.managed_fields = None;
+        if meta.namespace.as_deref() == instance.metadata.namespace.as_deref() {
+            meta.owner_references = instance.controller_owner_ref(&()).map(|o| vec![o]);
+        }
         let labels = meta.labels.get_or_insert_with(Default::default);
         labels.insert(MANAGED_BY_LABEL.to_string(), MANAGED_BY_VALUE.to_string());
         labels.insert(NAMESPACE_LABEL.to_string(), instance_ns.to_string());
@@ -51,9 +54,20 @@ pub async fn apply_planner<P: Planner>(
     let prune_lp = ListParams::default().labels(&format!(
         "{NAMESPACE_LABEL}={instance_ns},{INSTANCE_LABEL}={instance_name},{INSTANCE_GENERATION_LABEL}!={current_gen}"
     ));
-    let _ = api
+    match api
         .delete_collection(&DeleteParams::default(), &prune_lp)
-        .await;
+        .await
+    {
+        Ok(_) => {}
+        Err(kube::Error::Api(ref api_err)) if api_err.code == 404 => {}
+        Err(e) => {
+            return Err(Error::ApplyResource {
+                kind: P::KIND,
+                name: format!("{instance_name} (prune)"),
+                source: Box::new(e),
+            });
+        }
+    }
 
     Ok(())
 }
@@ -148,9 +162,20 @@ pub async fn cleanup_instance_routes(ctx: &Context, instance: &CTFInstance) -> R
     let delete_lp = ListParams::default().labels(&format!(
         "{NAMESPACE_LABEL}={instance_ns},{INSTANCE_LABEL}={instance_name}"
     ));
-    let _ = api
+    match api
         .delete_collection(&DeleteParams::default(), &delete_lp)
-        .await;
+        .await
+    {
+        Ok(_) => {}
+        Err(kube::Error::Api(ref api_err)) if api_err.code == 404 => {}
+        Err(e) => {
+            return Err(Error::ApplyResource {
+                kind: "CTFProxyRoute",
+                name: format!("{instance_name} (routes cleanup)"),
+                source: Box::new(e),
+            });
+        }
+    }
 
     if let Some(allocator) = &ctx.route_allocator {
         allocator
