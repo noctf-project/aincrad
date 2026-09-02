@@ -22,6 +22,7 @@ kctf-pow = "2.1"
 kube = { workspace = true }
 libc = "0.2"
 moka = { version = "0.12", features = ["future"] }
+nftnl = { git = "https://github.com/lecafard/nftnl-rs.git", tag = "v0.9.5-lecafard" }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
@@ -37,6 +38,7 @@ tokio-rustls = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"
+mnl = "0.3.1"
 
 [dev-dependencies]
 axum = { workspace = true }

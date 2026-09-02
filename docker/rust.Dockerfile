@@ -17,7 +17,10 @@ RUN apk add --no-cache \
     diffutils \
     mpfr-dev \
     gmp-dev \
-    musl-dev
+    musl-dev \
+    libmnl-dev \
+    libmnl-static \
+    libnftnl-dev
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Copy source files and compile the final binary
@@ -25,10 +28,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 RUN cargo build --release
 
-# runtime image (alpine as we need netnl)
-FROM alpine:3 AS fluct
-RUN apk add --no-cache nftables libcap
+FROM gcr.io/distroless/static-debian13 AS fluct
 COPY --from=builder /build/target/release/fluct /usr/local/bin/fluct
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/fluct"]
 
 FROM gcr.io/distroless/static-debian13 AS cardinal

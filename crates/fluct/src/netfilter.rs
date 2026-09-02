@@ -1,13 +1,19 @@
-use std::{io, os::fd::RawFd, process::Stdio, sync::Arc};
+use std::{ffi::CStr, io, os::fd::RawFd, sync::Arc};
 
-use tokio::io::AsyncWriteExt;
+use mnl::{Bus, Socket, cb_run};
+use nftnl::{
+    Batch, Chain, ChainType, FinalizedBatch, Hook, MsgType, Policy, ProtoFamily, Rule, Table,
+    expr::{CmpOp, Immediate, Lookup, Meta, Register},
+    nft_expr,
+    set::Set,
+};
 use tracing::warn;
 
 use crate::store::routes::ProxyStore;
 
-const TABLE_NAME: &str = "fluct";
-const PREROUTING: &str = "prerouting";
-const SET_NAME: &str = "active";
+const TABLE_NAME: &CStr = c"fluct";
+const PREROUTING: &CStr = c"prerouting";
+const SET_NAME: &CStr = c"active";
 
 /// Operations dispatched to netfilter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,22 +42,67 @@ pub fn set_ip_transparent(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-/// Builds the list of top-level commands to initialize the table, set, chain, and rules in an interactive session.
-fn build_init_commands(dest: u16, priority: i32, mark: u32) -> Vec<String> {
-    vec![
-        format!("add table inet {TABLE_NAME}"),
-        format!("flush table inet {TABLE_NAME}"),
-        format!("add set inet {TABLE_NAME} {SET_NAME} {{ type inet_service; }}"),
-        format!(
-            "add chain inet {TABLE_NAME} {PREROUTING} {{ type filter hook {PREROUTING} priority {priority}; policy accept; }}"
-        ),
-        format!(
-            "add rule inet {TABLE_NAME} {PREROUTING} tcp dport @{SET_NAME} tproxy to :{dest} meta mark set 0x{mark:08x}"
-        ),
-    ]
+struct NetlinkSocket(Socket);
+unsafe impl Send for NetlinkSocket {}
+
+impl std::ops::Deref for NetlinkSocket {
+    type Target = Socket;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
-/// Manages an interactive `nft -i` session.
+fn send_and_process(socket: &Socket, batch: &FinalizedBatch) -> io::Result<()> {
+    let portid = socket.portid();
+    socket.send_all(batch)?;
+
+    let mut buffer = vec![0; nftnl::nft_nlmsg_maxsize() as usize];
+    let mut expected_seqs = batch.sequence_numbers();
+    while !expected_seqs.is_empty() {
+        for message in socket.recv(&mut buffer[..])? {
+            let message = message?;
+            let Some(expected_seq) = expected_seqs.next() else {
+                break;
+            };
+            cb_run(message, expected_seq, portid)?;
+        }
+    }
+    Ok(())
+}
+
+fn build_init_batch(dest: u16, priority: i32, mark: u32, initial_ports: &[u16]) -> FinalizedBatch {
+    let table = Table::new(TABLE_NAME, ProtoFamily::Inet);
+    let mut chain = Chain::new(PREROUTING, &table);
+    chain.set_hook(Hook::PreRouting, priority);
+    chain.set_type(ChainType::Filter);
+    chain.set_policy(Policy::Accept);
+
+    let mut set: Set<u16> = Set::new_named(SET_NAME, 1, &table, ProtoFamily::Inet);
+    for &port in initial_ports {
+        set.add(&port);
+    }
+
+    let mut batch = Batch::new();
+    batch.add(&table, MsgType::Add);
+    batch.add(&set, MsgType::Add);
+    batch.add_iter(set.elems_iter(), MsgType::Add);
+    batch.add(&chain, MsgType::Add);
+
+    let mut rule = Rule::new(&chain);
+    rule.add_expr(&Meta::L4Proto);
+    rule.add_expr(&nftnl::expr::Cmp::new(CmpOp::Eq, 6u8));
+    rule.add_expr(&nft_expr!(payload tcp dport));
+    rule.add_expr(&Lookup::new(&set));
+    rule.add_expr(&Immediate::new(dest.to_be(), Register::Reg1));
+    rule.add_expr(&nft_expr!(tproxy port Register::Reg1));
+    rule.add_expr(&Immediate::new(mark, Register::Reg1));
+    rule.add_expr(&Meta::Mark { set: true });
+    batch.add(&rule, MsgType::Add);
+
+    batch.finalize()
+}
+
+/// Manages a native netlink connection to nftables.
 #[allow(dead_code)]
 pub struct NetfilterSession {
     dest: u16,
@@ -59,8 +110,7 @@ pub struct NetfilterSession {
     mark: u32,
     store: Arc<ProxyStore>,
     tls_port: Option<u16>,
-    child: Option<tokio::process::Child>,
-    stdin: Option<tokio::process::ChildStdin>,
+    socket: Option<NetlinkSocket>,
 }
 
 #[allow(dead_code)]
@@ -79,147 +129,125 @@ impl NetfilterSession {
             mark,
             store,
             tls_port,
-            child: None,
-            stdin: None,
+            socket: None,
         }
     }
 
-    /// Formats an `add element` command for the port set.
-    fn add_element_cmd(port: u16) -> String {
-        format!("add element inet {TABLE_NAME} {SET_NAME} {{ {port} }}")
-    }
+    /// Initializes the netlink session and applies the initial table, chain, set, and TPROXY rule.
+    pub fn start(&mut self) -> io::Result<()> {
+        let socket = NetlinkSocket(Socket::new(Bus::Netfilter)?);
 
-    /// Formats a `delete element` command for the port set.
-    fn delete_element_cmd(port: u16) -> String {
-        format!("delete element inet {TABLE_NAME} {SET_NAME} {{ {port} }}")
-    }
+        let table = Table::new(TABLE_NAME, ProtoFamily::Inet);
+        let mut del_batch = Batch::new();
+        del_batch.add(&table, MsgType::Del);
+        let _ = send_and_process(&socket, &del_batch.finalize());
 
-    /// Formats a `flush set` command for the port set.
-    fn flush_set_cmd() -> String {
-        format!("flush set inet {TABLE_NAME} {SET_NAME}")
-    }
-
-    /// Spawns the interactive `nft -i` session and applies the initial rules and active routes.
-    pub async fn start(&mut self) -> io::Result<()> {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
-        }
-        self.stdin = None;
-
-        let mut child = tokio::process::Command::new("nft")
-            .arg("-i")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("failed to capture nft stdin"))?;
-
-        self.child = Some(child);
-        self.stdin = Some(stdin);
-
-        for cmd in build_init_commands(self.dest, self.priority, self.mark) {
-            self.send_command(&cmd).await?;
-        }
-
+        let mut initial_ports = Vec::new();
         if let Some(tls) = self.tls_port {
-            self.send_command(&Self::add_element_cmd(tls)).await?;
+            initial_ports.push(tls);
         }
-
         for port in self.store.active_tcp_ports() {
             if self.tls_port != Some(port) {
-                self.send_command(&Self::add_element_cmd(port)).await?;
+                initial_ports.push(port);
             }
         }
 
+        let finalized = build_init_batch(self.dest, self.priority, self.mark, &initial_ports);
+
+        send_and_process(&socket, &finalized)?;
+        self.socket = Some(socket);
         Ok(())
     }
 
-    /// Sends a raw command followed by a newline and flushes stdin in a single atomic write.
-    async fn send_command(&mut self, cmd: &str) -> io::Result<()> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| io::Error::other("session is not running"))?;
-
-        let mut buf = Vec::with_capacity(cmd.len() + 1);
-        buf.extend_from_slice(cmd.as_bytes());
-        buf.push(b'\n');
-
-        stdin.write_all(&buf).await?;
-        stdin.flush().await?;
-        Ok(())
-    }
-
-    /// Adds a port to the allowed ports set if valid in store and not the TLS port.
-    pub async fn add(&mut self, port: u16) -> io::Result<()> {
-        if self.tls_port == Some(port) || !self.store.is_valid_port(port) {
+    /// Adds a port to the active netfilter set.
+    pub fn add(&mut self, port: u16) -> io::Result<()> {
+        if self.tls_port == Some(port) {
             return Ok(());
         }
-        let cmd = Self::add_element_cmd(port);
-        self.send_command(&cmd).await
-    }
-
-    /// Removes a port from the allowed ports set if valid in store and not the TLS port.
-    pub async fn remove(&mut self, port: u16) -> io::Result<()> {
-        if self.tls_port == Some(port) || !self.store.is_valid_port(port) {
+        if !self.store.is_valid_port(port) {
             return Ok(());
         }
-        let cmd = Self::delete_element_cmd(port);
-        self.send_command(&cmd).await
+        let Some(socket) = &self.socket else {
+            return Err(io::Error::other("netfilter session not started"));
+        };
+
+        let table = Table::new(TABLE_NAME, ProtoFamily::Inet);
+        let mut set: Set<u16> = Set::new_named(SET_NAME, 1, &table, ProtoFamily::Inet);
+        set.add(&port);
+
+        let mut batch = Batch::new();
+        batch.add_iter(set.elems_iter(), MsgType::Add);
+        match send_and_process(socket, &batch.finalize()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.raw_os_error() == Some(libc::EEXIST) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
-    /// Flushes all entries from the allowed ports set and re-adds the TLS port.
-    pub async fn flush(&mut self) -> io::Result<()> {
-        let cmd = Self::flush_set_cmd();
-        self.send_command(&cmd).await?;
+    /// Removes a port from the active netfilter set.
+    pub fn remove(&mut self, port: u16) -> io::Result<()> {
+        if self.tls_port == Some(port) {
+            return Ok(());
+        }
+        if !self.store.is_valid_port(port) {
+            return Ok(());
+        }
+        let Some(socket) = &self.socket else {
+            return Err(io::Error::other("netfilter session not started"));
+        };
+
+        let table = Table::new(TABLE_NAME, ProtoFamily::Inet);
+        let mut set: Set<u16> = Set::new_named(SET_NAME, 1, &table, ProtoFamily::Inet);
+        set.add(&port);
+
+        let mut batch = Batch::new();
+        batch.add_iter(set.elems_iter(), MsgType::Del);
+        match send_and_process(socket, &batch.finalize()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Flushes all active ports from the set, retaining the TLS port.
+    pub fn flush(&mut self) -> io::Result<()> {
+        let Some(socket) = &self.socket else {
+            return Err(io::Error::other("netfilter session not started"));
+        };
+
+        let table = Table::new(TABLE_NAME, ProtoFamily::Inet);
+        let mut set: Set<u16> = Set::new_named(SET_NAME, 1, &table, ProtoFamily::Inet);
+
+        let mut batch = Batch::new();
+        batch.add(&set.flush(), MsgType::Del);
+
         if let Some(tls) = self.tls_port {
-            self.send_command(&Self::add_element_cmd(tls)).await?;
+            set.add(&tls);
+            batch.add_iter(set.elems_iter(), MsgType::Add);
         }
-        Ok(())
+
+        send_and_process(socket, &batch.finalize())
     }
 
-    /// Closes the interactive session by flushing the table, sending `quit`, and awaiting process termination.
-    pub async fn close(&mut self) -> io::Result<()> {
-        if self.stdin.is_some() {
-            let _ = self
-                .send_command(&format!("flush table inet {TABLE_NAME}"))
-                .await;
-            let _ = self.send_command("quit").await;
-            drop(self.stdin.take());
+    /// Closes the netfilter session and deletes the table.
+    pub fn close(&mut self) -> io::Result<()> {
+        if let Some(socket) = self.socket.take() {
+            let table = Table::new(TABLE_NAME, ProtoFamily::Inet);
+            let mut batch = Batch::new();
+            batch.add(&table, MsgType::Del);
+            let _ = send_and_process(&socket, &batch.finalize());
         }
-
-        if let Some(mut child) = self.child.take() {
-            child.wait().await?;
-        }
-
         Ok(())
     }
 }
 
 impl Drop for NetfilterSession {
     fn drop(&mut self) {
-        if let Some(stdin) = self.stdin.take() {
-            use std::os::fd::AsRawFd;
-            let cmd = format!("flush table inet {TABLE_NAME}\nquit\n");
-            unsafe {
-                libc::write(
-                    stdin.as_raw_fd(),
-                    cmd.as_ptr() as *const libc::c_void,
-                    cmd.len(),
-                );
-            }
-            drop(stdin);
-        }
-
-        if let Some(pid) = self.child.take().and_then(|c| c.id()) {
-            let mut status = 0;
-            unsafe {
-                libc::waitpid(pid as libc::pid_t, &mut status, 0);
-            }
+        if let Some(socket) = self.socket.take() {
+            let table = Table::new(TABLE_NAME, ProtoFamily::Inet);
+            let mut batch = Batch::new();
+            batch.add(&table, MsgType::Del);
+            let _ = send_and_process(&socket, &batch.finalize());
         }
     }
 }
@@ -234,29 +262,29 @@ pub async fn spawn_worker(
     mut rx: tokio::sync::mpsc::Receiver<NetfilterOp>,
 ) -> io::Result<tokio::task::JoinHandle<()>> {
     let mut session = NetfilterSession::new(dest, priority, mark, store, tls_port);
-    session.start().await?;
+    session.start()?;
 
     Ok(tokio::spawn(async move {
         while let Some(op) = rx.recv().await {
             match op {
                 NetfilterOp::Add(port) => {
-                    if let Err(e) = session.add(port).await {
+                    if let Err(e) = session.add(port) {
                         warn!("failed to add port {port} to netfilter: {e}");
                     }
                 }
                 NetfilterOp::Remove(port) => {
-                    if let Err(e) = session.remove(port).await {
+                    if let Err(e) = session.remove(port) {
                         warn!("failed to remove port {port} from netfilter: {e}");
                     }
                 }
                 NetfilterOp::Flush => {
-                    if let Err(e) = session.flush().await {
-                        warn!("failed to flush netfilter: {e}");
+                    if let Err(e) = session.flush() {
+                        warn!("failed to flush netfilter active ports: {e}");
                     }
                 }
             }
         }
-        let _ = session.close().await;
+        let _ = session.close();
     }))
 }
 
@@ -265,21 +293,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_init_commands() {
-        let cmds = build_init_commands(100, -150, 0x0a17c4ad);
-
-        assert_eq!(cmds.len(), 5);
-        assert_eq!(cmds[0], "add table inet fluct");
-        assert_eq!(cmds[1], "flush table inet fluct");
-        assert_eq!(cmds[2], "add set inet fluct active { type inet_service; }");
-        assert_eq!(
-            cmds[3],
-            "add chain inet fluct prerouting { type filter hook prerouting priority -150; policy accept; }"
-        );
-        assert_eq!(
-            cmds[4],
-            "add rule inet fluct prerouting tcp dport @active tproxy to :100 meta mark set 0x0a17c4ad"
-        );
+    fn test_build_init_batch() {
+        let batch = build_init_batch(100, -150, 0x0a17c4ad, &[20005]);
+        assert!(!batch.sequence_numbers().is_empty());
     }
 
     #[test]
@@ -291,61 +307,32 @@ mod tests {
         assert_eq!(session.priority, -150);
         assert_eq!(session.mark, 0x0a17c4ad);
         assert_eq!(session.tls_port, Some(4433));
-        assert!(session.stdin.is_none());
-        assert!(session.child.is_none());
+        assert!(session.socket.is_none());
     }
 
     #[test]
-    fn test_session_element_cmds() {
-        assert_eq!(
-            NetfilterSession::add_element_cmd(1337),
-            "add element inet fluct active { 1337 }"
-        );
-        assert_eq!(
-            NetfilterSession::add_element_cmd(8080),
-            "add element inet fluct active { 8080 }"
-        );
-        assert_eq!(
-            NetfilterSession::delete_element_cmd(1337),
-            "delete element inet fluct active { 1337 }"
-        );
-        assert_eq!(
-            NetfilterSession::delete_element_cmd(8080),
-            "delete element inet fluct active { 8080 }"
-        );
-        assert_eq!(
-            NetfilterSession::flush_set_cmd(),
-            "flush set inet fluct active"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_session_add_remove_validation() {
+    fn test_session_add_remove_validation() {
         use crate::config::PortRange;
 
         let store = Arc::new(ProxyStore::new(vec![PortRange(20000..=30000)]));
         let mut session = NetfilterSession::new(100, -150, 0x0a17c4ad, store, Some(4433));
 
-        // TLS port is forbidden: returns Ok(()) without sending to stdin
-        assert!(session.add(4433).await.is_ok());
-        assert!(session.remove(4433).await.is_ok());
+        assert!(session.add(4433).is_ok());
+        assert!(session.remove(4433).is_ok());
 
-        // Out-of-range port is rejected: returns Ok(()) without sending to stdin
-        assert!(session.add(10005).await.is_ok());
-        assert!(session.remove(10005).await.is_ok());
+        assert!(session.add(10005).is_ok());
+        assert!(session.remove(10005).is_ok());
 
-        // Valid in-range port attempts to send, which errors because session isn't running
-        assert!(session.add(20005).await.is_err());
-        assert!(session.remove(20005).await.is_err());
+        assert!(session.add(20005).is_err());
+        assert!(session.remove(20005).is_err());
     }
 
-    #[tokio::test]
-    async fn test_session_flush_unstarted() {
+    #[test]
+    fn test_session_flush_unstarted() {
         let store = Arc::new(ProxyStore::new(vec![]));
         let mut session = NetfilterSession::new(100, -150, 0x0a17c4ad, store, Some(4433));
 
-        // Flush on an unstarted session attempts to write and errors
-        assert!(session.flush().await.is_err());
+        assert!(session.flush().is_err());
     }
 
     #[test]
