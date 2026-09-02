@@ -241,6 +241,11 @@ pub async fn reconcile_failure(
         .as_ref()
         .map(|s| s.resources.clone())
         .unwrap_or_default();
+    let children = instance
+        .status
+        .as_ref()
+        .map(|s| s.children.clone())
+        .unwrap_or_default();
 
     let (reason, message) = match err {
         Error::TemplateNotFound(tmpl) => (
@@ -280,7 +285,7 @@ pub async fn reconcile_failure(
             restarted_at,
             conditions: vec![ready_condition],
             resources,
-            ..Default::default()
+            children,
         }
     });
 

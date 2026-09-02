@@ -369,7 +369,8 @@ mod tests {
             "current generation must be patched"
         );
         assert!(
-            log.iter().any(|s| s.contains("DELETE") && s.contains("chal-1-web-OLDHASH")),
+            log.iter()
+                .any(|s| s.contains("DELETE") && s.contains("chal-1-web-OLDHASH")),
             "stale child must be pruned by name"
         );
     }
@@ -397,6 +398,90 @@ mod tests {
         assert!(
             !log.iter().any(|s| s.contains("DELETE")),
             "pruning must be skipped on generation one"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_planner_prunes_cached_orphan_not_in_status() {
+        use k8s_openapi::api::apps::v1::ReplicaSet;
+        use kube::runtime::watcher::Event;
+
+        let (client, log) = recording_kube_client();
+        let (_store, ctx) = dummy_context();
+
+        let mut zombie_rs = ReplicaSet::default();
+        zombie_rs.metadata.name = Some("chal-1-web-ZOMBIE".to_string());
+        zombie_rs.metadata.namespace = Some("default".to_string());
+        zombie_rs.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL.to_string() => "default".to_string(),
+            crate::utils::labels::INSTANCE_LABEL.to_string() => "chal-1".to_string(),
+            crate::utils::labels::RESOURCE_LABEL.to_string() => "web".to_string(),
+        });
+        ctx.caches.replica_sets.handle(&Event::Apply(zombie_rs));
+
+        let instance = dummy_instance("chal-1", None);
+        let template = dummy_resolved_template(1);
+
+        let api = Api::namespaced(client, "default");
+        apply_planner::<ReplicaSetPlanner>(api, &instance, &template, &ctx)
+            .await
+            .expect("apply succeeds");
+
+        let log = log.lock().unwrap();
+        assert!(
+            log.iter()
+                .any(|s| s.contains("DELETE") && s.contains("chal-1-web-ZOMBIE")),
+            "cached orphan missing from status must be pruned"
+        );
+        assert!(
+            !log.iter()
+                .any(|s| s.contains("DELETE") && !s.contains("chal-1-web-ZOMBIE")),
+            "desired child must never be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_planner_steady_state_skips_pruning() {
+        use k8s_openapi::api::apps::v1::ReplicaSet;
+        use kube::runtime::watcher::Event;
+
+        let (client, log) = recording_kube_client();
+        let (_store, ctx) = dummy_context();
+
+        let instance = dummy_instance("chal-1", None);
+        let template = dummy_resolved_template(1);
+
+        let desired = ReplicaSetPlanner::plan(&instance, &template, &ctx).unwrap();
+        let desired_name = desired[0].metadata.name.clone().unwrap();
+
+        let mut synced_instance = instance.clone();
+        synced_instance.status = Some(k8s_common::crd::CTFInstanceStatus {
+            children: std::collections::BTreeMap::from([(
+                "ReplicaSet".to_string(),
+                vec![desired_name.clone()],
+            )]),
+            ..Default::default()
+        });
+
+        let mut rs = ReplicaSet::default();
+        rs.metadata.name = Some(desired_name.clone());
+        rs.metadata.namespace = Some("default".to_string());
+        rs.metadata.labels = Some(crate::btreemap! {
+            crate::utils::labels::NAMESPACE_LABEL.to_string() => "default".to_string(),
+            crate::utils::labels::INSTANCE_LABEL.to_string() => "chal-1".to_string(),
+            crate::utils::labels::RESOURCE_LABEL.to_string() => "web".to_string(),
+        });
+        ctx.caches.replica_sets.handle(&Event::Apply(rs));
+
+        let api = Api::namespaced(client, "default");
+        apply_planner::<ReplicaSetPlanner>(api, &synced_instance, &template, &ctx)
+            .await
+            .expect("apply succeeds");
+
+        let log = log.lock().unwrap();
+        assert!(
+            !log.iter().any(|s| s.contains("DELETE")),
+            "steady state must not issue any delete calls"
         );
     }
 
