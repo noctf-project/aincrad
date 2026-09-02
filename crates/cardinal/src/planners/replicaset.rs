@@ -67,8 +67,10 @@ impl Planner for ReplicaSetPlanner {
 
         let mut context_map = BTreeMap::new();
         let services = get_services_map(template, instance_name);
+        let config = ctx.to_config();
         context_map.insert("params".to_string(), &template.params_map);
         context_map.insert("services".to_string(), &services);
+        context_map.insert("config".to_string(), &config);
 
         let mut desired = Vec::new();
 

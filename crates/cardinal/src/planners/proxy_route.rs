@@ -13,7 +13,7 @@ use k8s_openapi::jiff::Timestamp;
 use crate::{
     Context, Error, btreemap,
     cache::{ResourceKey, ResourceProjection},
-    planners::Planner,
+    planners::{Planner, get_services_map},
     reconcilers::template::ResolvedTemplate,
     routing::{PortCandidate, PortError, RouteError, derive_hostname, format_tls_host},
     utils::naming::resource_name,
@@ -68,7 +68,6 @@ async fn apply_tcp_route(
                             ))
                             .into());
                         }
-                        port_map.bind(port, ResourceKey::new("unknown", "collision", ""));
                         attempts += 1;
                         if attempts >= max_attempts {
                             return Err(RouteError::Port(PortError::Exhausted).into());
@@ -113,7 +112,11 @@ impl Planner for ProxyRoutePlanner {
         let mut routes = Vec::new();
 
         let mut context_map = BTreeMap::new();
+        let services = get_services_map(template, instance_name);
+        let config = ctx.to_config();
         context_map.insert("params".to_string(), &template.params_map);
+        context_map.insert("services".to_string(), &services);
+        context_map.insert("config".to_string(), &config);
 
         for route_tmpl in &template.spec.routes {
             let route_override = instance

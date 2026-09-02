@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use kube::Client;
 
+use crate::btreemap;
 use crate::cache::Caches;
 use crate::routing::PortMap;
 
@@ -18,6 +19,15 @@ pub struct Context {
     pub system_namespace: String,
     pub cluster_domain: String,
     pub image_aliases: BTreeMap<String, String>,
+}
+
+impl Context {
+    pub fn to_config(&self) -> BTreeMap<String, String> {
+        btreemap! {
+            "hostname_suffix" => self.hostname_suffix.to_string(),
+            "cluster_domain" => self.cluster_domain.to_string(),
+        }
+    }
 }
 
 #[cfg(test)]

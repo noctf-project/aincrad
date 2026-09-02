@@ -206,20 +206,14 @@ fn proxy_route_owner(
 fn handle_proxy_route_port_map_event(
     event: &Event<CTFProxyRoute>,
     port_map: &PortMap,
-    managed_namespace: Option<&str>,
+    _managed_namespace: Option<&str>,
 ) {
     match event {
         Event::Apply(route) | Event::InitApply(route) => {
-            if let Some(key) = proxy_route_key(route)
-                && let Ok(ProxyRouteKey::Tcp(port)) = route.route_key()
-            {
-                if let Some(ns) = managed_namespace {
-                    if key.namespace == ns {
-                        port_map.bind(port, key);
-                    }
-                } else {
-                    port_map.bind(port, key);
-                }
+            if let Ok(ProxyRouteKey::Tcp(port)) = route.route_key() {
+                // Static or unlabeled routes occupy a port without an instance owner.
+                let key = proxy_route_key(route).unwrap_or_else(|| ResourceKey::new("", "", ""));
+                port_map.bind(port, key);
             }
         }
         Event::Delete(route) => {
@@ -1017,5 +1011,36 @@ mod tests {
             unlocked.is_ok(),
             "instance processing must resume once route allocator finishes"
         );
+    }
+
+    #[tokio::test]
+    async fn test_handle_proxy_route_port_map_event_binds_unlabeled_static_route() {
+        let (_store, ctx) = dummy_context();
+        let port_map = ctx.port_map.as_ref().unwrap();
+
+        let unlabeled_route = CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("p30005".to_string()),
+                namespace: Some("aincrad-system".to_string()),
+                labels: None,
+                ..Default::default()
+            },
+            spec: k8s_common::crd::CTFProxyRouteSpec {
+                backend: "static-service.default.svc.cluster.local:80".to_string(),
+                policy: Default::default(),
+            },
+        };
+
+        handle_proxy_route_port_map_event(&Event::Apply(unlabeled_route), port_map, None);
+
+        let key = port_map.get_key(30005);
+        assert!(
+            key.is_some(),
+            "unlabeled TCP route must be bound in port map"
+        );
+        let key = key.unwrap();
+        assert_eq!(key.namespace, "");
+        assert_eq!(key.instance, "");
+        assert_eq!(key.resource, "");
     }
 }
