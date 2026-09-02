@@ -52,21 +52,23 @@ pub async fn apply_planner<P: Planner>(
 
     P::apply(&api, desired, ctx).await?;
 
-    let prune_lp = ListParams::default().labels(&format!(
-        "{NAMESPACE_LABEL}={instance_ns},{INSTANCE_LABEL}={instance_name},{INSTANCE_GENERATION_LABEL}!={current_gen}"
-    ));
-    match api
-        .delete_collection(&DeleteParams::default(), &prune_lp)
-        .await
-    {
-        Ok(_) => {}
-        Err(kube::Error::Api(ref api_err)) if api_err.code == 404 => {}
-        Err(e) => {
-            return Err(Error::ApplyResource {
-                kind: P::KIND,
-                name: format!("{instance_name} (prune)"),
-                source: Box::new(e),
-            });
+    if current_gen > 1 {
+        let prune_lp = ListParams::default().labels(&format!(
+            "{NAMESPACE_LABEL}={instance_ns},{INSTANCE_LABEL}={instance_name},{INSTANCE_GENERATION_LABEL}!={current_gen}"
+        ));
+        match api
+            .delete_collection(&DeleteParams::default(), &prune_lp)
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(ref api_err)) if api_err.code == 404 => {}
+            Err(e) => {
+                return Err(Error::ApplyResource {
+                    kind: P::KIND,
+                    name: format!("{instance_name} (prune)"),
+                    source: Box::new(e),
+                });
+            }
         }
     }
 
@@ -332,6 +334,32 @@ mod tests {
                 && s.contains("aincrad.noctf.dev%2Finstance%3Dchal-1")
                 && s.contains("aincrad.noctf.dev%2Finstance-generation%21%3D2")),
             "stale generations must be pruned with label selector"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_planner_skips_prune_on_generation_one() {
+        let (client, log) = recording_kube_client();
+        let (_store, ctx) = dummy_context();
+
+        let mut instance = dummy_instance("chal-1", None);
+        instance.metadata.generation = Some(1);
+        let template = dummy_resolved_template(1);
+
+        let api = Api::namespaced(client, "default");
+        apply_planner::<ReplicaSetPlanner>(api, &instance, &template, &ctx)
+            .await
+            .expect("apply succeeds");
+
+        let log = log.lock().unwrap();
+        assert!(
+            log.iter()
+                .any(|s| s.contains("PATCH") && s.contains("chal-1-web")),
+            "current generation must be patched"
+        );
+        assert!(
+            !log.iter().any(|s| s.contains("DELETE")),
+            "pruning must be skipped on generation one"
         );
     }
 

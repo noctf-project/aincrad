@@ -152,6 +152,26 @@ pub async fn commit(
         );
     }
 
+    if let Some(existing) = instance.status.as_ref() {
+        // Preserve last_transition_time for unchanged conditions
+        for condition in &mut status.conditions {
+            if let Some(old) = existing
+                .conditions
+                .iter()
+                .find(|c| c.type_ == condition.type_)
+                && old.status == condition.status
+                && old.reason == condition.reason
+                && old.message == condition.message
+            {
+                condition.last_transition_time = old.last_transition_time.clone();
+            }
+        }
+
+        if existing == &status {
+            return Ok(());
+        }
+    }
+
     let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
     instances
         .patch_status(
@@ -271,6 +291,62 @@ mod tests {
         let evaluation = evaluate_status(&instance, &ctx).unwrap();
         let res = commit(&instance, &evaluation, &ctx).await;
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_commit_skips_patch_when_status_unchanged() {
+        use crate::test_utils::tests::recording_kube_client;
+
+        let (client, log) = recording_kube_client();
+        let (_store, ctx) = crate::test_utils::tests::dummy_ctx(client, vec![]);
+        let mut instance = dummy_instance("chal-1", None);
+        instance.metadata.generation = Some(1);
+
+        let evaluation = evaluate_status(&instance, &ctx).unwrap();
+        commit(&instance, &evaluation, &ctx).await.unwrap();
+
+        let patch_count_1 = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.contains("PATCH"))
+            .count();
+        assert_eq!(patch_count_1, 1, "first commit must issue a status patch");
+
+        let mut committed_status = CTFInstanceStatus {
+            observed_generation: instance.metadata.generation,
+            template_generation: evaluation.template_generation,
+            restarted_at: None,
+            resources: evaluation.resources.clone(),
+            children: evaluation.children.clone(),
+            conditions: evaluation.conditions.clone(),
+        };
+        if evaluation.is_ready() {
+            apply_condition(
+                &mut committed_status,
+                Condition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    reason: "Reconciled".to_string(),
+                    message: "CTFInstance reconciled successfully".to_string(),
+                    last_transition_time: evaluation.conditions[0].last_transition_time.clone(),
+                    observed_generation: instance.metadata.generation,
+                },
+            );
+        }
+        instance.status = Some(committed_status);
+
+        commit(&instance, &evaluation, &ctx).await.unwrap();
+        let patch_count_2 = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.contains("PATCH"))
+            .count();
+        assert_eq!(
+            patch_count_2, 1,
+            "unchanged status must not issue a redundant patch"
+        );
     }
 
     #[tokio::test]
