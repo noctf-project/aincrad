@@ -49,9 +49,9 @@ pub trait Planner {
         api: &kube::Api<Self::Resource>,
         desired: Vec<Self::Resource>,
         _ctx: &Context,
-    ) -> Result<(), Error> {
-        crate::reconcilers::helper::sync_resources(api, Self::KIND, desired).await?;
-        Ok(())
+    ) -> Result<Vec<Self::Resource>, Error> {
+        crate::reconcilers::helper::sync_resources(api, Self::KIND, desired.clone()).await?;
+        Ok(desired)
     }
 
     /// Returns the cache tracking this resource type, if tracked in memory.

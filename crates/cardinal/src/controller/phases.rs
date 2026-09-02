@@ -59,8 +59,41 @@ pub async fn run(instance: &CTFInstance, ctx: &Context) -> Result<Action, Error>
         Step::Finish(action) => return Ok(action),
     };
 
-    apply::reconcile(&flow, &prepared).await?;
-    let evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
+    let children = apply::reconcile(&flow, &prepared).await?;
+    let mut evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
+
+    evaluation.children.extend(children);
+
+    if let Some(pr_names) = evaluation
+        .children
+        .get(<crate::planners::ProxyRoutePlanner as crate::planners::Planner>::KIND)
+        && !pr_names.is_empty()
+    {
+        let endpoints = crate::planners::proxy_route::endpoints_from_children(
+            pr_names,
+            &prepared.template.spec.routes,
+            &flow.ctx.hostname_suffix,
+            flow.ctx.tls_port,
+        );
+        evaluation.resources.endpoints = Some(endpoints);
+        evaluation.conditions.retain(|c| {
+            c.type_ != <crate::planners::ProxyRoutePlanner as crate::planners::Planner>::KIND
+        });
+        evaluation
+            .conditions
+            .push(k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition {
+                type_: <crate::planners::ProxyRoutePlanner as crate::planners::Planner>::KIND
+                    .to_string(),
+                status: "True".to_string(),
+                reason: "RoutesAllocated".to_string(),
+                message: format!("All {} proxy route(s) allocated", pr_names.len()),
+                last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    k8s_openapi::jiff::Timestamp::now(),
+                ),
+                observed_generation: instance.metadata.generation,
+            });
+    }
+
     reconcilers::status::commit(instance, &evaluation, ctx).await?;
 
     Ok(completed_action(&flow))
@@ -213,43 +246,66 @@ pub mod prepare {
 pub mod apply {
     use super::*;
     use crate::planners::{
-        NetworkPolicyPlanner, ProxyRoutePlanner, ReplicaSetPlanner, ServicePlanner,
+        NetworkPolicyPlanner, Planner, ProxyRoutePlanner, ReplicaSetPlanner, ServicePlanner,
     };
     use crate::reconcilers::helper::apply_planner;
+    use std::collections::BTreeMap;
 
-    pub async fn reconcile(flow: &Flow<'_>, prepared: &Prepared) -> Result<(), Error> {
-        let instance = flow.instance;
-        let template = &prepared.template;
-        let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+    async fn apply_and_record<P: Planner>(
+        api: Api<P::Resource>,
+        flow: &Flow<'_>,
+        prepared: &Prepared,
+        children: &mut BTreeMap<String, Vec<String>>,
+    ) -> Result<Vec<P::Resource>, Error> {
+        let applied = apply_planner::<P>(api, flow.instance, &prepared.template, flow.ctx).await?;
+        let names = applied
+            .iter()
+            .filter_map(|r| kube::Resource::meta(r).name.clone())
+            .collect();
+        children.insert(P::KIND.to_string(), names);
+        Ok(applied)
+    }
 
-        apply_planner::<ReplicaSetPlanner>(
+    pub async fn reconcile(
+        flow: &Flow<'_>,
+        prepared: &Prepared,
+    ) -> Result<BTreeMap<String, Vec<String>>, Error> {
+        let ns = flow
+            .instance
+            .metadata
+            .namespace
+            .as_deref()
+            .unwrap_or("default");
+        let mut children = BTreeMap::new();
+
+        apply_and_record::<ReplicaSetPlanner>(
             Api::namespaced(flow.ctx.client.clone(), ns),
-            instance,
-            template,
-            flow.ctx,
+            flow,
+            prepared,
+            &mut children,
         )
         .await?;
-        apply_planner::<ServicePlanner>(
+        apply_and_record::<ServicePlanner>(
             Api::namespaced(flow.ctx.client.clone(), ns),
-            instance,
-            template,
-            flow.ctx,
+            flow,
+            prepared,
+            &mut children,
         )
         .await?;
-        apply_planner::<NetworkPolicyPlanner>(
+        apply_and_record::<NetworkPolicyPlanner>(
             Api::namespaced(flow.ctx.client.clone(), ns),
-            instance,
-            template,
-            flow.ctx,
+            flow,
+            prepared,
+            &mut children,
         )
         .await?;
 
         if flow.ctx.port_map.is_some() {
             let api = Api::namespaced(flow.ctx.client.clone(), &flow.ctx.system_namespace);
-            apply_planner::<ProxyRoutePlanner>(api, instance, template, flow.ctx).await?;
+            apply_and_record::<ProxyRoutePlanner>(api, flow, prepared, &mut children).await?;
         }
 
-        Ok(())
+        Ok(children)
     }
 }
 
@@ -312,5 +368,55 @@ mod tests {
         });
         let flow = Flow::new(&instance, &ctx);
         assert_eq!(completed_action(&flow), Action::await_change());
+    }
+
+    #[tokio::test]
+    async fn test_apply_reconcile_records_all_children_uniformly() {
+        use crate::planners::Planner;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let flow = Flow::new(&instance, &ctx);
+        let prepared = Prepared {
+            template: crate::reconcilers::template::ResolvedTemplate {
+                metadata: ObjectMeta::default(),
+                spec: k8s_common::crd::CTFTemplateSpec {
+                    pods: vec![k8s_common::crd::CTFTemplateSpecPod {
+                        name: "web".to_string(),
+                        spec: k8s_openapi::api::core::v1::PodSpec::default(),
+                        replicas: 1,
+                        allow_internet: false,
+                        patch_spec: None,
+                    }],
+                    routes: vec![k8s_common::crd::RouteSpec {
+                        name: "tcp".to_string(),
+                        backend: k8s_common::crd::RouteBackend {
+                            service: "web".to_string(),
+                            port: 80,
+                        },
+                        tcp: Some(k8s_common::crd::RouteSpecTCP { port: None }),
+                        ..Default::default()
+                    }],
+                    params: Default::default(),
+                },
+                pod_patchers: Default::default(),
+                route_patchers: Default::default(),
+                params_map: Default::default(),
+            },
+        };
+
+        let children = apply::reconcile(&flow, &prepared).await.unwrap();
+
+        assert!(children.contains_key(crate::planners::ReplicaSetPlanner::KIND));
+        assert!(children.contains_key(crate::planners::ServicePlanner::KIND));
+        assert!(children.contains_key(crate::planners::NetworkPolicyPlanner::KIND));
+        assert!(children.contains_key(crate::planners::ProxyRoutePlanner::KIND));
+
+        let pr_names = children
+            .get(crate::planners::ProxyRoutePlanner::KIND)
+            .unwrap();
+        assert_eq!(pr_names.len(), 1);
+        assert!(pr_names[0].starts_with('p'));
     }
 }

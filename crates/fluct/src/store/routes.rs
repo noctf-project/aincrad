@@ -36,19 +36,39 @@ impl ProxyStore {
     }
 
     /// Inserts or updates a `CTFProxyRoute` in the in-memory store.
-    pub fn insert(&self, route: CTFProxyRoute) {
-        if let Ok(key) = route.route_key() {
-            let entry = Arc::new(route);
-            let mut inner = self.inner.write();
-            match key {
-                ProxyRouteKey::Tcp(port) => {
-                    if self.is_valid_port(port) {
-                        inner.ports[port as usize] = Some(entry);
+    /// Returns `true` if the route is new or its generation/spec changed.
+    pub fn insert(&self, route: CTFProxyRoute) -> bool {
+        let Ok(key) = route.route_key() else {
+            return false;
+        };
+        let mut inner = self.inner.write();
+        match key {
+            ProxyRouteKey::Tcp(port) => {
+                if !self.is_valid_port(port) {
+                    return false;
+                }
+                if let Some(existing) = &inner.ports[port as usize] {
+                    let gen_unchanged = existing.metadata.generation.is_some()
+                        && existing.metadata.generation == route.metadata.generation;
+                    let spec_unchanged = existing.spec == route.spec;
+                    if gen_unchanged || (existing.metadata.generation.is_none() && spec_unchanged) {
+                        return false;
                     }
                 }
-                ProxyRouteKey::Route(name) => {
-                    inner.routes.insert(name, entry);
+                inner.ports[port as usize] = Some(Arc::new(route));
+                true
+            }
+            ProxyRouteKey::Route(name) => {
+                if let Some(existing) = inner.routes.get(&name) {
+                    let gen_unchanged = existing.metadata.generation.is_some()
+                        && existing.metadata.generation == route.metadata.generation;
+                    let spec_unchanged = existing.spec == route.spec;
+                    if gen_unchanged || (existing.metadata.generation.is_none() && spec_unchanged) {
+                        return false;
+                    }
                 }
+                inner.routes.insert(name, Arc::new(route));
+                true
             }
         }
     }

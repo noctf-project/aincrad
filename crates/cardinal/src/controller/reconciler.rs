@@ -41,6 +41,14 @@ pub async fn reconcile(instance: Arc<CTFInstance>, ctx: Arc<Context>) -> Result<
 
 pub fn error_policy(instance: Arc<CTFInstance>, error: &Error, _ctx: Arc<Context>) -> Action {
     let name = instance.metadata.name.as_deref().unwrap_or("unknown");
+
+    if let Error::Kube(kube::Error::Api(status)) = error
+        && status.code == 404
+    {
+        tracing::debug!(name, "Instance already deleted from cluster");
+        return Action::await_change();
+    }
+
     error!(name, %error, "Reconciliation failed");
 
     match error {
@@ -167,7 +175,10 @@ pub fn handle_template_watcher_event(
 }
 
 /// Maps a `CTFProxyRoute` event to the `CTFInstance` it belongs to via labels.
-fn proxy_route_owner(route: &CTFProxyRoute) -> Vec<ObjectRef<CTFInstance>> {
+fn proxy_route_owner(
+    route: &CTFProxyRoute,
+    filter_ns: Option<&str>,
+) -> Vec<ObjectRef<CTFInstance>> {
     let Some(instance) = route
         .metadata
         .labels
@@ -183,6 +194,11 @@ fn proxy_route_owner(route: &CTFProxyRoute) -> Vec<ObjectRef<CTFInstance>> {
         .and_then(|l| l.get(NAMESPACE_LABEL))
         .map(String::as_str)
         .unwrap_or("default");
+    if let Some(target_ns) = filter_ns
+        && ns != target_ns
+    {
+        return Vec::new();
+    }
     vec![ObjectRef::new(instance).within(ns)]
 }
 
@@ -427,6 +443,8 @@ where
         info!("Starting CTFInstance controller across all namespaces with Template tracking");
     }
 
+    let proxy_route_ns = namespace.clone();
+
     tokio::select! {
         Ok(err_msg) = fatal_rx.recv() => {
             Err(Error::Custom(err_msg))
@@ -444,7 +462,9 @@ where
                     .map(|inst| ObjectRef::from_obj(&*inst))
                     .collect::<Vec<_>>()
             })
-            .watches_stream(proxy_route_stream, move |route| proxy_route_owner(&route))
+            .watches_stream(proxy_route_stream, move |route| {
+                proxy_route_owner(&route, proxy_route_ns.as_deref())
+            })
             .owns_stream(service_stream)
             .owns_stream(replica_set_stream)
             .run(reconcile, error_policy, context)
@@ -454,7 +474,12 @@ where
                         info!(name = %object.name, "Successfully reconciled CTFInstance");
                     }
                     Err(err) => {
-                        warn!(%err, "Controller error occurred");
+                        let err_msg = err.to_string();
+                        if err_msg.contains("not found") || err_msg.contains("NotFound") {
+                            tracing::debug!(%err, "Object deleted before reconciliation completed");
+                        } else {
+                            warn!(%err, "Controller error occurred");
+                        }
                     }
                 }
             }) => {

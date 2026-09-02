@@ -103,7 +103,6 @@ fn build_init_batch(dest: u16, priority: i32, mark: u32, initial_ports: &[u16]) 
 }
 
 /// Manages a native netlink connection to nftables.
-#[allow(dead_code)]
 pub struct NetfilterSession {
     dest: u16,
     priority: i32,
@@ -113,7 +112,6 @@ pub struct NetfilterSession {
     socket: Option<NetlinkSocket>,
 }
 
-#[allow(dead_code)]
 impl NetfilterSession {
     /// Creates a new `NetfilterSession` configuration.
     pub fn new(

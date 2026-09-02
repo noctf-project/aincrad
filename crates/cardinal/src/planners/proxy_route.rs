@@ -27,6 +27,66 @@ pub struct PlannedRoutes {
 
 pub struct ProxyRoutePlanner;
 
+/// Allocates a port and applies a single TCP route with collision retries.
+async fn apply_tcp_route(
+    api: &kube::Api<CTFProxyRoute>,
+    mut route: CTFProxyRoute,
+    port_map: &crate::routing::port_map::PortMap,
+    requested_port: u16,
+) -> Result<CTFProxyRoute, Error> {
+    let key = ResourceProjection::key(&route);
+    let max_attempts = if requested_port == 0 { 3 } else { 1 };
+    let mut attempts = 0;
+
+    loop {
+        match port_map
+            .find_free_port(&key, requested_port)
+            .map_err(RouteError::Port)?
+        {
+            PortCandidate::Bound(port) => {
+                route.metadata.name = Some(format!("p{port}"));
+                crate::reconcilers::helper::sync_resources(
+                    api,
+                    ProxyRoutePlanner::KIND,
+                    vec![route.clone()],
+                )
+                .await?;
+                return Ok(route);
+            }
+            PortCandidate::Available(port) => {
+                route.metadata.name = Some(format!("p{port}"));
+                match api.create(&kube::api::PostParams::default(), &route).await {
+                    Ok(_) => {
+                        port_map.bind(port, key);
+                        return Ok(route);
+                    }
+                    Err(kube::Error::Api(ref api_err)) if api_err.code == 409 => {
+                        if requested_port != 0 {
+                            return Err(RouteError::Port(PortError::Occupied(
+                                port,
+                                ResourceKey::new("unknown", "collision", ""),
+                            ))
+                            .into());
+                        }
+                        port_map.bind(port, ResourceKey::new("unknown", "collision", ""));
+                        attempts += 1;
+                        if attempts >= max_attempts {
+                            return Err(RouteError::Port(PortError::Exhausted).into());
+                        }
+                    }
+                    Err(e) => {
+                        return Err(Error::ApplyResource {
+                            kind: ProxyRoutePlanner::KIND,
+                            name: format!("p{port}"),
+                            source: Box::new(e),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl Planner for ProxyRoutePlanner {
     const KIND: &'static str = "CTFProxyRoute";
     type Resource = CTFProxyRoute;
@@ -117,81 +177,29 @@ impl Planner for ProxyRoutePlanner {
         api: &kube::Api<Self::Resource>,
         desired: Vec<Self::Resource>,
         ctx: &Context,
-    ) -> Result<(), Error> {
-        let port_map = ctx
-            .port_map
-            .as_deref()
-            .ok_or_else(|| Error::Custom("port map not available".to_string()))?;
+    ) -> Result<Vec<Self::Resource>, Error> {
+        let Some(port_map) = ctx.port_map.as_ref() else {
+            return Ok(Vec::new());
+        };
 
-        for mut route in desired {
-            let name = route.metadata.name.as_deref().unwrap_or_default();
-
-            if let Some(port_str) = name.strip_prefix('p') {
-                let requested_port: u16 = port_str.parse().unwrap_or(0);
-                let key = ResourceProjection::key(&route);
-
-                const MAX_OCC_ATTEMPTS: usize = 3;
-                let mut attempts = 0;
-                let max_attempts = if requested_port == 0 {
-                    MAX_OCC_ATTEMPTS
-                } else {
-                    1
-                };
-                loop {
-                    match port_map
-                        .find_free_port(&key, requested_port)
-                        .map_err(RouteError::Port)?
-                    {
-                        PortCandidate::Bound(port) => {
-                            route.metadata.name = Some(format!("p{port}"));
-                            crate::reconcilers::helper::sync_resources(
-                                api,
-                                Self::KIND,
-                                vec![route],
-                            )
-                            .await?;
-                            break;
-                        }
-                        PortCandidate::Available(port) => {
-                            route.metadata.name = Some(format!("p{port}"));
-                            match api.create(&kube::api::PostParams::default(), &route).await {
-                                Ok(_) => {
-                                    port_map.bind(port, key.clone());
-                                    break;
-                                }
-                                Err(kube::Error::Api(ref api_err)) if api_err.code == 409 => {
-                                    if requested_port != 0 {
-                                        return Err(RouteError::Port(PortError::Occupied(
-                                            port,
-                                            ResourceKey::new("unknown", "collision", ""),
-                                        ))
-                                        .into());
-                                    }
-                                    let collision_key =
-                                        ResourceKey::new("unknown", "collision", "");
-                                    port_map.bind(port, collision_key);
-                                    attempts += 1;
-                                    if attempts >= max_attempts {
-                                        return Err(RouteError::Port(PortError::Exhausted).into());
-                                    }
-                                }
-                                Err(e) => {
-                                    return Err(Error::ApplyResource {
-                                        kind: Self::KIND,
-                                        name: format!("p{port}"),
-                                        source: Box::new(e),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
+        let mut applied = Vec::with_capacity(desired.len());
+        for route in desired {
+            if let Some(port_str) = route
+                .metadata
+                .name
+                .as_deref()
+                .and_then(|n| n.strip_prefix('p'))
+            {
+                let requested = port_str.parse().unwrap_or(0);
+                applied.push(apply_tcp_route(api, route, port_map, requested).await?);
             } else {
-                crate::reconcilers::helper::sync_resources(api, Self::KIND, vec![route]).await?;
+                crate::reconcilers::helper::sync_resources(api, Self::KIND, vec![route.clone()])
+                    .await?;
+                applied.push(route);
             }
         }
 
-        Ok(())
+        Ok(applied)
     }
 
     fn check_status(
@@ -244,6 +252,23 @@ impl Planner for ProxyRoutePlanner {
         };
 
         if expected.is_empty() {
+            if !cached.is_empty() {
+                let endpoints = build_endpoints(&cached, &ctx.hostname_suffix, ctx.tls_port);
+                return Ok((
+                    Condition {
+                        type_: Self::KIND.to_string(),
+                        status: "True".to_string(),
+                        reason: "RoutesAllocated".to_string(),
+                        message: format!("All {} proxy route(s) allocated", cached.len()),
+                        last_transition_time: now,
+                        observed_generation: instance.metadata.generation,
+                    },
+                    Some(k8s_common::crd::CTFInstanceResources {
+                        endpoints: Some(endpoints),
+                    }),
+                ));
+            }
+
             return Ok((
                 Condition {
                     type_: Self::KIND.to_string(),
@@ -344,6 +369,101 @@ fn build_endpoints<'a>(
         .into_iter()
         .filter_map(|e| entry_to_endpoint(e, hostname_suffix, tls_port))
         .collect();
+    endpoints.sort_by(|a, b| (&a.name, &a.type_).cmp(&(&b.name, &b.type_)));
+    endpoints
+}
+
+/// Converts a proxy route object directly into an instance status endpoint.
+pub fn route_to_endpoint(
+    route: &CTFProxyRoute,
+    hostname_suffix: &str,
+    tls_port: u16,
+) -> Option<CTFInstanceStatusEndpoint> {
+    let name = route.metadata.name.as_deref()?;
+    let resource = route
+        .metadata
+        .labels
+        .as_ref()?
+        .get(k8s_common::labels::RESOURCE_LABEL)?;
+    if let Some(port_str) = name.strip_prefix('p') {
+        let port = port_str.parse::<u16>().ok()?;
+        if port == 0 {
+            return None;
+        }
+        Some(CTFInstanceStatusEndpoint {
+            name: resource.clone(),
+            type_: "tcp".to_string(),
+            target: EndpointTarget {
+                host: hostname_suffix.to_string(),
+                port,
+            },
+        })
+    } else if let Some(hostname) = name.strip_prefix('r') {
+        let fqdn = format_tls_host(hostname_suffix, hostname);
+        Some(CTFInstanceStatusEndpoint {
+            name: resource.clone(),
+            type_: "tls".to_string(),
+            target: EndpointTarget {
+                host: fqdn,
+                port: tls_port,
+            },
+        })
+    } else {
+        None
+    }
+}
+
+/// Builds deterministic endpoints directly from applied proxy routes.
+pub fn build_endpoints_from_routes<'a>(
+    routes: impl IntoIterator<Item = &'a CTFProxyRoute>,
+    hostname_suffix: &str,
+    tls_port: u16,
+) -> Vec<CTFInstanceStatusEndpoint> {
+    let mut endpoints: Vec<_> = routes
+        .into_iter()
+        .filter_map(|r| route_to_endpoint(r, hostname_suffix, tls_port))
+        .collect();
+    endpoints.sort_by(|a, b| (&a.name, &a.type_).cmp(&(&b.name, &b.type_)));
+    endpoints
+}
+
+/// Builds deterministic endpoints directly from applied proxy route child names and route specs.
+pub fn endpoints_from_children(
+    child_names: &[String],
+    routes: &[RouteSpec],
+    hostname_suffix: &str,
+    tls_port: u16,
+) -> Vec<CTFInstanceStatusEndpoint> {
+    let mut endpoints = Vec::new();
+    for (i, route_tmpl) in routes.iter().enumerate() {
+        let Some(name) = child_names.get(i) else {
+            continue;
+        };
+        if let Some(port_str) = name.strip_prefix('p') {
+            if let Ok(port) = port_str.parse::<u16>()
+                && port != 0
+            {
+                endpoints.push(CTFInstanceStatusEndpoint {
+                    name: route_tmpl.name.clone(),
+                    type_: "tcp".to_string(),
+                    target: EndpointTarget {
+                        host: hostname_suffix.to_string(),
+                        port,
+                    },
+                });
+            }
+        } else if let Some(hostname) = name.strip_prefix('r') {
+            let fqdn = format_tls_host(hostname_suffix, hostname);
+            endpoints.push(CTFInstanceStatusEndpoint {
+                name: route_tmpl.name.clone(),
+                type_: "tls".to_string(),
+                target: EndpointTarget {
+                    host: fqdn,
+                    port: tls_port,
+                },
+            });
+        }
+    }
     endpoints.sort_by(|a, b| (&a.name, &a.type_).cmp(&(&b.name, &b.type_)));
     endpoints
 }
@@ -996,5 +1116,49 @@ mod tests {
         let res = ProxyRoutePlanner::apply(&api, vec![planned_route], &ctx).await;
         assert!(res.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn test_endpoints_from_children() {
+        use k8s_common::crd::{RouteBackend, RouteSpecTCP, RouteSpecTLS};
+
+        let routes = vec![
+            RouteSpec {
+                name: "web".to_string(),
+                backend: RouteBackend {
+                    service: "web".to_string(),
+                    port: 80,
+                },
+                tcp: None,
+                tls: Some(RouteSpecTLS {
+                    prefix: Some("web".to_string()),
+                }),
+                ..Default::default()
+            },
+            RouteSpec {
+                name: "pwn".to_string(),
+                backend: RouteBackend {
+                    service: "pwn".to_string(),
+                    port: 1337,
+                },
+                tcp: Some(RouteSpecTCP { port: None }),
+                tls: None,
+                ..Default::default()
+            },
+        ];
+
+        let child_names = vec!["rweb-chal-abcdef".to_string(), "p21608".to_string()];
+        let endpoints = endpoints_from_children(&child_names, &routes, "domain.com", 443);
+
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints[0].name, "pwn");
+        assert_eq!(endpoints[0].type_, "tcp");
+        assert_eq!(endpoints[0].target.port, 21608);
+        assert_eq!(endpoints[0].target.host, "domain.com");
+
+        assert_eq!(endpoints[1].name, "web");
+        assert_eq!(endpoints[1].type_, "tls");
+        assert_eq!(endpoints[1].target.port, 443);
+        assert_eq!(endpoints[1].target.host, "web-chal-abcdef.domain.com");
     }
 }

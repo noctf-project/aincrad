@@ -117,7 +117,13 @@ pub async fn commit(
         && let Some(existing) = instance.status.as_ref().map(|s| &s.children)
         && !existing.is_empty()
     {
-        existing.clone()
+        let mut merged = existing.clone();
+        for (kind, names) in &evaluation.children {
+            if !names.is_empty() {
+                merged.insert(kind.clone(), names.clone());
+            }
+        }
+        merged
     } else {
         evaluation.children.clone()
     };
@@ -153,7 +159,27 @@ pub async fn commit(
     }
 
     if let Some(existing) = instance.status.as_ref() {
-        // Preserve last_transition_time for unchanged conditions
+        let conditions_unchanged = existing.conditions.len() == status.conditions.len()
+            && status.conditions.iter().all(|c| {
+                existing.conditions.iter().any(|old| {
+                    old.type_ == c.type_
+                        && old.status == c.status
+                        && old.reason == c.reason
+                        && old.message == c.message
+                })
+            });
+
+        if conditions_unchanged
+            && existing.observed_generation == status.observed_generation
+            && existing.template_generation == status.template_generation
+            && existing.restarted_at == status.restarted_at
+            && existing.resources == status.resources
+            && existing.children == status.children
+        {
+            return Ok(());
+        }
+
+        // Preserve last_transition_time for conditions that did not transition
         for condition in &mut status.conditions {
             if let Some(old) = existing
                 .conditions
@@ -165,10 +191,6 @@ pub async fn commit(
             {
                 condition.last_transition_time = old.last_transition_time.clone();
             }
-        }
-
-        if existing == &status {
-            return Ok(());
         }
     }
 
@@ -294,49 +316,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_commit_skips_patch_when_status_unchanged() {
+    async fn test_commit_updates_endpoints_then_skips_when_unchanged() {
         use crate::test_utils::tests::recording_kube_client;
+        use k8s_common::crd::{CTFInstanceStatusEndpoint, EndpointTarget};
 
         let (client, log) = recording_kube_client();
         let (_store, ctx) = crate::test_utils::tests::dummy_ctx(client, vec![]);
         let mut instance = dummy_instance("chal-1", None);
         instance.metadata.generation = Some(1);
 
-        let evaluation = evaluate_status(&instance, &ctx).unwrap();
-        commit(&instance, &evaluation, &ctx).await.unwrap();
-
+        // Pass 1: initial status with no endpoints
+        let evaluation_1 = evaluate_status(&instance, &ctx).unwrap();
+        commit(&instance, &evaluation_1, &ctx).await.unwrap();
         let patch_count_1 = log
             .lock()
             .unwrap()
             .iter()
             .filter(|s| s.contains("PATCH"))
             .count();
-        assert_eq!(patch_count_1, 1, "first commit must issue a status patch");
+        assert_eq!(patch_count_1, 1, "pass 1 must issue a patch");
 
-        let mut committed_status = CTFInstanceStatus {
+        // Simulate Pass 1 committed status on instance
+        instance.status = Some(CTFInstanceStatus {
             observed_generation: instance.metadata.generation,
-            template_generation: evaluation.template_generation,
+            template_generation: evaluation_1.template_generation,
             restarted_at: None,
-            resources: evaluation.resources.clone(),
-            children: evaluation.children.clone(),
-            conditions: evaluation.conditions.clone(),
-        };
-        if evaluation.is_ready() {
-            apply_condition(
-                &mut committed_status,
-                Condition {
-                    type_: "Ready".to_string(),
-                    status: "True".to_string(),
-                    reason: "Reconciled".to_string(),
-                    message: "CTFInstance reconciled successfully".to_string(),
-                    last_transition_time: evaluation.conditions[0].last_transition_time.clone(),
-                    observed_generation: instance.metadata.generation,
-                },
-            );
-        }
-        instance.status = Some(committed_status);
+            resources: evaluation_1.resources.clone(),
+            children: evaluation_1.children.clone(),
+            conditions: evaluation_1.conditions.clone(),
+        });
 
-        commit(&instance, &evaluation, &ctx).await.unwrap();
+        // Pass 2: evaluation now discovers an endpoint
+        let mut evaluation_2 = evaluation_1.clone();
+        evaluation_2.resources.endpoints = Some(vec![CTFInstanceStatusEndpoint {
+            name: "chal".to_string(),
+            type_: "tcp".to_string(),
+            target: EndpointTarget {
+                host: "chal.domain.com".to_string(),
+                port: 30005,
+            },
+        }]);
+        evaluation_2
+            .children
+            .insert("CTFProxyRoute".to_string(), vec!["p30005".to_string()]);
+
+        commit(&instance, &evaluation_2, &ctx).await.unwrap();
         let patch_count_2 = log
             .lock()
             .unwrap()
@@ -344,8 +368,31 @@ mod tests {
             .filter(|s| s.contains("PATCH"))
             .count();
         assert_eq!(
-            patch_count_2, 1,
-            "unchanged status must not issue a redundant patch"
+            patch_count_2, 2,
+            "pass 2 must issue a patch because endpoints appeared"
+        );
+
+        // Simulate Pass 2 committed status on instance
+        instance.status = Some(CTFInstanceStatus {
+            observed_generation: instance.metadata.generation,
+            template_generation: evaluation_2.template_generation,
+            restarted_at: None,
+            resources: evaluation_2.resources.clone(),
+            children: evaluation_2.children.clone(),
+            conditions: evaluation_2.conditions.clone(),
+        });
+
+        // Pass 3: identical status evaluation
+        commit(&instance, &evaluation_2, &ctx).await.unwrap();
+        let patch_count_3 = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.contains("PATCH"))
+            .count();
+        assert_eq!(
+            patch_count_3, 2,
+            "pass 3 must skip patch because status is identical"
         );
     }
 

@@ -72,8 +72,11 @@ impl RoutesService {
             }
             Event::Apply(data) | Event::InitApply(data) => {
                 let name = data.metadata.name.clone().unwrap_or_default();
+                if !self.store.insert(data.clone()) {
+                    tracing::debug!("Skipping CTFProxyRoute {name}: generation unchanged");
+                    return;
+                }
                 info!("Applying CTFProxyRoute: {name}");
-                self.store.insert(data.clone());
                 if let (Ok(k8s_common::crd::ProxyRouteKey::Tcp(port)), Some(tx)) =
                     (data.route_key(), &self.netfilter_tx)
                 {
@@ -334,5 +337,49 @@ mod tests {
         // Init -> triggers Flush
         svc.handle_event(Event::Init);
         assert_eq!(rx.try_recv(), Ok(NetfilterOp::Flush));
+    }
+
+    #[tokio::test]
+    async fn test_routes_service_skips_unchanged_generation() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let svc = RoutesService::new(
+            create_dummy_kube_client(),
+            vec![PortRange(20000..=30000)],
+            None,
+            Some(tx),
+        );
+
+        let mut route = CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("p20005".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: CTFProxyRouteSpec {
+                backend: "10.0.0.1:80".into(),
+                policy: Default::default(),
+            },
+        };
+
+        // First apply -> triggers NetfilterOp::Add(20005)
+        svc.handle_event(Event::Apply(route.clone()));
+        assert_eq!(rx.try_recv(), Ok(NetfilterOp::Add(20005)));
+
+        // Second apply with identical generation (e.g. metadata/label/status change) -> skipped!
+        route.metadata.annotations = Some(std::collections::BTreeMap::from([(
+            "touched".to_string(),
+            "true".to_string(),
+        )]));
+        svc.handle_event(Event::Apply(route.clone()));
+        assert!(
+            rx.try_recv().is_err(),
+            "must skip netfilter Add when generation is unchanged"
+        );
+
+        // Third apply with generation bump (spec change) -> triggers NetfilterOp::Add(20005)
+        route.metadata.generation = Some(2);
+        route.spec.backend = "10.0.0.2:80".into();
+        svc.handle_event(Event::Apply(route.clone()));
+        assert_eq!(rx.try_recv(), Ok(NetfilterOp::Add(20005)));
     }
 }

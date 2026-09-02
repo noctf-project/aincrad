@@ -27,7 +27,7 @@ pub async fn apply_planner<P: Planner>(
     instance: &CTFInstance,
     template: &ResolvedTemplate,
     ctx: &Context,
-) -> Result<(), Error> {
+) -> Result<Vec<P::Resource>, Error> {
     let mut desired = P::plan(instance, template, ctx)?;
     let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let instance_ns = instance.metadata.namespace.as_deref().unwrap_or("default");
@@ -50,22 +50,56 @@ pub async fn apply_planner<P: Planner>(
         labels.insert(INSTANCE_GENERATION_LABEL.to_string(), gen_str.clone());
     }
 
-    P::apply(&api, desired, ctx).await?;
+    let applied = P::apply(&api, desired, ctx).await?;
 
-    if current_gen > 1 {
-        let prune_lp = ListParams::default().labels(&format!(
-            "{NAMESPACE_LABEL}={instance_ns},{INSTANCE_LABEL}={instance_name},{INSTANCE_GENERATION_LABEL}!={current_gen}"
-        ));
-        match api
-            .delete_collection(&DeleteParams::default(), &prune_lp)
-            .await
-        {
+    let desired_names: HashSet<String> = applied
+        .iter()
+        .filter_map(|r| r.meta().name.clone())
+        .collect();
+
+    prune_dangling_children::<P>(&api, instance, &desired_names, ctx).await?;
+
+    Ok(applied)
+}
+
+/// Prunes any child resources of kind `P::KIND` that are no longer desired.
+async fn prune_dangling_children<P: Planner>(
+    api: &Api<P::Resource>,
+    instance: &CTFInstance,
+    desired_names: &HashSet<String>,
+    ctx: &Context,
+) -> Result<(), Error> {
+    let mut dangling = HashSet::new();
+
+    if let Some(last_children) = instance
+        .status
+        .as_ref()
+        .and_then(|s| s.children.get(P::KIND))
+    {
+        for name in last_children {
+            if !desired_names.contains(name) {
+                dangling.insert(name.clone());
+            }
+        }
+    }
+
+    if let Some(cached_names) = P::cached_names(instance, ctx) {
+        for name in cached_names {
+            if !desired_names.contains(&name) {
+                dangling.insert(name);
+            }
+        }
+    }
+
+    for name in dangling {
+        info!(name = %name, kind = P::KIND, "Pruning orphaned child resource...");
+        match api.delete(&name, &Default::default()).await {
             Ok(_) => {}
             Err(kube::Error::Api(ref api_err)) if api_err.code == 404 => {}
             Err(e) => {
                 return Err(Error::ApplyResource {
                     kind: P::KIND,
-                    name: format!("{instance_name} (prune)"),
+                    name,
                     source: Box::new(e),
                 });
             }
@@ -309,12 +343,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_apply_planner_prunes_stale_generations_via_label_selector() {
+    async fn test_apply_planner_prunes_stale_child_by_name() {
         let (client, log) = recording_kube_client();
         let (_store, ctx) = dummy_context();
 
         let mut instance = dummy_instance("chal-1", None);
-        instance.metadata.generation = Some(2);
+        instance.status = Some(k8s_common::crd::CTFInstanceStatus {
+            children: std::collections::BTreeMap::from([(
+                "ReplicaSet".to_string(),
+                vec!["chal-1-web-OLDHASH".to_string()],
+            )]),
+            ..Default::default()
+        });
         let template = dummy_resolved_template(1);
 
         let api = Api::namespaced(client, "default");
@@ -329,11 +369,8 @@ mod tests {
             "current generation must be patched"
         );
         assert!(
-            log.iter().any(|s| s.contains("DELETE")
-                && s.contains("aincrad.noctf.dev%2Fnamespace%3Ddefault")
-                && s.contains("aincrad.noctf.dev%2Finstance%3Dchal-1")
-                && s.contains("aincrad.noctf.dev%2Finstance-generation%21%3D2")),
-            "stale generations must be pruned with label selector"
+            log.iter().any(|s| s.contains("DELETE") && s.contains("chal-1-web-OLDHASH")),
+            "stale child must be pruned by name"
         );
     }
 
