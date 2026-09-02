@@ -79,6 +79,9 @@ pub struct RoutePolicySpec {
     pub request_uid: bool,
     /// Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
     pub pow: Option<RouteSpecPOW>,
+    /// Optional idle timeout in seconds (clamped to cluster max-idle-timeout).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]

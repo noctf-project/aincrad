@@ -1,4 +1,4 @@
-use std::{io::Write, net::SocketAddr, sync::Arc, time::Duration};
+use std::{io::Write, net::SocketAddr, os::fd::AsRawFd, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use fluct::{Error, Session};
@@ -15,7 +15,7 @@ use crate::{
     proxy::{
         challenge::{Challenge, ChallengeSolveState},
         flag::{FlagGenerator, V1FlagGenerator},
-        get_line,
+        util::{IdleTimeoutReader, copy_bidirectional, get_line, set_tcp_keepalive},
     },
 };
 
@@ -122,25 +122,30 @@ impl Handler {
         debug!("Connecting to backend {}", backend_addr);
         let addr = self.service.resolver.resolve(backend_addr).await?;
         let mut socket = TcpStream::connect(addr).await?;
+        let _ = set_tcp_keepalive(socket.as_raw_fd());
         let (b_rx, mut b_tx) = socket.split();
-        let mut b_rx = BufReader::with_capacity(BUF_SIZE, b_rx);
         if spec.policy.flag.is_some() {
             let mut buf = Vec::<u8>::with_capacity(self.flag.len() + 1);
             writeln!(buf, "{}", self.flag)?;
             b_tx.write_all(&buf).await?;
         }
 
-        let client_to_server = async {
-            tokio::io::copy(&mut c_rx, &mut b_tx).await?;
-            b_tx.shutdown().await
+        let max_idle = self.service.config.max_idle_timeout;
+        let idle_secs = match (max_idle, spec.policy.idle_timeout) {
+            (0, t) => t.unwrap_or(0),
+            (admin_max, None) => admin_max,
+            (admin_max, Some(0)) => admin_max,
+            (admin_max, Some(t)) => t.min(admin_max),
         };
-        let server_to_client = async {
-            tokio::io::copy(&mut b_rx, &mut c_tx).await?;
-            c_tx.shutdown().await
-        };
-        let r = tokio::join!(client_to_server, server_to_client);
-        r.0.and(r.1)?;
-        Ok(())
+
+        if idle_secs == 0 {
+            copy_bidirectional(c_rx, b_tx, b_rx, c_tx).await
+        } else {
+            let idle_duration = Duration::from_secs(idle_secs as u64);
+            let c_rx = IdleTimeoutReader::new(c_rx, idle_duration);
+            let b_rx = IdleTimeoutReader::new(b_rx, idle_duration);
+            copy_bidirectional(c_rx, b_tx, b_rx, c_tx).await
+        }
     }
 }
 
@@ -171,6 +176,7 @@ mod tests {
                 tproxy_port: None,
                 netfilter_priority: -150,
                 netfilter_mark: 0x0a17c4ad,
+                max_idle_timeout: 300,
             },
             resolver: Resolver::new(1000, ResolverExpiryPolicy::default()),
             routes_service: RoutesService::new(
@@ -330,5 +336,43 @@ mod tests {
         let flag = backend_task.await.unwrap();
         assert!(flag.starts_with("CTF{"));
         assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handler_idle_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = listener.local_addr().unwrap();
+
+        let ctx = create_test_service_context();
+        let spec = CTFProxyRouteSpec {
+            policy: RoutePolicySpec {
+                idle_timeout: Some(1),
+                ..Default::default()
+            },
+            backend: backend_addr.to_string(),
+        };
+        let challenge = Arc::new(CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("p20002".into()),
+                ..Default::default()
+            },
+            spec,
+        });
+        let client_ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
+        let mut handler = Handler::new(ctx, challenge, client_ip);
+
+        let _backend_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let _ = socket.write_all(b"too late\n").await;
+        });
+
+        let (client_rx, _client_tx) = tokio::io::duplex(1024);
+        let (_server_rx, server_tx) = tokio::io::duplex(1024);
+
+        let res = handler.handle(client_rx, server_tx).await;
+        assert!(res.is_err());
+        let err_str = res.unwrap_err().to_string();
+        assert!(err_str.contains("idle timeout") || err_str.contains("timed out"));
     }
 }

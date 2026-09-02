@@ -47,6 +47,7 @@ fn accept_connection(
         route.metadata.name.as_deref().unwrap_or("unknown")
     );
     let mut handler = Handler::new(service, route, addr);
+    let _ = crate::proxy::set_tcp_keepalive(socket.as_raw_fd());
     let (rx, tx) = tokio::io::split(socket);
     tracker.spawn(async move {
         if let Err(err) = handler.handle(rx, tx).await {

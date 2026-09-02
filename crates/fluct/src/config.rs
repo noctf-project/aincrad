@@ -35,6 +35,7 @@ pub struct ServiceConfig {
     pub tproxy_port: Option<u16>,
     pub netfilter_priority: i32,
     pub netfilter_mark: u32,
+    pub max_idle_timeout: u32,
     pub tls_cert: PathBuf,
     pub tls_key: PathBuf,
     pub flag_prefix: String,
@@ -77,6 +78,10 @@ pub struct RawServiceConfig {
     #[clap(long, default_value = "0x0a17c4ad", value_parser = parse_hex_or_dec_u32)]
     pub netfilter_mark: u32,
 
+    /// Maximum allowed idle timeout in seconds
+    #[clap(long, default_value = "300")]
+    pub max_idle_timeout: u32,
+
     /// Public Key File
     #[arg(long)]
     pub tls_cert: PathBuf,
@@ -106,6 +111,7 @@ impl TryFrom<RawServiceConfig> for ServiceConfig {
             tproxy_port: raw.tproxy_port,
             netfilter_priority: raw.netfilter_priority,
             netfilter_mark: raw.netfilter_mark,
+            max_idle_timeout: raw.max_idle_timeout,
             tls_cert: raw.tls_cert,
             tls_key: raw.tls_key,
             flag_prefix: raw.flag_prefix,
@@ -332,5 +338,36 @@ mod tests {
             "0",
         ];
         assert!(parse_config_from(args_zero).is_err());
+    }
+
+    #[test]
+    fn test_service_config_max_idle_timeout() {
+        let args_default = ["fluct", "--tls-cert", "cert.pem", "--tls-key", "key.pem"];
+        let cfg = parse_config_from(args_default).unwrap();
+        assert_eq!(cfg.max_idle_timeout, 300);
+
+        let args_custom = [
+            "fluct",
+            "--tls-cert",
+            "cert.pem",
+            "--tls-key",
+            "key.pem",
+            "--max-idle-timeout",
+            "60",
+        ];
+        let cfg = parse_config_from(args_custom).unwrap();
+        assert_eq!(cfg.max_idle_timeout, 60);
+
+        let args_zero = [
+            "fluct",
+            "--tls-cert",
+            "cert.pem",
+            "--tls-key",
+            "key.pem",
+            "--max-idle-timeout",
+            "0",
+        ];
+        let cfg = parse_config_from(args_zero).unwrap();
+        assert_eq!(cfg.max_idle_timeout, 0);
     }
 }

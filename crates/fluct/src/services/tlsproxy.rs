@@ -2,6 +2,7 @@ use std::{
     fs::File,
     io::{self, BufReader},
     net::SocketAddr,
+    os::fd::AsRawFd,
     path::Path,
     sync::Arc,
 };
@@ -80,6 +81,7 @@ pub async fn run(
                 Ok(conn) => conn,
                 Err(_) => continue,
             };
+            let _ = crate::proxy::set_tcp_keepalive(stream.as_raw_fd());
             let fut = handle_connection(acceptor.clone(), service.clone(), stream, addr);
             tokio::spawn(async move {
               if let Err(err) = fut.await {
