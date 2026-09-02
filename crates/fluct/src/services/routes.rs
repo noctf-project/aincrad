@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 use crate::{
     config::{PortRange, ServiceContext},
+    netfilter::NetfilterOp,
     store::routes::ProxyStore,
 };
 
@@ -21,6 +22,7 @@ pub struct RoutesService {
     client: Client,
     store: Arc<ProxyStore>,
     system_namespace: Option<String>,
+    netfilter_tx: Option<tokio::sync::mpsc::Sender<NetfilterOp>>,
 }
 
 impl RoutesService {
@@ -28,12 +30,19 @@ impl RoutesService {
         client: Client,
         port_ranges: Vec<PortRange>,
         system_namespace: Option<String>,
+        netfilter_tx: Option<tokio::sync::mpsc::Sender<NetfilterOp>>,
     ) -> Self {
         Self {
             client,
             store: Arc::new(ProxyStore::new(port_ranges)),
             system_namespace,
+            netfilter_tx,
         }
+    }
+
+    /// Returns the underlying routes store.
+    pub fn store(&self) -> Arc<ProxyStore> {
+        self.store.clone()
     }
 
     /// Retrieves an active TCP route by listening port.
@@ -57,16 +66,29 @@ impl RoutesService {
             Event::Init => {
                 self.store.clear();
                 info!("Cleared CTFProxyRoute store on watcher init");
+                if let Some(tx) = &self.netfilter_tx {
+                    let _ = tx.try_send(NetfilterOp::Flush);
+                }
             }
             Event::Apply(data) | Event::InitApply(data) => {
                 let name = data.metadata.name.clone().unwrap_or_default();
                 info!("Applying CTFProxyRoute: {name}");
-                self.store.insert(data);
+                self.store.insert(data.clone());
+                if let (Ok(k8s_common::crd::ProxyRouteKey::Tcp(port)), Some(tx)) =
+                    (data.route_key(), &self.netfilter_tx)
+                {
+                    let _ = tx.try_send(NetfilterOp::Add(port));
+                }
             }
             Event::Delete(data) => {
                 if let Some(name) = data.metadata.name {
                     info!("Deleting CTFProxyRoute: {name}");
                     self.store.remove(&name);
+                    if let (Ok(k8s_common::crd::ProxyRouteKey::Tcp(port)), Some(tx)) =
+                        (name.parse(), &self.netfilter_tx)
+                    {
+                        let _ = tx.try_send(NetfilterOp::Remove(port));
+                    }
                 }
             }
             Event::InitDone => {}
@@ -158,6 +180,7 @@ mod tests {
         RoutesService::new(
             create_dummy_kube_client(),
             vec![PortRange(20000..=30000)],
+            None,
             None,
         )
     }
@@ -258,5 +281,58 @@ mod tests {
 
         assert_eq!(svc.get_active_ports(), vec![20005]);
         assert!(svc.get_tcp_route(20005).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_routes_service_netfilter_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let svc = RoutesService::new(
+            create_dummy_kube_client(),
+            vec![PortRange(20000..=30000)],
+            None,
+            Some(tx),
+        );
+
+        let valid_tcp = CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("p20005".into()),
+                ..Default::default()
+            },
+            spec: CTFProxyRouteSpec {
+                backend: "10.0.0.1:80".into(),
+                ..Default::default()
+            },
+        };
+
+        let named_route = CTFProxyRoute {
+            metadata: ObjectMeta {
+                name: Some("rwhoami".into()),
+                ..Default::default()
+            },
+            spec: CTFProxyRouteSpec {
+                backend: "whoami:80".into(),
+                ..Default::default()
+            },
+        };
+
+        // Apply valid TCP route -> triggers Add(20005)
+        svc.handle_event(Event::Apply(valid_tcp.clone()));
+        assert_eq!(rx.try_recv(), Ok(NetfilterOp::Add(20005)));
+
+        // Apply named route -> not a TCP port, no message sent
+        svc.handle_event(Event::Apply(named_route.clone()));
+        assert!(rx.try_recv().is_err());
+
+        // Delete valid TCP route -> triggers Remove(20005)
+        svc.handle_event(Event::Delete(valid_tcp));
+        assert_eq!(rx.try_recv(), Ok(NetfilterOp::Remove(20005)));
+
+        // Delete named route -> not a TCP port, no message sent
+        svc.handle_event(Event::Delete(named_route));
+        assert!(rx.try_recv().is_err());
+
+        // Init -> triggers Flush
+        svc.handle_event(Event::Init);
+        assert_eq!(rx.try_recv(), Ok(NetfilterOp::Flush));
     }
 }

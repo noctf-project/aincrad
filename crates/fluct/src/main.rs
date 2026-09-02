@@ -29,25 +29,39 @@ async fn main() -> Result<(), Error> {
 }
 
 pub async fn run(config: ServiceConfig) -> Result<(), Error> {
-    let _ = ring::default_provider().install_default();
+    ring::default_provider()
+        .install_default()
+        .map_err(|_| "Failed to set default crypto provider")?;
 
     let shutdown = CancellationToken::new();
 
     let kube_client = Client::try_default().await?;
 
+    let (nf_tx, nf_rx) = if config.tproxy_port.is_some() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<netfilter::NetfilterOp>(128);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
     let routes_service = RoutesService::new(
         kube_client,
         config.port_ranges.clone(),
         config.system_namespace.clone(),
+        nf_tx,
     );
 
-    let (tls_tx, tls_rx) = if let Some(port) = config.tproxy_port {
-        let mut ranges: Vec<std::ops::RangeInclusive<u16>> =
-            config.port_ranges.iter().map(|r| r.0.clone()).collect();
-        ranges.push(config.tls_port..=config.tls_port);
-
-        netfilter::configure_netfilter(port, &ranges)
-            .map_err(|e| format!("unable to configure netfilter {}", e))?;
+    let (tls_tx, tls_rx) = if let (Some(port), Some(rx)) = (config.tproxy_port, nf_rx) {
+        netfilter::spawn_worker(
+            port,
+            config.netfilter_priority,
+            config.netfilter_mark,
+            routes_service.store(),
+            Some(config.tls_port),
+            rx,
+        )
+        .await
+        .map_err(|e| format!("unable to start netfilter worker: {e}"))?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         (Some(tx), Some(rx))

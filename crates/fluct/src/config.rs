@@ -16,6 +16,15 @@ pub struct ServiceContext {
     pub shutdown: CancellationToken,
 }
 
+fn parse_hex_or_dec_u32(s: &str) -> Result<u32, String> {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).map_err(|e| format!("invalid hex u32 mark '{s}': {e}"))
+    } else {
+        s.parse::<u32>()
+            .map_err(|e| format!("invalid u32 mark '{s}': {e}"))
+    }
+}
+
 /// Public validated configuration struct
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceConfig {
@@ -24,6 +33,8 @@ pub struct ServiceConfig {
     pub port_ranges: Vec<PortRange>,
     pub system_namespace: Option<String>,
     pub tproxy_port: Option<u16>,
+    pub netfilter_priority: i32,
+    pub netfilter_mark: u32,
     pub tls_cert: PathBuf,
     pub tls_key: PathBuf,
     pub flag_prefix: String,
@@ -58,6 +69,14 @@ pub struct RawServiceConfig {
     #[arg(long, alias = "dnat-port")]
     pub tproxy_port: Option<u16>,
 
+    /// Priority for Netfilter PREROUTING chain
+    #[clap(long, default_value = "-150", allow_hyphen_values = true)]
+    pub netfilter_priority: i32,
+
+    /// Firewall mark applied to TPROXY packets
+    #[clap(long, default_value = "0x0a17c4ad", value_parser = parse_hex_or_dec_u32)]
+    pub netfilter_mark: u32,
+
     /// Public Key File
     #[arg(long)]
     pub tls_cert: PathBuf,
@@ -85,6 +104,8 @@ impl TryFrom<RawServiceConfig> for ServiceConfig {
             port_ranges,
             system_namespace: raw.system_namespace,
             tproxy_port: raw.tproxy_port,
+            netfilter_priority: raw.netfilter_priority,
+            netfilter_mark: raw.netfilter_mark,
             tls_cert: raw.tls_cert,
             tls_key: raw.tls_key,
             flag_prefix: raw.flag_prefix,
@@ -150,6 +171,17 @@ impl ServiceConfig {
                     ));
                 }
             }
+        }
+
+        if self.tproxy_port.is_some() && self.netfilter_priority >= 0 {
+            return Err(format!(
+                "netfilter-priority must be negative (< 0) for PREROUTING TPROXY redirection (got {})",
+                self.netfilter_priority
+            ));
+        }
+
+        if self.tproxy_port.is_some() && self.netfilter_mark == 0 {
+            return Err("netfilter-mark must be non-zero".to_string());
         }
 
         Ok(())
@@ -224,5 +256,81 @@ mod tests {
             "25000",
         ];
         assert!(parse_config_from(args).is_err());
+    }
+
+    #[test]
+    fn test_service_config_netfilter_priority() {
+        let args_default = ["fluct", "--tls-cert", "cert.pem", "--tls-key", "key.pem"];
+        let cfg = parse_config_from(args_default).unwrap();
+        assert_eq!(cfg.netfilter_priority, -150);
+
+        let args_custom = [
+            "fluct",
+            "--tls-cert",
+            "cert.pem",
+            "--tls-key",
+            "key.pem",
+            "--netfilter-priority",
+            "-160",
+        ];
+        let cfg = parse_config_from(args_custom).unwrap();
+        assert_eq!(cfg.netfilter_priority, -160);
+
+        let args_invalid = [
+            "fluct",
+            "--tls-cert",
+            "cert.pem",
+            "--tls-key",
+            "key.pem",
+            "--tproxy-port",
+            "100",
+            "--netfilter-priority",
+            "0",
+        ];
+        assert!(parse_config_from(args_invalid).is_err());
+    }
+
+    #[test]
+    fn test_service_config_netfilter_mark() {
+        let args_default = ["fluct", "--tls-cert", "cert.pem", "--tls-key", "key.pem"];
+        let cfg = parse_config_from(args_default).unwrap();
+        assert_eq!(cfg.netfilter_mark, 0x0a17c4ad);
+
+        let args_hex = [
+            "fluct",
+            "--tls-cert",
+            "cert.pem",
+            "--tls-key",
+            "key.pem",
+            "--netfilter-mark",
+            "0x1337",
+        ];
+        let cfg = parse_config_from(args_hex).unwrap();
+        assert_eq!(cfg.netfilter_mark, 0x1337);
+
+        let args_dec = [
+            "fluct",
+            "--tls-cert",
+            "cert.pem",
+            "--tls-key",
+            "key.pem",
+            "--netfilter-mark",
+            "4919",
+        ];
+        let cfg = parse_config_from(args_dec).unwrap();
+        assert_eq!(cfg.netfilter_mark, 4919);
+
+        let args_zero = [
+            "fluct",
+            "--tls-cert",
+            "cert.pem",
+            "--tls-key",
+            "key.pem",
+            "--tproxy-port",
+            "100",
+            "--netfilter-mark",
+            "0",
+        ];
+        assert!(parse_config_from(args_zero).is_err());
     }
 }

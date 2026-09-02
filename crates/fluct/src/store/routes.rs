@@ -29,6 +29,12 @@ impl ProxyStore {
         }
     }
 
+    /// Checks if a port is within the configured port ranges.
+    pub fn is_valid_port(&self, port: u16) -> bool {
+        port != 0
+            && (self.port_ranges.is_empty() || self.port_ranges.iter().any(|r| r.contains(port)))
+    }
+
     /// Inserts or updates a `CTFProxyRoute` in the in-memory store.
     pub fn insert(&self, route: CTFProxyRoute) {
         if let Ok(key) = route.route_key() {
@@ -36,9 +42,7 @@ impl ProxyStore {
             let mut inner = self.inner.write();
             match key {
                 ProxyRouteKey::Tcp(port) => {
-                    if self.port_ranges.is_empty()
-                        || self.port_ranges.iter().any(|r| r.contains(port))
-                    {
+                    if self.is_valid_port(port) {
                         inner.ports[port as usize] = Some(entry);
                     }
                 }
@@ -214,5 +218,25 @@ mod tests {
         assert!(store.active_tcp_ports().is_empty());
         assert!(store.get_tcp_route(20001).is_none());
         assert!(store.get_named_route("whoami").is_none());
+    }
+
+    #[test]
+    fn test_is_valid_port() {
+        let store = ProxyStore::new(vec![PortRange(20000..=29999), PortRange(30000..=32767)]);
+        assert!(store.is_valid_port(20000));
+        assert!(store.is_valid_port(25000));
+        assert!(store.is_valid_port(29999));
+        assert!(store.is_valid_port(30000));
+        assert!(store.is_valid_port(32767));
+
+        assert!(!store.is_valid_port(0));
+        assert!(!store.is_valid_port(19999));
+        assert!(!store.is_valid_port(32768));
+        assert!(!store.is_valid_port(4433));
+
+        let unconstrained = ProxyStore::new(vec![]);
+        assert!(!unconstrained.is_valid_port(0));
+        assert!(unconstrained.is_valid_port(80));
+        assert!(unconstrained.is_valid_port(4433));
     }
 }
