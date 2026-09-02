@@ -269,6 +269,10 @@ pub async fn prune_unreferenced_proxy_routes(
         .all_entries()
         .into_iter()
         .filter(|entry| {
+            // Static or system routes without a tenant namespace must not be pruned.
+            if entry.key.namespace.is_empty() {
+                return false;
+            }
             if let Some(target_ns) = managed_namespace
                 && entry.key.namespace != target_ns
             {
@@ -700,6 +704,63 @@ mod tests {
             !log.iter()
                 .any(|s| s.contains("DELETE") && s.contains("p30003")),
             "unmanaged team-b route must NOT be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_unreferenced_proxy_routes_preserves_unlabeled_static_routes() {
+        use crate::cache::ResourceCache;
+
+        let (client, log) = recording_kube_client();
+        let proxy_routes = ResourceCache::<CTFProxyRoute>::new();
+
+        let mut static_route = proxy_route("p30005", "unknown", "static");
+        static_route.metadata.labels = None;
+        proxy_routes.handle(&kube::runtime::watcher::Event::Apply(static_route));
+
+        let live: std::collections::HashSet<(String, String)> =
+            [("default".to_string(), "chal-1".to_string())]
+                .into_iter()
+                .collect();
+
+        let pruned =
+            prune_unreferenced_proxy_routes(client, "aincrad-system", &proxy_routes, &live, None)
+                .await
+                .expect("prune should succeed");
+        assert_eq!(pruned, 0, "unlabeled/static route must be preserved");
+
+        let log = log.lock().unwrap();
+        assert!(
+            !log.iter().any(|s| s.contains("DELETE")),
+            "static route must not be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_unreferenced_proxy_routes_prunes_empty_instance_with_namespace() {
+        use crate::cache::ResourceCache;
+
+        let (client, log) = recording_kube_client();
+        let proxy_routes = ResourceCache::<CTFProxyRoute>::new();
+
+        let empty_instance_route = proxy_route("p30006", "", "web");
+        proxy_routes.handle(&kube::runtime::watcher::Event::Apply(empty_instance_route));
+
+        let live: std::collections::HashSet<(String, String)> =
+            [("default".to_string(), "chal-1".to_string())]
+                .into_iter()
+                .collect();
+
+        let pruned =
+            prune_unreferenced_proxy_routes(client, "aincrad-system", &proxy_routes, &live, None)
+                .await
+                .expect("prune should succeed");
+        assert_eq!(pruned, 1, "route with namespace but empty instance must be pruned");
+
+        let log = log.lock().unwrap();
+        assert!(
+            log.iter().any(|s| s.contains("DELETE") && s.contains("p30006")),
+            "p30006 must be deleted"
         );
     }
 }
