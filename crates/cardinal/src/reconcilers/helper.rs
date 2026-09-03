@@ -1,6 +1,12 @@
 use std::collections::HashSet;
 
-use k8s_common::crd::{CTFInstance, CTFProxyRoute};
+use k8s_common::{
+    crd::{CTFInstance, CTFProxyRoute},
+    labels::{
+        INSTANCE_GENERATION_LABEL, INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE,
+        NAMESPACE_LABEL, ROUTES_FINALIZER,
+    },
+};
 use kube::{
     Api, Resource,
     api::{DeleteParams, ListParams, Patch, PatchParams},
@@ -9,14 +15,8 @@ use serde::{Serialize, de::DeserializeOwned};
 use tracing::{info, warn};
 
 use crate::{
-    Context, Error,
-    cache::ResourceCache,
-    planners::Planner,
+    Context, Error, cache::ResourceCache, planners::Planner,
     reconcilers::template::ResolvedTemplate,
-    utils::labels::{
-        INSTANCE_GENERATION_LABEL, INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE,
-        NAMESPACE_LABEL, ROUTES_FINALIZER,
-    },
 };
 
 const PRUNE_CONCURRENCY_LIMIT: usize = 16;
@@ -192,25 +192,27 @@ pub async fn remove_finalizer(client: kube::Client, instance: &CTFInstance) -> R
 /// Deletes all CTFProxyRoutes belonging to a CTFInstance using label selection
 /// and removes the routes finalizer.
 pub async fn cleanup_instance_routes(ctx: &Context, instance: &CTFInstance) -> Result<(), Error> {
-    let api: Api<CTFProxyRoute> = Api::namespaced(ctx.client.clone(), &ctx.system_namespace);
-    let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
-    let instance_ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+    if ctx.port_map.is_some() {
+        let api: Api<CTFProxyRoute> = Api::namespaced(ctx.client.clone(), &ctx.system_namespace);
+        let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
+        let instance_ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
-    let delete_lp = ListParams::default().labels(&format!(
-        "{NAMESPACE_LABEL}={instance_ns},{INSTANCE_LABEL}={instance_name}"
-    ));
-    match api
-        .delete_collection(&DeleteParams::default(), &delete_lp)
-        .await
-    {
-        Ok(_) => {}
-        Err(kube::Error::Api(ref api_err)) if api_err.code == 404 => {}
-        Err(e) => {
-            return Err(Error::ApplyResource {
-                kind: "CTFProxyRoute",
-                name: format!("{instance_name} (routes cleanup)"),
-                source: Box::new(e),
-            });
+        let delete_lp = ListParams::default().labels(&format!(
+            "{NAMESPACE_LABEL}={instance_ns},{INSTANCE_LABEL}={instance_name}"
+        ));
+        match api
+            .delete_collection(&DeleteParams::default(), &delete_lp)
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(ref api_err)) if api_err.code == 404 => {}
+            Err(e) => {
+                return Err(Error::ApplyResource {
+                    kind: "CTFProxyRoute",
+                    name: format!("{instance_name} (routes cleanup)"),
+                    source: Box::new(e),
+                });
+            }
         }
     }
 
@@ -332,6 +334,7 @@ mod tests {
         recording_kube_client,
     };
     use k8s_common::crd::CTFProxyRouteSpec;
+    use k8s_common::labels::RESOURCE_LABEL;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
     #[tokio::test]
@@ -417,9 +420,9 @@ mod tests {
         zombie_rs.metadata.name = Some("chal-1-web-ZOMBIE".to_string());
         zombie_rs.metadata.namespace = Some("default".to_string());
         zombie_rs.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL.to_string() => "default".to_string(),
-            crate::utils::labels::INSTANCE_LABEL.to_string() => "chal-1".to_string(),
-            crate::utils::labels::RESOURCE_LABEL.to_string() => "web".to_string(),
+            NAMESPACE_LABEL.to_string() => "default".to_string(),
+            INSTANCE_LABEL.to_string() => "chal-1".to_string(),
+            RESOURCE_LABEL.to_string() => "web".to_string(),
         });
         ctx.caches.replica_sets.handle(&Event::Apply(zombie_rs));
 
@@ -471,9 +474,9 @@ mod tests {
         rs.metadata.name = Some(desired_name.clone());
         rs.metadata.namespace = Some("default".to_string());
         rs.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL.to_string() => "default".to_string(),
-            crate::utils::labels::INSTANCE_LABEL.to_string() => "chal-1".to_string(),
-            crate::utils::labels::RESOURCE_LABEL.to_string() => "web".to_string(),
+            NAMESPACE_LABEL.to_string() => "default".to_string(),
+            INSTANCE_LABEL.to_string() => "chal-1".to_string(),
+            RESOURCE_LABEL.to_string() => "web".to_string(),
         });
         ctx.caches.replica_sets.handle(&Event::Apply(rs));
 
@@ -563,9 +566,9 @@ mod tests {
                 name: Some(name.to_string()),
                 namespace: Some("aincrad-system".to_string()),
                 labels: Some(crate::btreemap! {
-                    crate::utils::labels::NAMESPACE_LABEL => "default",
-                    crate::utils::labels::INSTANCE_LABEL => instance,
-                    crate::utils::labels::RESOURCE_LABEL => resource,
+                    NAMESPACE_LABEL => "default",
+                    INSTANCE_LABEL => instance,
+                    RESOURCE_LABEL => resource,
                 }),
                 ..Default::default()
             },
@@ -651,26 +654,29 @@ mod tests {
 
         // Route in team-a (managed, live)
         let mut r1 = proxy_route("p30001", "chal-1", "web");
-        r1.metadata.labels.as_mut().unwrap().insert(
-            crate::utils::labels::NAMESPACE_LABEL.to_string(),
-            "team-a".to_string(),
-        );
+        r1.metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert(NAMESPACE_LABEL.to_string(), "team-a".to_string());
         proxy_routes.handle(&kube::runtime::watcher::Event::Apply(r1));
 
         // Route in team-a (managed, orphaned)
         let mut r2 = proxy_route("p30002", "dead-chal", "pwn");
-        r2.metadata.labels.as_mut().unwrap().insert(
-            crate::utils::labels::NAMESPACE_LABEL.to_string(),
-            "team-a".to_string(),
-        );
+        r2.metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert(NAMESPACE_LABEL.to_string(), "team-a".to_string());
         proxy_routes.handle(&kube::runtime::watcher::Event::Apply(r2));
 
         // Route in team-b (unmanaged, orphaned from team-a's perspective)
         let mut r3 = proxy_route("p30003", "other-chal", "web");
-        r3.metadata.labels.as_mut().unwrap().insert(
-            crate::utils::labels::NAMESPACE_LABEL.to_string(),
-            "team-b".to_string(),
-        );
+        r3.metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert(NAMESPACE_LABEL.to_string(), "team-b".to_string());
         proxy_routes.handle(&kube::runtime::watcher::Event::Apply(r3));
 
         // Live set only knows team-a instances
@@ -755,11 +761,15 @@ mod tests {
             prune_unreferenced_proxy_routes(client, "aincrad-system", &proxy_routes, &live, None)
                 .await
                 .expect("prune should succeed");
-        assert_eq!(pruned, 1, "route with namespace but empty instance must be pruned");
+        assert_eq!(
+            pruned, 1,
+            "route with namespace but empty instance must be pruned"
+        );
 
         let log = log.lock().unwrap();
         assert!(
-            log.iter().any(|s| s.contains("DELETE") && s.contains("p30006")),
+            log.iter()
+                .any(|s| s.contains("DELETE") && s.contains("p30006")),
             "p30006 must be deleted"
         );
     }

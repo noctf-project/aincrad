@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use k8s_common::crd::{CTFInstance, CTFInstanceStatus};
+use k8s_common::{
+    crd::{CTFInstance, CTFInstanceStatus},
+    labels::RESTARTED_AT_ANNOTATION,
+};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use k8s_openapi::jiff::Timestamp;
 use kube::Api;
@@ -10,7 +13,7 @@ use crate::{
     Context, Error,
     planners::{
         NetworkPolicyPlanner, Planner, ProxyRoutePlanner, ReplicaSetPlanner, ServicePlanner,
-        apply_condition,
+        TLSRoutePlanner, apply_condition,
     },
 };
 
@@ -46,6 +49,7 @@ pub fn evaluate_status(instance: &CTFInstance, ctx: &Context) -> Result<Evaluati
     fold_planner::<NetworkPolicyPlanner>(instance, ctx, &mut evaluation)?;
     fold_planner::<ServicePlanner>(instance, ctx, &mut evaluation)?;
     fold_planner::<ProxyRoutePlanner>(instance, ctx, &mut evaluation)?;
+    fold_planner::<TLSRoutePlanner>(instance, ctx, &mut evaluation)?;
 
     Ok(evaluation)
 }
@@ -95,7 +99,7 @@ pub fn is_observed(instance: &CTFInstance) -> bool {
         .metadata
         .annotations
         .as_ref()
-        .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
+        .and_then(|a| a.get(RESTARTED_AT_ANNOTATION))
         .map(|s| s.as_str());
 
     status_restarted_at == annotation_restarted_at
@@ -135,7 +139,7 @@ pub async fn commit(
             .metadata
             .annotations
             .as_ref()
-            .and_then(|a| a.get(crate::utils::labels::RESTARTED_AT_ANNOTATION))
+            .and_then(|a| a.get(RESTARTED_AT_ANNOTATION))
             .cloned(),
         resources: evaluation.resources.clone(),
         children,
@@ -302,6 +306,8 @@ pub async fn reconcile_failure(
 
 #[cfg(test)]
 mod tests {
+    use k8s_common::labels::{INSTANCE_LABEL, NAMESPACE_LABEL, RESOURCE_LABEL};
+
     use super::*;
     use crate::{
         cache::ResourceKey,
@@ -420,9 +426,9 @@ mod tests {
         rs.metadata.name = Some("chal-1-web".to_string());
         rs.metadata.namespace = Some("default".to_string());
         rs.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL => "default",
-            crate::utils::labels::INSTANCE_LABEL => "chal-1",
-            crate::utils::labels::RESOURCE_LABEL => "web",
+            NAMESPACE_LABEL => "default",
+            INSTANCE_LABEL => "chal-1",
+            RESOURCE_LABEL => "web",
         });
         rs.status = Some(k8s_openapi::api::apps::v1::ReplicaSetStatus {
             ready_replicas: Some(1),
@@ -435,9 +441,9 @@ mod tests {
 
         let mut pr = k8s_common::crd::CTFProxyRoute::new("p30005", Default::default());
         pr.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL => "default",
-            crate::utils::labels::INSTANCE_LABEL => "chal-1",
-            crate::utils::labels::RESOURCE_LABEL => "chal",
+            NAMESPACE_LABEL => "default",
+            INSTANCE_LABEL => "chal-1",
+            RESOURCE_LABEL => "chal",
         });
         ctx.caches
             .proxy_routes
@@ -612,9 +618,9 @@ mod tests {
         rs.metadata.name = Some("chal-1-web".to_string());
         rs.metadata.namespace = Some("default".to_string());
         rs.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL => "default",
-            crate::utils::labels::INSTANCE_LABEL => "chal-1",
-            crate::utils::labels::RESOURCE_LABEL => "web",
+            NAMESPACE_LABEL => "default",
+            INSTANCE_LABEL => "chal-1",
+            RESOURCE_LABEL => "web",
         });
         rs.status = Some(ReplicaSetStatus {
             ready_replicas: Some(1),
@@ -628,9 +634,9 @@ mod tests {
         svc.metadata.name = Some("chal-1-web".to_string());
         svc.metadata.namespace = Some("default".to_string());
         svc.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL => "default",
-            crate::utils::labels::INSTANCE_LABEL => "chal-1",
-            crate::utils::labels::RESOURCE_LABEL => "web",
+            NAMESPACE_LABEL => "default",
+            INSTANCE_LABEL => "chal-1",
+            RESOURCE_LABEL => "web",
         });
         ctx.caches.services.handle(&Event::Apply(svc));
 

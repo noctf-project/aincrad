@@ -2,8 +2,8 @@ use std::{sync::Arc, time::Duration};
 
 use futures::{Stream, StreamExt};
 use k8s_common::{
-    RESOURCE_LABEL,
-    crd::{CTFInstance, CTFProxyRoute, CTFTemplate, ProxyRouteKey},
+    crd::{CTFInstance, CTFProxyRoute, CTFTemplate, ProxyRouteKey, TLSRoute},
+    labels::{INSTANCE_LABEL, NAMESPACE_LABEL, RESOURCE_LABEL},
 };
 use k8s_openapi::api::{apps::v1::ReplicaSet, core::v1::Service};
 use kube::{
@@ -24,7 +24,6 @@ use crate::{
     cli::Opts,
     reconcilers,
     routing::PortMap,
-    utils::labels::{INSTANCE_LABEL, NAMESPACE_LABEL},
 };
 
 /// Reconciles a single `CTFInstance` resource state.
@@ -310,9 +309,9 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
 /// Derives the allocator key for a proxy route from its labels.
 fn proxy_route_key(route: &CTFProxyRoute) -> Option<ResourceKey> {
     let labels = route.metadata.labels.as_ref()?;
-    let instance = labels.get(crate::utils::labels::INSTANCE_LABEL)?;
+    let instance = labels.get(INSTANCE_LABEL)?;
     let instance_ns = labels
-        .get(crate::utils::labels::NAMESPACE_LABEL)
+        .get(NAMESPACE_LABEL)
         .map(|s| s.as_str())
         .unwrap_or("default");
     let resource = labels.get(RESOURCE_LABEL)?;
@@ -333,12 +332,13 @@ where
     S: Stream<Item = Result<CTFProxyRoute, WatcherError>> + Send + 'static,
 {
     let client = &context.client;
-    let (instances, templates, services, replica_sets) = if let Some(ref ns) = namespace {
+    let (instances, templates, services, replica_sets, tls_routes) = if let Some(ref ns) = namespace {
         (
             Api::<CTFInstance>::namespaced(client.clone(), ns),
             Api::<CTFTemplate>::namespaced(client.clone(), ns),
             Api::<Service>::namespaced(client.clone(), ns),
             Api::<ReplicaSet>::namespaced(client.clone(), ns),
+            Api::<TLSRoute>::namespaced(client.clone(), ns),
         )
     } else {
         (
@@ -346,6 +346,7 @@ where
             Api::<CTFTemplate>::all(client.clone()),
             Api::<Service>::all(client.clone()),
             Api::<ReplicaSet>::all(client.clone()),
+            Api::<TLSRoute>::all(client.clone()),
         )
     };
 
@@ -373,6 +374,9 @@ where
 
     let replica_sets_cache = context.caches.replica_sets.clone();
     let replica_set_stream = replica_sets_cache.watcher_stream(replica_sets, |_| {});
+
+    let tls_routes_cache = context.caches.tls_routes.clone();
+    let tls_route_stream = tls_routes_cache.watcher_stream(tls_routes, |_| {});
 
     let proxy_route_stream = proxy_route_stream;
 
@@ -461,6 +465,7 @@ where
             })
             .owns_stream(service_stream)
             .owns_stream(replica_set_stream)
+            .owns_stream(tls_route_stream)
             .run(reconcile, error_policy, context)
             .for_each(|res| async {
                 match res {
@@ -492,6 +497,7 @@ mod tests {
     use k8s_common::crd::{
         CTFInstanceSpec, CTFInstanceStatus, RouteBackend, RouteSpec, RouteSpecTCP,
     };
+    use k8s_common::labels::{EXPIRES_AT_ANNOTATION, RESTARTED_AT_ANNOTATION, ROUTES_FINALIZER};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::WatchStreamExt;
@@ -559,10 +565,7 @@ mod tests {
         let (_store, ctx) = dummy_context();
         let future_time = Utc::now() + ChronoDuration::seconds(120);
         let mut annotations = std::collections::BTreeMap::new();
-        annotations.insert(
-            crate::utils::labels::EXPIRES_AT_ANNOTATION.to_string(),
-            future_time.to_rfc3339(),
-        );
+        annotations.insert(EXPIRES_AT_ANNOTATION.to_string(), future_time.to_rfc3339());
 
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
@@ -587,10 +590,7 @@ mod tests {
         let (_store, ctx) = dummy_context();
         let past_time = Utc::now() - ChronoDuration::seconds(60);
         let mut annotations = std::collections::BTreeMap::new();
-        annotations.insert(
-            crate::utils::labels::EXPIRES_AT_ANNOTATION.to_string(),
-            past_time.to_rfc3339(),
-        );
+        annotations.insert(EXPIRES_AT_ANNOTATION.to_string(), past_time.to_rfc3339());
 
         let instance = Arc::new(CTFInstance {
             metadata: ObjectMeta {
@@ -641,7 +641,7 @@ mod tests {
         inst.metadata.uid = Some("uid-1".to_string());
         inst.metadata.generation = Some(1);
         inst.metadata.resource_version = Some("1".to_string());
-        inst.metadata.finalizers = Some(vec![crate::utils::labels::ROUTES_FINALIZER.to_string()]);
+        inst.metadata.finalizers = Some(vec![ROUTES_FINALIZER.to_string()]);
 
         let mut dying = inst.clone();
         dying.metadata.deletion_timestamp =
@@ -768,7 +768,7 @@ mod tests {
             .annotations
             .get_or_insert_with(Default::default)
             .insert(
-                crate::utils::labels::RESTARTED_AT_ANNOTATION.to_string(),
+                RESTARTED_AT_ANNOTATION.to_string(),
                 "2026-08-29T12:00:00Z".to_string(),
             );
 
@@ -914,9 +914,9 @@ mod tests {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
                 name: Some("p30005".to_string()),
                 labels: Some(crate::btreemap! {
-                    crate::utils::labels::NAMESPACE_LABEL => "team-1",
-                    crate::utils::labels::INSTANCE_LABEL => "dead-chal",
-                    crate::utils::labels::RESOURCE_LABEL => "pwn",
+                    NAMESPACE_LABEL => "team-1",
+                    INSTANCE_LABEL => "dead-chal",
+                    RESOURCE_LABEL => "pwn",
                 }),
                 ..Default::default()
             },
@@ -950,6 +950,7 @@ mod tests {
         ctx.caches.services.mark_ready();
         ctx.caches.templates.mark_ready();
         ctx.caches.proxy_routes.mark_ready();
+        ctx.caches.tls_routes.mark_ready();
 
         let gate = ReadyGate::from_caches(&ctx.caches);
         assert!(gate.is_ready(), "gate must be ready initially");
@@ -986,9 +987,9 @@ mod tests {
                 name: Some("r30000".to_string()),
                 namespace: Some("aincrad-system".to_string()),
                 labels: Some(crate::btreemap! {
-                    crate::utils::labels::NAMESPACE_LABEL => "default",
-                    crate::utils::labels::INSTANCE_LABEL => "chal-1",
-                    crate::utils::labels::RESOURCE_LABEL => "web",
+                    NAMESPACE_LABEL => "default",
+                    INSTANCE_LABEL => "chal-1",
+                    RESOURCE_LABEL => "web",
                 }),
                 ..Default::default()
             },

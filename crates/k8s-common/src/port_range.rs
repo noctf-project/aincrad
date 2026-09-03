@@ -16,27 +16,41 @@ impl PortRange {
     }
 }
 
+/// Parses a single port (e.g. "8080") or a range (e.g. "20000-29999").
 pub fn parse_port_range(s: &str) -> Result<PortRange, String> {
-    let (start_str, end_str) = s.split_once('-').ok_or_else(|| {
-        format!("invalid port range '{s}', expected format 'MIN-MAX' (e.g. 20000-29999)")
-    })?;
+    let s = s.trim();
+    if let Some((start_str, end_str)) = s.split_once('-') {
+        let start: u16 = start_str
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid min port '{start_str}' in range '{s}'"))?;
+        let end: u16 = end_str
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid max port '{end_str}' in range '{s}'"))?;
 
-    let start: u16 = start_str
-        .trim()
-        .parse()
-        .map_err(|_| format!("invalid min port '{start_str}' in range '{s}'"))?;
-    let end: u16 = end_str
-        .trim()
-        .parse()
-        .map_err(|_| format!("invalid max port '{end_str}' in range '{s}'"))?;
+        if start > end {
+            return Err(format!(
+                "min port {start} cannot be greater than max port {end}"
+            ));
+        }
 
-    if start > end {
-        return Err(format!(
-            "min port {start} cannot be greater than max port {end}"
-        ));
+        Ok(PortRange(start..=end))
+    } else {
+        let port: u16 = s
+            .parse()
+            .map_err(|_| format!("invalid port or port range '{s}'"))?;
+        Ok(PortRange(port..=port))
     }
+}
 
-    Ok(PortRange(start..=end))
+/// Parses comma-separated port ranges (e.g. "20000-24999,26000-29999,8080").
+pub fn parse_port_ranges(s: &str) -> Result<Vec<PortRange>, String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(parse_port_range)
+        .collect()
 }
 
 #[cfg(test)]
@@ -60,11 +74,29 @@ mod tests {
         assert_eq!(range, PortRange(8080..=8080));
         assert!(range.contains(8080));
         assert!(!range.contains(8081));
+
+        let single = parse_port_range("8080").unwrap();
+        assert_eq!(single, PortRange(8080..=8080));
+        assert!(single.contains(8080));
+        assert!(!single.contains(8081));
+    }
+
+    #[test]
+    fn test_parse_port_ranges_multiple() {
+        let ranges = parse_port_ranges("1000-2000, 3000-4000, 8080").unwrap();
+        assert_eq!(
+            ranges,
+            vec![
+                PortRange(1000..=2000),
+                PortRange(3000..=4000),
+                PortRange(8080..=8080),
+            ]
+        );
     }
 
     #[test]
     fn test_parse_port_range_invalid_format() {
-        assert!(parse_port_range("20000").is_err());
+        assert!(parse_port_range("abc").is_err());
         assert!(parse_port_range("abc-def").is_err());
         assert!(parse_port_range("30000-20000").is_err());
     }

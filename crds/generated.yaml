@@ -98,52 +98,6 @@ spec:
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
-                    patchPolicy:
-                      items:
-                        type: object
-                        x-kubernetes-preserve-unknown-fields: true
-                      type: array
-                    policy:
-                      default:
-                        availableAt: null
-                        flag: null
-                        pow: null
-                        requestUid: false
-                        secret: null
-                      description: Policy applied to player traffic for the route.
-                      properties:
-                        availableAt:
-                          description: Optional UTC timestamp after which this route becomes active and accessible to players.
-                          format: date-time
-                          nullable: true
-                          type: string
-                        flag:
-                          description: Flag string or template string for the challenge route.
-                          nullable: true
-                          type: string
-                        pow:
-                          description: Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
-                          nullable: true
-                          properties:
-                            difficulty:
-                              format: uint64
-                              minimum: 0.0
-                              type: integer
-                            enableAdminBypass:
-                              default: false
-                              type: boolean
-                          required:
-                          - difficulty
-                          type: object
-                        requestUid:
-                          default: false
-                          description: Request the team's id in the TCP tunnel.
-                          type: boolean
-                        secret:
-                          description: Cryptographic secret used for Proof-of-Work verification and AES flag encryption.
-                          nullable: true
-                          type: string
-                      type: object
                     tcp:
                       description: TCP routing configuration (mutually exclusive with 'tls').
                       nullable: true
@@ -504,6 +458,12 @@ spec:
                     description: Flag string or template string for the challenge route.
                     nullable: true
                     type: string
+                  idleTimeout:
+                    description: Optional idle timeout in seconds (clamped to cluster max-idle-timeout).
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
                   pow:
                     description: Optional Proof-of-Work configuration requiring clients to solve a PoW challenge before connecting.
                     nullable: true

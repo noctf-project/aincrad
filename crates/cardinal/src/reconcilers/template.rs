@@ -1,15 +1,13 @@
 use std::collections::BTreeMap;
 
-use k8s_common::crd::{
-    CTFInstance, CTFTemplateSpec, CTFTemplateSpecPod, PatchValue, RoutePolicySpec, RouteSpec,
-};
+use k8s_common::crd::{CTFInstance, CTFTemplateSpec, CTFTemplateSpecPod, PatchValue};
 use k8s_openapi::api::core::v1::PodSpec;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use tracing::instrument;
 
 use crate::{Context, Error};
 
-pub use crate::cache::{CachedTemplateEntry, PodPatchersMap, RoutePatchersMap, TemplateCache};
+pub use crate::cache::{CachedTemplateEntry, PodPatchersMap, TemplateCache};
 
 /// Resolved CTFTemplate with merged parameter map and pre-compiled SpecPatchers for pod JSON patches.
 #[derive(Debug, Clone)]
@@ -17,7 +15,6 @@ pub struct ResolvedTemplate {
     pub metadata: ObjectMeta,
     pub spec: CTFTemplateSpec,
     pub pod_patchers: PodPatchersMap,
-    pub route_patchers: RoutePatchersMap,
     pub params_map: BTreeMap<String, String>,
 }
 
@@ -39,24 +36,6 @@ impl ResolvedTemplate {
             Ok(pod_tmpl.spec.clone())
         }
     }
-
-    /// Evaluates pre-compiled JSON patches for `route` and returns the final `RoutePolicySpec`.
-    pub fn get_patched_route_policy<V>(
-        &self,
-        route: &RouteSpec,
-        context_map: &BTreeMap<String, V>,
-    ) -> Result<RoutePolicySpec, Error>
-    where
-        V: serde::Serialize,
-    {
-        if let Some(Some(patcher)) = self.route_patchers.get(&route.name) {
-            patcher
-                .apply(&route.policy, context_map)
-                .map_err(Error::TemplateBuildError)
-        } else {
-            Ok(route.policy.clone())
-        }
-    }
 }
 
 /// Resolves the `CTFTemplate` referenced by `instance.spec.template`, applying parameter overrides,
@@ -73,14 +52,12 @@ pub async fn reconcile(instance: &CTFInstance, ctx: &Context) -> Result<Resolved
         .ok_or_else(|| Error::TemplateNotFound(template_name.clone()))?;
 
     let pod_patchers = entry.pod_patchers.map_err(Error::TemplateBuildError)?;
-    let route_patchers = entry.route_patchers.map_err(Error::TemplateBuildError)?;
     let params_map = resolve_template_params(&entry.template.spec, instance);
 
     Ok(ResolvedTemplate {
         metadata: entry.template.metadata.clone(),
         spec: entry.template.spec.clone(),
         pod_patchers,
-        route_patchers,
         params_map,
     })
 }
@@ -224,7 +201,6 @@ mod tests {
                 ..Default::default()
             },
             pod_patchers: Arc::new(pod_patchers),
-            route_patchers: Arc::new(HashMap::new()),
             params_map: params_map.clone(),
         };
 

@@ -7,18 +7,22 @@ pub struct Opts {
     #[arg(
         long,
         env = "RESERVED_PORTS",
-        default_value = "20000-29999",
-        value_parser = parse_port_range
+        default_values = ["20000-29999"],
+        value_delimiter = ',',
+        value_parser = parse_port_range,
+        action = clap::ArgAction::Append,
     )]
-    pub reserved_ports: PortRange,
+    pub reserved_ports: Vec<PortRange>,
 
     #[arg(
         long,
         env = "AUTO_PORTS",
-        default_value = "30000-32767",
-        value_parser = parse_port_range
+        default_values = ["30000-32767"],
+        value_delimiter = ',',
+        value_parser = parse_port_range,
+        action = clap::ArgAction::Append,
     )]
-    pub auto_ports: PortRange,
+    pub auto_ports: Vec<PortRange>,
 
     #[arg(long, env = "ROUTE_SEED", default_value = "link-start")]
     pub route_seed: String,
@@ -26,7 +30,7 @@ pub struct Opts {
     #[arg(long, env = "HOSTNAME_SUFFIX", default_value = "c.noctf.dev")]
     pub hostname_suffix: String,
 
-    #[arg(long, env = "TLS_PORT", default_value = "4433")]
+    #[arg(long, env = "TLS_PORT", default_value = "443")]
     pub tls_port: u16,
 
     #[arg(long, env = "SYSTEM_NAMESPACE")]
@@ -98,25 +102,33 @@ fn validate_image_alias_key(key: &str) -> Result<(), String> {
 
 impl Opts {
     pub fn validate(&self) -> Result<(), String> {
-        if self.reserved_ports.overlaps(&self.auto_ports) {
-            return Err(format!(
-                "reserved_ports ({:?}) overlaps with auto_ports ({:?})",
-                self.reserved_ports.0, self.auto_ports.0
-            ));
+        for r_res in &self.reserved_ports {
+            for r_auto in &self.auto_ports {
+                if r_res.overlaps(r_auto) {
+                    return Err(format!(
+                        "reserved_ports ({:?}) overlaps with auto_ports ({:?})",
+                        r_res.0, r_auto.0
+                    ));
+                }
+            }
         }
 
-        if self.reserved_ports.contains(self.tls_port) {
-            return Err(format!(
-                "tls_port ({}) overlaps with reserved_ports ({:?})",
-                self.tls_port, self.reserved_ports.0
-            ));
+        for r_res in &self.reserved_ports {
+            if r_res.contains(self.tls_port) {
+                return Err(format!(
+                    "tls_port ({}) overlaps with reserved_ports ({:?})",
+                    self.tls_port, r_res.0
+                ));
+            }
         }
 
-        if self.auto_ports.contains(self.tls_port) {
-            return Err(format!(
-                "tls_port ({}) overlaps with auto_ports ({:?})",
-                self.tls_port, self.auto_ports.0
-            ));
+        for r_auto in &self.auto_ports {
+            if r_auto.contains(self.tls_port) {
+                return Err(format!(
+                    "tls_port ({}) overlaps with auto_ports ({:?})",
+                    self.tls_port, r_auto.0
+                ));
+            }
         }
 
         // Duplicate image alias keys would make lookup ambiguous; reject them.
@@ -151,8 +163,8 @@ mod tests {
     #[test]
     fn test_opts_validation_success() {
         let opts = Opts {
-            reserved_ports: PortRange(20000..=29999),
-            auto_ports: PortRange(30000..=32767),
+            reserved_ports: vec![PortRange(20000..=29999)],
+            auto_ports: vec![PortRange(30000..=32767)],
             route_seed: "seed".into(),
             hostname_suffix: "c.noctf.dev".into(),
             tls_port: 4433,
@@ -165,10 +177,26 @@ mod tests {
     }
 
     #[test]
+    fn test_opts_validation_multi_range_success() {
+        let opts = Opts {
+            reserved_ports: vec![PortRange(1000..=2000), PortRange(8080..=8080)],
+            auto_ports: vec![PortRange(10000..=20000), PortRange(25000..=30000)],
+            route_seed: "seed".into(),
+            hostname_suffix: "c.noctf.dev".into(),
+            tls_port: 443,
+            system_namespace: None,
+            cluster_domain: "cluster.local".into(),
+            managed_namespaces: vec![],
+            image_aliases: None,
+        };
+        assert!(opts.validate().is_ok());
+    }
+
+    #[test]
     fn test_opts_validation_overlapping_ports() {
         let opts = Opts {
-            reserved_ports: PortRange(20000..=25000),
-            auto_ports: PortRange(24000..=30000),
+            reserved_ports: vec![PortRange(20000..=25000)],
+            auto_ports: vec![PortRange(24000..=30000)],
             route_seed: "seed".into(),
             hostname_suffix: "c.noctf.dev".into(),
             tls_port: 4433,
@@ -184,8 +212,8 @@ mod tests {
     #[test]
     fn test_opts_validation_tls_port_in_reserved() {
         let opts = Opts {
-            reserved_ports: PortRange(4000..=5000),
-            auto_ports: PortRange(30000..=32767),
+            reserved_ports: vec![PortRange(4000..=5000)],
+            auto_ports: vec![PortRange(30000..=32767)],
             route_seed: "seed".into(),
             hostname_suffix: "c.noctf.dev".into(),
             tls_port: 4433,
@@ -201,8 +229,8 @@ mod tests {
     #[test]
     fn test_opts_validation_tls_port_in_auto() {
         let opts = Opts {
-            reserved_ports: PortRange(20000..=29999),
-            auto_ports: PortRange(4000..=5000),
+            reserved_ports: vec![PortRange(20000..=29999)],
+            auto_ports: vec![PortRange(4000..=5000)],
             route_seed: "seed".into(),
             hostname_suffix: "c.noctf.dev".into(),
             tls_port: 4433,
@@ -217,8 +245,8 @@ mod tests {
 
     fn base_opts(image_aliases: Option<Vec<(String, String)>>) -> Opts {
         Opts {
-            reserved_ports: PortRange(20000..=29999),
-            auto_ports: PortRange(30000..=32767),
+            reserved_ports: vec![PortRange(20000..=29999)],
+            auto_ports: vec![PortRange(30000..=32767)],
             route_seed: "seed".into(),
             hostname_suffix: "c.noctf.dev".into(),
             tls_port: 4433,
@@ -317,5 +345,29 @@ mod tests {
     fn test_parse_no_namespaces_defaults_empty() {
         let opts = Opts::try_parse_from(["cardinal"]).unwrap();
         assert!(opts.managed_namespaces.is_empty());
+    }
+
+    #[test]
+    fn test_parse_comma_separated_port_ranges() {
+        let opts = Opts::try_parse_from([
+            "cardinal",
+            "--reserved-ports",
+            "1000-2000,3000-4000,8080",
+            "--auto-ports",
+            "10000-20000,25000-30000",
+        ])
+        .unwrap();
+        assert_eq!(
+            opts.reserved_ports,
+            vec![
+                PortRange(1000..=2000),
+                PortRange(3000..=4000),
+                PortRange(8080..=8080)
+            ]
+        );
+        assert_eq!(
+            opts.auto_ports,
+            vec![PortRange(10000..=20000), PortRange(25000..=30000)]
+        );
     }
 }

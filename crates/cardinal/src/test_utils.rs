@@ -142,7 +142,6 @@ pub mod tests {
                 params: vec![],
             },
             pod_patchers: Arc::new(std::collections::HashMap::new()),
-            route_patchers: Arc::new(std::collections::HashMap::new()),
             params_map: std::collections::BTreeMap::new(),
         }
     }
@@ -179,8 +178,8 @@ pub mod tests {
 
         let (template_store, _) = kube::runtime::reflector::store();
         let port_map = Arc::new(PortMap::new(
-            PortRange(20000..=20010),
-            PortRange(30000..=30010),
+            vec![PortRange(20000..=20010)],
+            vec![PortRange(30000..=30010)],
         ));
         let ctx = crate::Context::new_stub_with_port_map(
             client,

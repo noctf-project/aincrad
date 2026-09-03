@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use futures::{Stream, StreamExt};
-use k8s_common::crd::CTFProxyRoute;
+use k8s_common::crd::{CTFProxyRoute, TLSRoute};
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::watch;
 
 use crate::cache::ReadyCache;
-use crate::utils::labels::{INSTANCE_LABEL, NAMESPACE_LABEL, RESOURCE_LABEL};
+use k8s_common::labels::{INSTANCE_LABEL, NAMESPACE_LABEL, RESOURCE_LABEL};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResourceKey {
@@ -485,6 +485,24 @@ impl ResourceProjection for ReplicaSet {
 }
 
 impl ResourceProjection for NetworkPolicy {
+    type Value = ();
+
+    fn key(resource: &Self) -> ResourceKey {
+        meta_key(resource, RESOURCE_LABEL).0
+    }
+
+    fn name(resource: &Self) -> String {
+        meta_key(resource, RESOURCE_LABEL).1
+    }
+
+    fn meta(resource: &Self) -> ObjectMeta {
+        resource.meta().clone()
+    }
+
+    fn value(_resource: &Self) -> Self::Value {}
+}
+
+impl ResourceProjection for TLSRoute {
     type Value = ();
 
     fn key(resource: &Self) -> ResourceKey {

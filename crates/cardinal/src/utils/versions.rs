@@ -1,7 +1,5 @@
-use k8s_common::crd::CTFInstance;
+use k8s_common::{crd::CTFInstance, labels::MIN_TEMPLATE_GENERATION_ANNOTATION};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-
-use crate::utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION;
 
 /// Returns true when an instance must re-apply against its template.
 ///

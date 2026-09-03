@@ -6,9 +6,10 @@ use kube::Api;
 use kube::runtime::controller::Action;
 use tracing::info;
 
+use k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION;
+
 use crate::{
     Context, Error, reconcilers,
-    utils::labels::MIN_TEMPLATE_GENERATION_ANNOTATION,
     utils::ttl::{calculate_remaining_ttl, is_expired, parse_expires_at},
 };
 
@@ -247,6 +248,7 @@ pub mod apply {
     use super::*;
     use crate::planners::{
         NetworkPolicyPlanner, Planner, ProxyRoutePlanner, ReplicaSetPlanner, ServicePlanner,
+        TLSRoutePlanner,
     };
     use crate::reconcilers::helper::apply_planner;
     use std::collections::BTreeMap;
@@ -299,6 +301,13 @@ pub mod apply {
             &mut children,
         )
         .await?;
+        apply_and_record::<TLSRoutePlanner>(
+            Api::namespaced(flow.ctx.client.clone(), ns),
+            flow,
+            prepared,
+            &mut children,
+        )
+        .await?;
 
         if flow.ctx.port_map.is_some() {
             let api = Api::namespaced(flow.ctx.client.clone(), &flow.ctx.system_namespace);
@@ -336,6 +345,7 @@ mod tests {
     use super::*;
     use crate::test_utils::tests::{dummy_context, dummy_instance};
     use chrono::{Duration as ChronoDuration, Utc};
+    use k8s_common::labels::EXPIRES_AT_ANNOTATION;
 
     #[tokio::test]
     async fn test_completed_action_without_expiry() {
@@ -351,7 +361,7 @@ mod tests {
         let mut instance = dummy_instance("chal-1", None);
         let future_time = Utc::now() + ChronoDuration::seconds(60);
         instance.metadata.annotations = Some(crate::btreemap! {
-            crate::utils::labels::EXPIRES_AT_ANNOTATION.to_string() => future_time.to_rfc3339(),
+            EXPIRES_AT_ANNOTATION.to_string() => future_time.to_rfc3339(),
         });
         let flow = Flow::new(&instance, &ctx);
         let action = completed_action(&flow);
@@ -364,7 +374,7 @@ mod tests {
         let mut instance = dummy_instance("chal-1", None);
         let past_time = Utc::now() - ChronoDuration::seconds(60);
         instance.metadata.annotations = Some(crate::btreemap! {
-            crate::utils::labels::EXPIRES_AT_ANNOTATION.to_string() => past_time.to_rfc3339(),
+            EXPIRES_AT_ANNOTATION.to_string() => past_time.to_rfc3339(),
         });
         let flow = Flow::new(&instance, &ctx);
         assert_eq!(completed_action(&flow), Action::await_change());
@@ -401,7 +411,6 @@ mod tests {
                     params: Default::default(),
                 },
                 pod_patchers: Default::default(),
-                route_patchers: Default::default(),
                 params_map: Default::default(),
             },
         };
@@ -411,6 +420,7 @@ mod tests {
         assert!(children.contains_key(crate::planners::ReplicaSetPlanner::KIND));
         assert!(children.contains_key(crate::planners::ServicePlanner::KIND));
         assert!(children.contains_key(crate::planners::NetworkPolicyPlanner::KIND));
+        assert!(children.contains_key(crate::planners::TLSRoutePlanner::KIND));
         assert!(children.contains_key(crate::planners::ProxyRoutePlanner::KIND));
 
         let pr_names = children

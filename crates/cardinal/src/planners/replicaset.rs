@@ -3,8 +3,8 @@ use std::fmt::Write;
 use std::sync::LazyLock;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use k8s_common::RESOURCE_LABEL;
 use k8s_common::crd::{CTFInstance, CTFTemplateSpecPod};
+use k8s_common::labels::{INSTANCE_LABEL, RESOURCE_LABEL, RESTARTED_AT_ANNOTATION};
 use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetSpec};
 use k8s_openapi::api::core::v1::{PodSpec, PodTemplateSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector, ObjectMeta};
@@ -14,12 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::planners::get_services_map;
 use crate::utils::HashWriter;
 use crate::utils::naming::resource_name;
-use crate::{
-    Context, Error, btreemap,
-    planners::Planner,
-    reconcilers::template::ResolvedTemplate,
-    utils::labels::{INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, RESTARTED_AT_ANNOTATION},
-};
+use crate::{Context, Error, btreemap, planners::Planner, reconcilers::template::ResolvedTemplate};
 
 /// Default GlobSet blacklist enforced for pod JSON patches.
 pub static POD_PATCH_BLACKLIST: LazyLock<GlobSet> = LazyLock::new(|| {
@@ -34,10 +29,6 @@ pub static POD_PATCH_BLACKLIST: LazyLock<GlobSet> = LazyLock::new(|| {
     builder.add(Glob::new("/hostIPC**").expect("valid glob pattern"));
     builder.build().expect("valid globset")
 });
-
-/// Blacklist enforced for route policy JSON patches. Empty: all policy fields are author-owned.
-pub static ROUTE_POLICY_PATCH_BLACKLIST: LazyLock<GlobSet> =
-    LazyLock::new(|| GlobSetBuilder::new().build().expect("valid globset"));
 
 pub struct ReplicaSetPlanner;
 
@@ -313,12 +304,6 @@ pub fn build_replicaset_spec(
     apply_pod_defaults(&mut patched_pod_spec);
 
     let labels = btreemap! {
-        MANAGED_BY_LABEL => MANAGED_BY_VALUE,
-        INSTANCE_LABEL => instance_name,
-        RESOURCE_LABEL => pod_tmpl.name.as_str(),
-    };
-
-    let selector = btreemap! {
         INSTANCE_LABEL => instance_name,
         RESOURCE_LABEL => pod_tmpl.name.as_str(),
     };
@@ -335,7 +320,7 @@ pub fn build_replicaset_spec(
 
     let pod_template = PodTemplateSpec {
         metadata: Some(ObjectMeta {
-            labels: Some(labels),
+            labels: Some(labels.clone()),
             annotations: if annotations.is_empty() {
                 None
             } else {
@@ -349,7 +334,7 @@ pub fn build_replicaset_spec(
     ReplicaSetSpec {
         replicas: Some(replicas),
         selector: LabelSelector {
-            match_labels: Some(selector),
+            match_labels: Some(labels),
             ..Default::default()
         },
         template: Some(pod_template),
@@ -362,6 +347,7 @@ mod tests {
     use super::*;
     use crate::test_utils::tests::dummy_context;
     use crate::test_utils::tests::{dummy_instance, dummy_resolved_template};
+    use k8s_common::labels::NAMESPACE_LABEL;
     use k8s_openapi::api::core::v1::Container;
 
     #[tokio::test]
@@ -703,7 +689,6 @@ mod tests {
                 ..Default::default()
             },
             pod_patchers: Arc::new(pod_patchers),
-            route_patchers: Arc::new(std::collections::HashMap::new()),
             params_map: BTreeMap::new(),
         };
 
@@ -779,9 +764,9 @@ mod tests {
         rs.metadata.name = Some("chal-1-web".to_string());
         rs.metadata.namespace = Some("default".to_string());
         rs.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL => "default",
-            crate::utils::labels::INSTANCE_LABEL => "chal-1",
-            crate::utils::labels::RESOURCE_LABEL => "web",
+            NAMESPACE_LABEL => "default",
+            INSTANCE_LABEL => "chal-1",
+            RESOURCE_LABEL => "web",
         });
         rs.status = Some(ReplicaSetStatus {
             ready_replicas: Some(0),
@@ -820,9 +805,9 @@ mod tests {
         rs_web.metadata.name = Some("chal-1-web".to_string());
         rs_web.metadata.namespace = Some("default".to_string());
         rs_web.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL => "default",
-            crate::utils::labels::INSTANCE_LABEL => "chal-1",
-            crate::utils::labels::RESOURCE_LABEL => "web",
+            NAMESPACE_LABEL => "default",
+            INSTANCE_LABEL => "chal-1",
+            RESOURCE_LABEL => "web",
         });
         rs_web.status = Some(ReplicaSetStatus {
             ready_replicas: Some(2),
@@ -836,9 +821,9 @@ mod tests {
         rs_db.metadata.name = Some("chal-1-db".to_string());
         rs_db.metadata.namespace = Some("default".to_string());
         rs_db.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL => "default",
-            crate::utils::labels::INSTANCE_LABEL => "chal-1",
-            crate::utils::labels::RESOURCE_LABEL => "db",
+            NAMESPACE_LABEL => "default",
+            INSTANCE_LABEL => "chal-1",
+            RESOURCE_LABEL => "db",
         });
         rs_db.status = Some(ReplicaSetStatus {
             ready_replicas: Some(0),
@@ -880,9 +865,9 @@ mod tests {
         rs_web.metadata.name = Some("chal-1-web".to_string());
         rs_web.metadata.namespace = Some("default".to_string());
         rs_web.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL => "default",
-            crate::utils::labels::INSTANCE_LABEL => "chal-1",
-            crate::utils::labels::RESOURCE_LABEL => "web",
+            NAMESPACE_LABEL => "default",
+            INSTANCE_LABEL => "chal-1",
+            RESOURCE_LABEL => "web",
         });
         rs_web.status = Some(ReplicaSetStatus {
             ready_replicas: Some(1),
@@ -909,9 +894,9 @@ mod tests {
         rs.metadata.name = Some("chal-1-worker".to_string());
         rs.metadata.namespace = Some("default".to_string());
         rs.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL => "default",
-            crate::utils::labels::INSTANCE_LABEL => "chal-1",
-            crate::utils::labels::RESOURCE_LABEL => "worker",
+            NAMESPACE_LABEL => "default",
+            INSTANCE_LABEL => "chal-1",
+            RESOURCE_LABEL => "worker",
         });
         rs.status = Some(ReplicaSetStatus {
             ready_replicas: None,
@@ -947,9 +932,9 @@ mod tests {
         rs_web.metadata.name = Some("chal-1-web".to_string());
         rs_web.metadata.namespace = Some("default".to_string());
         rs_web.metadata.labels = Some(crate::btreemap! {
-            crate::utils::labels::NAMESPACE_LABEL => "default",
-            crate::utils::labels::INSTANCE_LABEL => "chal-1",
-            crate::utils::labels::RESOURCE_LABEL => "web",
+            NAMESPACE_LABEL => "default",
+            INSTANCE_LABEL => "chal-1",
+            RESOURCE_LABEL => "web",
         });
         rs_web.status = Some(ReplicaSetStatus {
             ready_replicas: Some(1),

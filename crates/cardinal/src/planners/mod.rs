@@ -3,6 +3,7 @@ pub mod network_policy;
 pub mod proxy_route;
 pub mod replicaset;
 pub mod service;
+pub mod tls_route;
 
 use std::collections::BTreeMap;
 
@@ -12,6 +13,7 @@ pub use network_policy::NetworkPolicyPlanner;
 pub use proxy_route::ProxyRoutePlanner;
 pub use replicaset::ReplicaSetPlanner;
 pub use service::ServicePlanner;
+pub use tls_route::TLSRoutePlanner;
 
 use k8s_common::crd::CTFInstance;
 use kube::{Resource, core::NamespaceResourceScope};

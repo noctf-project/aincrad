@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::crd::util::{KubeListKey, json_patch_schema};
+use crate::crd::util::KubeListKey;
 
 fn clamp_u64<'de, D>(d: D) -> Result<u64, D::Error>
 where
@@ -105,11 +105,6 @@ pub struct RouteSpec {
         length(min = 1, max = 24)
     )]
     pub name: String,
-    #[serde(default)]
-    pub policy: RoutePolicySpec,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "json_patch_schema")]
-    pub patch_policy: Option<json_patch::Patch>,
     /// Target backend Kubernetes service name and port.
     pub backend: RouteBackend,
     /// TCP routing configuration (mutually exclusive with 'tls').
@@ -155,15 +150,11 @@ mod tests {
             },
             "tcp": {
                 "port": 20001
-            },
-            "policy": {
-                "flag": "my_flag"
             }
         });
         let spec_tcp: RouteSpec = serde_json::from_value(json_tcp).unwrap();
         assert_eq!(spec_tcp.backend.service, "127.0.0.1");
         assert_eq!(spec_tcp.backend.port, 8080);
-        assert_eq!(spec_tcp.policy.flag, Some("my_flag".to_string()));
         assert_eq!(
             spec_tcp.target(),
             Some(RouteTarget::Tcp(&RouteSpecTCP { port: Some(20001) }))

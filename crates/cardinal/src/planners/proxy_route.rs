@@ -1,11 +1,9 @@
-use std::collections::BTreeMap;
-
 use k8s_common::{
-    RESOURCE_LABEL,
     crd::{
         CTFInstance, CTFInstanceSpecRouteOverride, CTFInstanceStatusEndpoint, CTFProxyRoute,
         CTFProxyRouteSpec, EndpointTarget, RouteSpec, RouteTarget,
     },
+    labels::RESOURCE_LABEL,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use k8s_openapi::jiff::Timestamp;
@@ -13,7 +11,7 @@ use k8s_openapi::jiff::Timestamp;
 use crate::{
     Context, Error, btreemap,
     cache::{ResourceKey, ResourceProjection},
-    planners::{Planner, get_services_map},
+    planners::Planner,
     reconcilers::template::ResolvedTemplate,
     routing::{PortCandidate, PortError, RouteError, derive_hostname, format_tls_host},
     utils::naming::resource_name,
@@ -111,13 +109,6 @@ impl Planner for ProxyRoutePlanner {
 
         let mut routes = Vec::new();
 
-        let mut context_map = BTreeMap::new();
-        let services = get_services_map(template, instance_name);
-        let config = ctx.to_config();
-        context_map.insert("params".to_string(), &template.params_map);
-        context_map.insert("services".to_string(), &services);
-        context_map.insert("config".to_string(), &config);
-
         for route_tmpl in &template.spec.routes {
             let route_override = instance
                 .spec
@@ -125,10 +116,7 @@ impl Planner for ProxyRoutePlanner {
                 .iter()
                 .find(|r| r.name == route_tmpl.name);
 
-            let policy = template.get_patched_route_policy(route_tmpl, &context_map)?;
-            let mut merged_spec = route_tmpl.clone();
-            merged_spec.policy = policy;
-            let merged_spec = build_merged_route_spec(&merged_spec, route_override);
+            let merged_spec = build_merged_route_spec(route_tmpl, route_override);
             let route_key = ResourceKey::new(ns, instance_name, &route_tmpl.name);
 
             let route_name = match merged_spec.target() {
@@ -163,7 +151,7 @@ impl Planner for ProxyRoutePlanner {
 
             let proxy_spec = CTFProxyRouteSpec {
                 backend: backend_addr,
-                policy: merged_spec.policy,
+                policy: Default::default(),
             };
 
             let mut proxy_route = CTFProxyRoute::new(&route_name, proxy_spec);
@@ -502,9 +490,9 @@ mod tests {
     use crate::test_utils::tests::{
         dummy_context, dummy_context_with_routes, dummy_instance, dummy_resolved_template,
     };
-    use k8s_common::crd::{
-        CTFProxyRouteSpec, RouteBackend, RoutePolicySpec, RouteSpec, RouteSpecPOW, RouteSpecTCP,
-        RouteSpecTLS,
+    use k8s_common::{
+        crd::{CTFProxyRouteSpec, RouteBackend, RouteSpec, RouteSpecTCP, RouteSpecTLS},
+        labels::{INSTANCE_LABEL, NAMESPACE_LABEL},
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::sync::Arc;
@@ -515,9 +503,9 @@ mod tests {
                 name: Some(name.to_string()),
                 namespace: Some("aincrad-system".to_string()),
                 labels: Some(crate::btreemap! {
-                    crate::utils::labels::NAMESPACE_LABEL => "default",
-                    crate::utils::labels::INSTANCE_LABEL => instance,
-                    crate::utils::labels::RESOURCE_LABEL => resource,
+                    NAMESPACE_LABEL => "default",
+                    INSTANCE_LABEL => instance,
+                    RESOURCE_LABEL => resource,
                 }),
                 ..Default::default()
             },
@@ -578,9 +566,6 @@ mod tests {
                 tls: Some(RouteSpecTLS {
                     prefix: Some("whoami".into()),
                 }),
-                policy: RoutePolicySpec {
-                    ..Default::default()
-                },
                 ..Default::default()
             },
             RouteSpec {
@@ -590,13 +575,6 @@ mod tests {
                     port: 1337,
                 },
                 tcp: Some(RouteSpecTCP { port: Some(0) }),
-                policy: RoutePolicySpec {
-                    pow: Some(RouteSpecPOW {
-                        difficulty: 5000,
-                        enable_admin_bypass: true,
-                    }),
-                    ..Default::default()
-                },
                 ..Default::default()
             },
         ];
@@ -630,7 +608,6 @@ mod tests {
             tcp_route.spec.backend,
             "chal-1-pwn.default.svc.cluster.local:1337"
         );
-        assert_eq!(tcp_route.spec.policy.pow.as_ref().unwrap().difficulty, 5000);
     }
 
     #[tokio::test]
@@ -695,60 +672,6 @@ mod tests {
             routes[0].metadata.owner_references.is_none(),
             "CTFProxyRoute must not reference a cross-namespace owner"
         );
-    }
-
-    #[tokio::test]
-    async fn test_plan_proxy_routes_patches_policy() {
-        use crate::planners::replicaset::ROUTE_POLICY_PATCH_BLACKLIST;
-        use crate::reconcilers::template::ResolvedTemplate;
-        use k8s_common::SpecPatcher;
-        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-        use serde_json::json;
-
-        let (_store, ctx) = dummy_context();
-        let instance = dummy_instance("chal-1", None);
-
-        let patch: json_patch::Patch = serde_json::from_value(json!([
-            { "op": "add", "path": "/flag", "value": "{{ params.FLAG }}" }
-        ]))
-        .unwrap();
-        let patcher = SpecPatcher::new(&ROUTE_POLICY_PATCH_BLACKLIST, patch).unwrap();
-
-        let route = RouteSpec {
-            name: "web".into(),
-            backend: RouteBackend {
-                service: "web".into(),
-                port: 80,
-            },
-            tls: Some(RouteSpecTLS {
-                prefix: Some("whoami".into()),
-            }),
-            ..Default::default()
-        };
-
-        let mut route_patchers = std::collections::HashMap::new();
-        route_patchers.insert("web".to_string(), Some(patcher));
-
-        let mut params_map = BTreeMap::new();
-        params_map.insert("FLAG".to_string(), "CTF{patched}".to_string());
-
-        let template = ResolvedTemplate {
-            metadata: ObjectMeta::default(),
-            spec: k8s_common::crd::CTFTemplateSpec {
-                routes: vec![route],
-                ..Default::default()
-            },
-            pod_patchers: Arc::new(std::collections::HashMap::new()),
-            route_patchers: Arc::new(route_patchers),
-            params_map,
-        };
-
-        let routes = ProxyRoutePlanner::plan(&instance, &template, &ctx).unwrap();
-        let tls_route = routes
-            .iter()
-            .find(|r| r.metadata.name.as_deref().unwrap().starts_with('r'))
-            .unwrap();
-        assert_eq!(tls_route.spec.policy.flag.as_deref(), Some("CTF{patched}"));
     }
 
     #[test]

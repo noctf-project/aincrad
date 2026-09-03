@@ -3,7 +3,6 @@ use std::io;
 
 use sha2::{Digest, Sha256};
 
-pub mod labels;
 pub mod naming;
 pub mod ttl;
 pub mod versions;

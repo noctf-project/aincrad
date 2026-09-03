@@ -1,17 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use k8s_common::RESOURCE_LABEL;
 use k8s_common::crd::CTFInstance;
+use k8s_common::labels::{INSTANCE_LABEL, RESOURCE_LABEL};
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use crate::planners::get_services_map;
-use crate::{
-    Context, Error, btreemap,
-    planners::Planner,
-    reconcilers::template::ResolvedTemplate,
-    utils::{labels::INSTANCE_LABEL, naming::resource_name},
-};
+use crate::utils::naming::resource_name;
+use crate::{Context, Error, btreemap, planners::Planner, reconcilers::template::ResolvedTemplate};
 
 pub struct ServicePlanner;
 
@@ -66,7 +62,6 @@ impl Planner for ServicePlanner {
                         INSTANCE_LABEL => instance_name,
                         RESOURCE_LABEL => pod.name.as_str(),
                     }),
-                    cluster_ip: Some("None".into()),
                     ports: Some(
                         ports
                             .iter()
@@ -89,6 +84,8 @@ impl Planner for ServicePlanner {
 
 #[cfg(test)]
 mod tests {
+    use k8s_common::labels::INSTANCE_LABEL;
+
     use super::*;
     use crate::test_utils::tests::{dummy_context, dummy_instance};
 

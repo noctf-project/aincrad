@@ -6,6 +6,7 @@ pub mod instance;
 pub mod proxy;
 pub mod route;
 pub mod template;
+pub mod tls_route;
 
 pub mod util;
 
@@ -14,6 +15,7 @@ pub use instance::*;
 pub use proxy::*;
 pub use route::*;
 pub use template::*;
+pub use tls_route::*;
 pub use util::PatchValue;
 
 pub fn generate_crd(format: &str, crd: CustomResourceDefinition) -> Result<String, Error> {

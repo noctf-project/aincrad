@@ -7,10 +7,9 @@ use parking_lot::RwLock;
 use tokio::sync::watch;
 
 use crate::cache::ReadyCache;
-use crate::planners::replicaset::{POD_PATCH_BLACKLIST, ROUTE_POLICY_PATCH_BLACKLIST};
+use crate::planners::replicaset::POD_PATCH_BLACKLIST;
 
 pub type PodPatchersMap = Arc<HashMap<String, Option<SpecPatcher>>>;
-pub type RoutePatchersMap = Arc<HashMap<String, Option<SpecPatcher>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TemplateKey {
@@ -22,7 +21,6 @@ pub struct TemplateKey {
 pub struct CachedTemplateEntry {
     pub template: Arc<CTFTemplate>,
     pub pod_patchers: Result<PodPatchersMap, String>,
-    pub route_patchers: Result<RoutePatchersMap, String>,
 }
 
 #[derive(Clone)]
@@ -89,18 +87,9 @@ impl TemplateCache {
                 .map(|p| (p.name.clone(), p.patch_spec.clone())),
             &POD_PATCH_BLACKLIST,
         );
-        let route_patchers = compile_patchers(
-            template
-                .spec
-                .routes
-                .iter()
-                .map(|r| (r.name.clone(), r.patch_policy.clone())),
-            &ROUTE_POLICY_PATCH_BLACKLIST,
-        );
         let entry = CachedTemplateEntry {
             template: Arc::new(template.clone()),
             pod_patchers,
-            route_patchers,
         };
 
         let mut lock = self.index.write();

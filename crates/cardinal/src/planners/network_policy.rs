@@ -1,5 +1,5 @@
-use k8s_common::RESOURCE_LABEL;
 use k8s_common::crd::CTFInstance;
+use k8s_common::labels::{INSTANCE_LABEL, RESOURCE_LABEL};
 use k8s_openapi::api::networking::v1::NetworkPolicyIngressRule;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement;
 use k8s_openapi::{
@@ -14,10 +14,8 @@ use k8s_openapi::{
 };
 
 use crate::{
-    Context, Error, btreemap,
-    planners::Planner,
-    reconcilers::template::ResolvedTemplate,
-    utils::{labels::INSTANCE_LABEL, naming::resource_name},
+    Context, Error, btreemap, planners::Planner, reconcilers::template::ResolvedTemplate,
+    utils::naming::resource_name,
 };
 
 pub struct NetworkPolicyPlanner;

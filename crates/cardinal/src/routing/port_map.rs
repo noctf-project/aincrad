@@ -39,8 +39,8 @@ impl PortCandidate {
 
 struct Inner {
     bindings: BTreeMap<u16, ResourceKey>,
-    range_reserved: PortRange,
-    range_auto: PortRange,
+    range_reserved: Vec<PortRange>,
+    range_auto: Vec<PortRange>,
     finder: PortFinderFactory,
 }
 
@@ -52,7 +52,11 @@ impl Inner {
     ) -> Result<PortCandidate, PortError> {
         // Fixed port request
         if requested_port != 0 {
-            if !self.range_reserved.contains(requested_port) {
+            if !self
+                .range_reserved
+                .iter()
+                .any(|r| r.contains(requested_port))
+            {
                 return Err(PortError::OutOfRange(requested_port));
             }
 
@@ -67,15 +71,13 @@ impl Inner {
         }
 
         // Auto port request with existing assignment
-        if let Some((&existing_port, _)) = self
-            .bindings
-            .iter()
-            .find(|(port, owner)| *owner == key && self.range_auto.contains(**port))
-        {
+        if let Some((&existing_port, _)) = self.bindings.iter().find(|(port, owner)| {
+            *owner == key && self.range_auto.iter().any(|r| r.contains(**port))
+        }) {
             return Ok(PortCandidate::Bound(existing_port));
         }
 
-        // LCG candidate cycle search
+        // LCG candidate cycle search across all auto port ranges
         let cycle = self.finder.random_cycle();
         for candidate in cycle {
             if !self.bindings.contains_key(&candidate) {
@@ -103,37 +105,44 @@ impl Inner {
 
 /// In-memory port mapping cache providing optimistic candidate lookup via LCG permutations.
 pub struct PortMap {
-    range_reserved: PortRange,
-    range_auto: PortRange,
+    range_reserved: Vec<PortRange>,
+    range_auto: Vec<PortRange>,
     inner: RwLock<Inner>,
 }
 
 impl PortMap {
-    pub fn new(range_reserved: PortRange, range_auto: PortRange) -> Self {
+    pub fn new(
+        range_reserved: impl IntoIterator<Item = PortRange>,
+        range_auto: impl IntoIterator<Item = PortRange>,
+    ) -> Self {
+        let reserved: Vec<PortRange> = range_reserved.into_iter().collect();
+        let auto: Vec<PortRange> = range_auto.into_iter().collect();
+        let finder = PortFinderFactory::new(&auto);
+
         Self {
-            range_reserved: range_reserved.clone(),
-            range_auto: range_auto.clone(),
+            range_reserved: reserved.clone(),
+            range_auto: auto.clone(),
             inner: RwLock::new(Inner {
                 bindings: BTreeMap::new(),
-                finder: PortFinderFactory::new(&range_auto),
-                range_reserved,
-                range_auto,
+                finder,
+                range_reserved: reserved,
+                range_auto: auto,
             }),
         }
     }
 
-    /// Checks if a port is within the reserved range without acquiring a lock.
+    /// Checks if a port is within any reserved range without acquiring a lock.
     pub fn is_reserved_port(&self, port: u16) -> bool {
-        self.range_reserved.contains(port)
+        self.range_reserved.iter().any(|r| r.contains(port))
     }
 
-    /// Returns the reserved port range.
-    pub fn range_reserved(&self) -> &PortRange {
+    /// Returns the reserved port ranges.
+    pub fn range_reserved(&self) -> &[PortRange] {
         &self.range_reserved
     }
 
-    /// Returns the auto port range.
-    pub fn range_auto(&self) -> &PortRange {
+    /// Returns the auto port ranges.
+    pub fn range_auto(&self) -> &[PortRange] {
         &self.range_auto
     }
 
@@ -176,7 +185,10 @@ mod tests {
     }
 
     fn make_map() -> PortMap {
-        PortMap::new(PortRange(20000..=20010), PortRange(30000..=30010))
+        PortMap::new(
+            vec![PortRange(20000..=20010)],
+            vec![PortRange(30000..=30010)],
+        )
     }
 
     #[test]
@@ -200,6 +212,29 @@ mod tests {
             map.find_free_port(&k("pwn"), 20001),
             Err(PortError::Occupied(20001, k("web")))
         );
+    }
+
+    #[test]
+    fn test_find_fixed_port_multiple_ranges() {
+        let map = PortMap::new(
+            vec![
+                PortRange(1000..=1010),
+                PortRange(20000..=20010),
+                PortRange(8080..=8080),
+            ],
+            vec![PortRange(30000..=30010)],
+        );
+
+        assert!(map.is_reserved_port(1005));
+        assert!(map.is_reserved_port(20005));
+        assert!(map.is_reserved_port(8080));
+        assert!(!map.is_reserved_port(9000));
+
+        let c1 = map.find_free_port(&k("svc1"), 1005).unwrap();
+        assert_eq!(c1, PortCandidate::Available(1005));
+
+        let c2 = map.find_free_port(&k("svc2"), 8080).unwrap();
+        assert_eq!(c2, PortCandidate::Available(8080));
     }
 
     #[test]
@@ -236,8 +271,45 @@ mod tests {
     }
 
     #[test]
+    fn test_find_auto_port_multiple_ranges() {
+        let map = PortMap::new(
+            vec![PortRange(1000..=1010)],
+            vec![PortRange(30000..=30002), PortRange(40000..=40002)],
+        );
+
+        let mut allocated = Vec::new();
+        for i in 0..6 {
+            let key = k(&format!("task-{i}"));
+            let cand = map.find_free_port(&key, 0).unwrap();
+            let port = cand.port();
+            assert!(
+                (30000..=30002).contains(&port) || (40000..=40002).contains(&port),
+                "Allocated port {port} must be within one of the auto ranges"
+            );
+            map.bind(port, key);
+            allocated.push(port);
+        }
+
+        assert_eq!(allocated.len(), 6);
+        // All 6 ports must be distinct
+        let mut sorted = allocated.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 6);
+
+        // Pool should now be exhausted
+        assert_eq!(
+            map.find_free_port(&k("overflow"), 0),
+            Err(PortError::Exhausted)
+        );
+    }
+
+    #[test]
     fn test_auto_port_exhaustion() {
-        let map = PortMap::new(PortRange(20000..=20010), PortRange(30000..=30001));
+        let map = PortMap::new(
+            vec![PortRange(20000..=20010)],
+            vec![PortRange(30000..=30001)],
+        );
         let c1 = map.find_free_port(&k("r1"), 0).unwrap();
         map.bind(c1.port(), k("r1"));
 
