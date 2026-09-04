@@ -19,6 +19,7 @@ pub struct Context {
     pub system_namespace: String,
     pub cluster_domain: String,
     pub image_aliases: BTreeMap<String, String>,
+    pub load_balancer_ip: Option<String>,
 }
 
 impl Context {
@@ -50,9 +51,11 @@ mod tests {
                 system_namespace: system_ns,
                 cluster_domain: "cluster.local".to_string(),
                 image_aliases: BTreeMap::new(),
+                load_balancer_ip: None,
             }
         }
 
+        #[allow(clippy::too_many_arguments)]
         pub fn new_stub_with_port_map(
             client: Client,
             port_map: Arc<PortMap>,
@@ -73,6 +76,7 @@ mod tests {
                 system_namespace: system_namespace.into(),
                 cluster_domain: cluster_domain.into(),
                 image_aliases,
+                load_balancer_ip: None,
             }
         }
     }

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use k8s_common::{
-    crd::{CTFInstance, CTFInstanceStatus},
+    crd::{CTFInstance, CTFInstanceStatus, CTFInstanceStatusEndpoint, EndpointTarget, RouteTarget},
     labels::RESTARTED_AT_ANNOTATION,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
@@ -11,10 +11,13 @@ use tracing::instrument;
 
 use crate::{
     Context, Error,
+    cache::ResourceKey,
     planners::{
-        NetworkPolicyPlanner, Planner, ProxyRoutePlanner, ReplicaSetPlanner, ServicePlanner,
-        TLSRoutePlanner, apply_condition,
+        NetworkPolicyPlanner, Planner, ReplicaSetPlanner, ServicePlanner, TLSRoutePlanner,
+        apply_condition, build_merged_route_spec,
     },
+    reconcilers::template::ResolvedTemplate,
+    routing::{derive_hostname, format_tls_host},
 };
 
 /// The outcome of evaluating an instance's readiness. Produced by `evaluate_status`
@@ -48,7 +51,6 @@ pub fn evaluate_status(instance: &CTFInstance, ctx: &Context) -> Result<Evaluati
     fold_planner::<ReplicaSetPlanner>(instance, ctx, &mut evaluation)?;
     fold_planner::<NetworkPolicyPlanner>(instance, ctx, &mut evaluation)?;
     fold_planner::<ServicePlanner>(instance, ctx, &mut evaluation)?;
-    fold_planner::<ProxyRoutePlanner>(instance, ctx, &mut evaluation)?;
     fold_planner::<TLSRoutePlanner>(instance, ctx, &mut evaluation)?;
 
     Ok(evaluation)
@@ -77,6 +79,67 @@ fn fold_planner<P: Planner>(
     }
 
     Ok(())
+}
+
+/// Generates the endpoints for a CTFInstance from route specs and active port allocations.
+pub fn generate_endpoints(
+    instance: &CTFInstance,
+    template: &ResolvedTemplate,
+    ctx: &Context,
+) -> Vec<CTFInstanceStatusEndpoint> {
+    let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+    let name = instance.metadata.name.as_deref().unwrap_or("unknown");
+    let mut endpoints = Vec::new();
+
+    for route_tmpl in &template.spec.routes {
+        let route_override = instance
+            .spec
+            .routes
+            .iter()
+            .find(|r| r.name == route_tmpl.name);
+        let merged_spec = build_merged_route_spec(route_tmpl, route_override);
+
+        match merged_spec.target() {
+            Some(RouteTarget::Tcp(tcp)) => {
+                let port = if let Some(p) = tcp.port
+                    && p != 0
+                {
+                    p
+                } else if let Some(port_map) = ctx.port_map.as_deref() {
+                    let key = ResourceKey::new(ns, name, &route_tmpl.name);
+                    port_map.get_port(&key).unwrap_or(0)
+                } else {
+                    0
+                };
+
+                if port != 0 {
+                    let host = ctx.hostname_suffix.clone();
+                    endpoints.push(CTFInstanceStatusEndpoint {
+                        name: route_tmpl.name.clone(),
+                        type_: "tcp".to_string(),
+                        target: EndpointTarget { host, port },
+                    });
+                }
+            }
+            Some(RouteTarget::Tls(tls)) => {
+                let route_key = ResourceKey::new(ns, name, &route_tmpl.name);
+                let hostname = derive_hostname(&ctx.route_seed, &route_key, tls.prefix.as_deref());
+                let fqdn = format_tls_host(&ctx.hostname_suffix, &hostname);
+                endpoints.push(CTFInstanceStatusEndpoint {
+                    name: route_tmpl.name.clone(),
+                    type_: "tls".to_string(),
+                    target: EndpointTarget {
+                        host: fqdn,
+                        port: ctx.tls_port,
+                    },
+                });
+            }
+            None => {}
+        }
+    }
+
+    endpoints.sort_by(|a, b| (&a.name, &a.type_).cmp(&(&b.name, &b.type_)));
+    endpoints
 }
 
 /// Returns true when the instance's status has observed the current spec
@@ -369,7 +432,7 @@ mod tests {
         }]);
         evaluation_2
             .children
-            .insert("CTFProxyRoute".to_string(), vec!["p30005".to_string()]);
+            .insert("Service".to_string(), vec!["chal-tcp".to_string()]);
 
         commit(&instance, &evaluation_2, &ctx).await.unwrap();
         let patch_count_2 = log
@@ -439,16 +502,6 @@ mod tests {
             .replica_sets
             .handle(&kube::runtime::watcher::Event::Apply(rs));
 
-        let mut pr = k8s_common::crd::CTFProxyRoute::new("p30005", Default::default());
-        pr.metadata.labels = Some(crate::btreemap! {
-            NAMESPACE_LABEL => "default",
-            INSTANCE_LABEL => "chal-1",
-            RESOURCE_LABEL => "chal",
-        });
-        ctx.caches
-            .proxy_routes
-            .handle(&kube::runtime::watcher::Event::Apply(pr));
-
         let mut synced = dummy_instance("chal-1", None);
         synced.spec.sync = true;
         synced.metadata.generation = Some(1);
@@ -461,10 +514,9 @@ mod tests {
             ..Default::default()
         });
 
-        let resolved = crate::reconcilers::template::reconcile(&synced, &ctx)
+        let _resolved = crate::reconcilers::template::reconcile(&synced, &ctx)
             .await
             .unwrap();
-        let _ = ProxyRoutePlanner::plan(&synced, &resolved, &ctx).unwrap();
 
         let evaluation = evaluate_status(&synced, &ctx).unwrap();
         assert!(
@@ -649,5 +701,54 @@ mod tests {
             evaluation.children.get("Service"),
             Some(&vec!["chal-1-web".to_string()])
         );
+    }
+
+    #[tokio::test]
+    async fn test_generate_endpoints() {
+        use crate::test_utils::tests::dummy_resolved_template;
+        use k8s_common::crd::{RouteBackend, RouteSpec, RouteSpecTCP, RouteSpecTLS};
+
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let mut template = dummy_resolved_template(1);
+
+        template.spec.routes = vec![
+            RouteSpec {
+                name: "web".to_string(),
+                backend: RouteBackend {
+                    service: "web".to_string(),
+                    port: 80,
+                },
+                tls: Some(RouteSpecTLS {
+                    prefix: Some("whoami".to_string()),
+                }),
+                tcp: None,
+            },
+            RouteSpec {
+                name: "pwn".to_string(),
+                backend: RouteBackend {
+                    service: "web".to_string(),
+                    port: 1337,
+                },
+                tls: None,
+                tcp: Some(RouteSpecTCP { port: None }),
+            },
+        ];
+
+        let key = ResourceKey::new("default", "chal-1", "pwn");
+        ctx.port_map.as_ref().unwrap().bind(30005, key);
+
+        let endpoints = generate_endpoints(&instance, &template, &ctx);
+        assert_eq!(endpoints.len(), 2);
+
+        assert_eq!(endpoints[0].name, "pwn");
+        assert_eq!(endpoints[0].type_, "tcp");
+        assert_eq!(endpoints[0].target.port, 30005);
+        assert_eq!(endpoints[0].target.host, "c.noctf.dev");
+
+        assert_eq!(endpoints[1].name, "web");
+        assert_eq!(endpoints[1].type_, "tls");
+        assert_eq!(endpoints[1].target.port, 4433);
+        assert!(endpoints[1].target.host.contains("whoami"));
     }
 }

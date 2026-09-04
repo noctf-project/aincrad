@@ -55,6 +55,31 @@ pub fn validate_overrides(
     }
 }
 
+/// Builds a merged `RouteSpec` applying optional instance-level overrides.
+pub fn build_merged_route_spec(
+    base: &k8s_common::crd::RouteSpec,
+    override_spec: Option<&k8s_common::crd::CTFInstanceSpecRouteOverride>,
+) -> k8s_common::crd::RouteSpec {
+    let mut merged = base.clone();
+
+    if let Some(ov) = override_spec {
+        // Override wins on conflict. An explicit tcp turns the route into TCP and vice versa.
+        if let Some(tcp) = &ov.tcp {
+            let mut tcp_cfg = merged.tcp.unwrap_or_default();
+            if let Some(port) = tcp.port {
+                tcp_cfg.port = Some(port);
+            }
+            merged.tcp = Some(tcp_cfg);
+            merged.tls = None;
+        } else if let Some(tls) = &ov.tls {
+            merged.tls = Some(tls.clone());
+            merged.tcp = None;
+        }
+    }
+
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

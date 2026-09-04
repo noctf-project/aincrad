@@ -295,8 +295,8 @@ pub mod tests {
             if clean_path.ends_with("/replicasets")
                 || clean_path.ends_with("/services")
                 || clean_path.ends_with("/networkpolicies")
+                || clean_path.ends_with("/tlsroutes")
                 || clean_path.ends_with("/ctfinstances")
-                || clean_path.ends_with("/ctfproxyroutes")
             {
                 let list = serde_json::json!({
                     "apiVersion": "v1",
@@ -331,8 +331,8 @@ pub mod tests {
                 && (clean_path.ends_with("/replicasets")
                     || clean_path.ends_with("/services")
                     || clean_path.ends_with("/networkpolicies")
-                    || clean_path.ends_with("/ctfinstances")
-                    || clean_path.ends_with("/ctfproxyroutes"))
+                    || clean_path.ends_with("/tlsroutes")
+                    || clean_path.ends_with("/ctfinstances"))
             {
                 let list = serde_json::json!({
                     "apiVersion": "v1",
@@ -352,8 +352,8 @@ pub mod tests {
                 ("networking.k8s.io/v1", "NetworkPolicy")
             } else if path.contains("replicasets") {
                 ("apps/v1", "ReplicaSet")
-            } else if path.contains("ctfproxyroutes") {
-                ("aincrad.noctf.dev/v1", "CTFProxyRoute")
+            } else if path.contains("tlsroutes") {
+                ("gateway.networking.k8s.io/v1alpha2", "TLSRoute")
             } else if path.contains("ctfinstances") {
                 ("aincrad.noctf.dev/v1", "CTFInstance")
             } else {
@@ -377,10 +377,6 @@ pub mod tests {
             });
             if kind == "CTFInstance" {
                 body["spec"] = serde_json::json!({ "template": "whoami-template" });
-            } else if kind == "CTFProxyRoute" {
-                body["spec"] = serde_json::json!({
-                    "backend": "web.default.svc.cluster.local:80"
-                });
             }
             let body_str = serde_json::to_string(&body).unwrap();
             Ok(axum::http::Response::builder()

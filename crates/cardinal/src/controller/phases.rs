@@ -64,35 +64,9 @@ pub async fn run(instance: &CTFInstance, ctx: &Context) -> Result<Action, Error>
     let mut evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
 
     evaluation.children.extend(children);
-
-    if let Some(pr_names) = evaluation
-        .children
-        .get(<crate::planners::ProxyRoutePlanner as crate::planners::Planner>::KIND)
-        && !pr_names.is_empty()
-    {
-        let endpoints = crate::planners::proxy_route::endpoints_from_children(
-            pr_names,
-            &prepared.template.spec.routes,
-            &flow.ctx.hostname_suffix,
-            flow.ctx.tls_port,
-        );
+    let endpoints = reconcilers::status::generate_endpoints(instance, &prepared.template, ctx);
+    if !endpoints.is_empty() {
         evaluation.resources.endpoints = Some(endpoints);
-        evaluation.conditions.retain(|c| {
-            c.type_ != <crate::planners::ProxyRoutePlanner as crate::planners::Planner>::KIND
-        });
-        evaluation
-            .conditions
-            .push(k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition {
-                type_: <crate::planners::ProxyRoutePlanner as crate::planners::Planner>::KIND
-                    .to_string(),
-                status: "True".to_string(),
-                reason: "RoutesAllocated".to_string(),
-                message: format!("All {} proxy route(s) allocated", pr_names.len()),
-                last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                    k8s_openapi::jiff::Timestamp::now(),
-                ),
-                observed_generation: instance.metadata.generation,
-            });
     }
 
     reconcilers::status::commit(instance, &evaluation, ctx).await?;
@@ -123,20 +97,7 @@ pub mod lifecycle {
             expires_at,
         } = flow;
 
-        // The routes finalizer must be attached before anything else so deletion
-        // always triggers cross-namespace cleanup.
-        if instance.metadata.deletion_timestamp.is_none() {
-            reconcilers::helper::ensure_finalizer(ctx.client.clone(), instance).await?;
-        }
-
-        // Passing instance: delete its proxy routes and release ports, then drop
-        // the finalizer so the object can leave the cluster.
         if instance.metadata.deletion_timestamp.is_some() {
-            info!(
-                name,
-                ns, "CTFInstance marked for deletion, cleaning up cross-namespace routes..."
-            );
-            reconcilers::helper::cleanup_instance_routes(ctx, instance).await?;
             return Ok(Step::Finish(Action::await_change()));
         }
 
@@ -185,7 +146,11 @@ pub mod prepare {
                 name,
                 ns, "Instance spec is synced, updating status and skipping plan/apply"
             );
-            let evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
+            let mut evaluation = reconcilers::status::evaluate_status(instance, ctx)?;
+            let endpoints = reconcilers::status::generate_endpoints(instance, &template, ctx);
+            if !endpoints.is_empty() {
+                evaluation.resources.endpoints = Some(endpoints);
+            }
             reconcilers::status::commit(instance, &evaluation, ctx).await?;
             return Ok(Step::Finish(completed_action(flow)));
         }
@@ -247,8 +212,7 @@ pub mod prepare {
 pub mod apply {
     use super::*;
     use crate::planners::{
-        NetworkPolicyPlanner, Planner, ProxyRoutePlanner, ReplicaSetPlanner, ServicePlanner,
-        TLSRoutePlanner,
+        NetworkPolicyPlanner, Planner, ReplicaSetPlanner, ServicePlanner, TLSRoutePlanner,
     };
     use crate::reconcilers::helper::apply_planner;
     use std::collections::BTreeMap;
@@ -308,11 +272,6 @@ pub mod apply {
             &mut children,
         )
         .await?;
-
-        if flow.ctx.port_map.is_some() {
-            let api = Api::namespaced(flow.ctx.client.clone(), &flow.ctx.system_namespace);
-            apply_and_record::<ProxyRoutePlanner>(api, flow, prepared, &mut children).await?;
-        }
 
         Ok(children)
     }
@@ -421,12 +380,8 @@ mod tests {
         assert!(children.contains_key(crate::planners::ServicePlanner::KIND));
         assert!(children.contains_key(crate::planners::NetworkPolicyPlanner::KIND));
         assert!(children.contains_key(crate::planners::TLSRoutePlanner::KIND));
-        assert!(children.contains_key(crate::planners::ProxyRoutePlanner::KIND));
 
-        let pr_names = children
-            .get(crate::planners::ProxyRoutePlanner::KIND)
-            .unwrap();
-        assert_eq!(pr_names.len(), 1);
-        assert!(pr_names[0].starts_with('p'));
+        let svc_names = children.get(crate::planners::ServicePlanner::KIND).unwrap();
+        assert_eq!(svc_names.len(), 2);
     }
 }

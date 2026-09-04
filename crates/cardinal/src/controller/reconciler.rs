@@ -1,9 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use k8s_common::{
-    crd::{CTFInstance, CTFProxyRoute, CTFTemplate, ProxyRouteKey, TLSRoute},
-    labels::{INSTANCE_LABEL, NAMESPACE_LABEL, RESOURCE_LABEL},
+    crd::{CTFInstance, CTFTemplate, TLSRoute},
+    labels::{INSTANCE_LABEL, RESOURCE_LABEL},
 };
 use k8s_openapi::api::{apps::v1::ReplicaSet, core::v1::Service};
 use kube::{
@@ -13,7 +13,7 @@ use kube::{
         controller::{Action, Controller},
         predicates,
         reflector::{ObjectRef, reflector, store},
-        watcher::{Config, Error as WatcherError, Event, watcher},
+        watcher::{Config, Event, watcher},
     },
 };
 use tracing::{error, info, instrument, warn};
@@ -100,35 +100,6 @@ fn instance_predicate() -> impl Predicate<CTFInstance> {
         .combine(|obj: &CTFInstance| Some(u64::from(obj.metadata.deletion_timestamp.is_some())))
 }
 
-/// Handles instance watcher `InitDone` event by pruning unreferenced proxy routes
-/// from the live proxy-route cache.
-pub async fn handle_instance_watcher_init_done(
-    client: Client,
-    system_ns: &str,
-    cache: &crate::cache::InstanceCache,
-    proxy_routes: &crate::cache::ResourceCache<CTFProxyRoute>,
-    managed_namespace: Option<&str>,
-) -> Result<(), Error> {
-    let live_instances: std::collections::HashSet<(String, String)> =
-        cache.live_instances().into_iter().collect();
-
-    info!(
-        live_count = live_instances.len(),
-        managed_namespace = ?managed_namespace,
-        "CTFInstance init done; checking and pruning dangling proxy routes..."
-    );
-    crate::reconcilers::helper::prune_unreferenced_proxy_routes(
-        client,
-        system_ns,
-        proxy_routes,
-        &live_instances,
-        managed_namespace,
-    )
-    .await?;
-
-    Ok(())
-}
-
 /// Handles watcher events for `CTFInstance` to update or clear the in-memory index.
 pub fn handle_instance_watcher_event(
     event: &Event<CTFInstance>,
@@ -173,51 +144,77 @@ pub fn handle_template_watcher_event(
     }
 }
 
-/// Maps a `CTFProxyRoute` event to the `CTFInstance` it belongs to via labels.
-fn proxy_route_owner(
-    route: &CTFProxyRoute,
-    filter_ns: Option<&str>,
-) -> Vec<ObjectRef<CTFInstance>> {
-    let Some(instance) = route
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get(INSTANCE_LABEL))
-    else {
-        return Vec::new();
-    };
-    let ns = route
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get(NAMESPACE_LABEL))
-        .map(String::as_str)
-        .unwrap_or("default");
-    if let Some(target_ns) = filter_ns
-        && ns != target_ns
-    {
-        return Vec::new();
-    }
-    vec![ObjectRef::new(instance).within(ns)]
-}
-
-/// Helper handling port map synchronization on proxy route watcher events.
-fn handle_proxy_route_port_map_event(
-    event: &Event<CTFProxyRoute>,
-    port_map: &PortMap,
-    _managed_namespace: Option<&str>,
-) {
+/// Helper handling port map synchronization on Service watcher events for LoadBalancer services.
+pub fn handle_service_port_map_event(event: &Event<Service>, port_map: &PortMap) {
     match event {
-        Event::Apply(route) | Event::InitApply(route) => {
-            if let Ok(ProxyRouteKey::Tcp(port)) = route.route_key() {
-                // Static or unlabeled routes occupy a port without an instance owner.
-                let key = proxy_route_key(route).unwrap_or_else(|| ResourceKey::new("", "", ""));
-                port_map.bind(port, key);
+        Event::Apply(svc) | Event::InitApply(svc) => {
+            if svc
+                .spec
+                .as_ref()
+                .and_then(|s| s.load_balancer_class.as_deref())
+                != Some(crate::utils::DUMMY_LB_CLASS)
+            {
+                return;
+            }
+            let ns = svc.metadata.namespace.as_deref().unwrap_or("default");
+            let instance_name = svc
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(INSTANCE_LABEL))
+                .map(String::as_str)
+                .unwrap_or("");
+            let pod_name = svc
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(RESOURCE_LABEL))
+                .map(String::as_str)
+                .unwrap_or("");
+
+            if let Some(ports) = svc.spec.as_ref().and_then(|s| s.ports.as_ref()) {
+                for p in ports {
+                    if p.port > 0 {
+                        let route_name = p.name.as_deref().unwrap_or(pod_name);
+                        let key = ResourceKey::new(ns, instance_name, route_name);
+                        port_map.bind(p.port as u16, key);
+                    }
+                }
             }
         }
-        Event::Delete(route) => {
-            if let Ok(ProxyRouteKey::Tcp(port)) = route.route_key() {
-                port_map.unbind(port);
+        Event::Delete(svc) => {
+            if svc
+                .spec
+                .as_ref()
+                .and_then(|s| s.load_balancer_class.as_deref())
+                != Some(crate::utils::DUMMY_LB_CLASS)
+            {
+                return;
+            }
+            let ns = svc.metadata.namespace.as_deref().unwrap_or("default");
+            let instance_name = svc
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(INSTANCE_LABEL))
+                .map(String::as_str)
+                .unwrap_or("");
+            let pod_name = svc
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(RESOURCE_LABEL))
+                .map(String::as_str)
+                .unwrap_or("");
+
+            if let Some(ports) = svc.spec.as_ref().and_then(|s| s.ports.as_ref()) {
+                for p in ports {
+                    if p.port > 0 {
+                        let route_name = p.name.as_deref().unwrap_or(pod_name);
+                        let key = ResourceKey::new(ns, instance_name, route_name);
+                        port_map.unbind_key(p.port as u16, &key);
+                    }
+                }
             }
         }
         Event::Init => {
@@ -236,8 +233,9 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
         hostname_suffix,
         tls_port,
         cluster_domain,
-        managed_namespaces,
+        namespace,
         image_aliases: image_alias,
+        load_balancer_ip,
     } = opts;
     let system_namespace =
         system_namespace.unwrap_or_else(|| client.default_namespace().to_string());
@@ -249,90 +247,27 @@ pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
         .flatten()
         .collect::<std::collections::BTreeMap<String, String>>();
 
-    if managed_namespaces.is_empty() {
-        let context = Arc::new(Context {
-            client: client.clone(),
-            caches: Caches::default(),
-            port_map: Some(port_map.clone()),
-            route_seed,
-            hostname_suffix,
-            tls_port,
-            system_namespace: system_namespace.clone(),
-            cluster_domain,
-            image_aliases: image_alias_map,
-        });
+    let context = Arc::new(Context {
+        client: client.clone(),
+        caches: Caches::default(),
+        port_map: Some(port_map.clone()),
+        route_seed,
+        hostname_suffix,
+        tls_port,
+        system_namespace,
+        cluster_domain,
+        image_aliases: image_alias_map,
+        load_balancer_ip,
+    });
 
-        let proxy_routes = Api::<CTFProxyRoute>::namespaced(client, &system_namespace);
-        let proxy_route_cache = context.caches.proxy_routes.clone();
-        let port_map_stream = port_map.clone();
-        let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes, move |event| {
-            handle_proxy_route_port_map_event(event, &port_map_stream, None);
-        });
-
-        run_controller(None, context, proxy_route_stream).await
-    } else {
-        let mut tasks = Vec::new();
-        for ns in managed_namespaces {
-            let context = Arc::new(Context {
-                client: client.clone(),
-                caches: Caches::default(),
-                port_map: Some(port_map.clone()),
-                route_seed: route_seed.clone(),
-                hostname_suffix: hostname_suffix.clone(),
-                tls_port,
-                system_namespace: system_namespace.clone(),
-                cluster_domain: cluster_domain.clone(),
-                image_aliases: image_alias_map.clone(),
-            });
-
-            let proxy_routes = Api::<CTFProxyRoute>::namespaced(client.clone(), &system_namespace);
-            let proxy_route_cache = context.caches.proxy_routes.clone();
-            let port_map_stream = port_map.clone();
-            let ns_clone = ns.clone();
-            let proxy_route_stream = proxy_route_cache.watcher_stream(proxy_routes, move |event| {
-                handle_proxy_route_port_map_event(event, &port_map_stream, Some(&ns_clone));
-            });
-
-            tasks.push(tokio::spawn(async move {
-                run_controller(Some(ns), context, proxy_route_stream).await
-            }));
-        }
-
-        let (res, _idx, _remaining) = futures::future::select_all(tasks).await;
-        match res {
-            Ok(controller_res) => controller_res,
-            Err(join_err) => Err(Error::Custom(join_err.to_string())),
-        }
-    }
-}
-
-/// Derives the allocator key for a proxy route from its labels.
-fn proxy_route_key(route: &CTFProxyRoute) -> Option<ResourceKey> {
-    let labels = route.metadata.labels.as_ref()?;
-    let instance = labels.get(INSTANCE_LABEL)?;
-    let instance_ns = labels
-        .get(NAMESPACE_LABEL)
-        .map(|s| s.as_str())
-        .unwrap_or("default");
-    let resource = labels.get(RESOURCE_LABEL)?;
-    Some(ResourceKey::new(
-        instance_ns,
-        instance.as_str(),
-        resource.as_str(),
-    ))
+    run_controller(namespace, context).await
 }
 
 /// Spawns and runs the `CTFInstance` controller loop.
-pub async fn run_controller<S>(
-    namespace: Option<String>,
-    context: Arc<Context>,
-    proxy_route_stream: S,
-) -> Result<(), Error>
-where
-    S: Stream<Item = Result<CTFProxyRoute, WatcherError>> + Send + 'static,
-{
+pub async fn run_controller(namespace: Option<String>, context: Arc<Context>) -> Result<(), Error> {
     let client = &context.client;
-    let (instances, templates, services, replica_sets, tls_routes) = if let Some(ref ns) = namespace {
+    let (instances, templates, services, replica_sets, tls_routes) = if let Some(ref ns) = namespace
+    {
         (
             Api::<CTFInstance>::namespaced(client.clone(), ns),
             Api::<CTFTemplate>::namespaced(client.clone(), ns),
@@ -369,8 +304,13 @@ where
         Default::default(),
     );
 
+    let port_map_stream = context.port_map.clone();
     let services_cache = context.caches.services.clone();
-    let service_stream = services_cache.watcher_stream(services, |_| {});
+    let service_stream = services_cache.watcher_stream(services, move |event| {
+        if let Some(ref pm) = port_map_stream {
+            handle_service_port_map_event(event, pm);
+        }
+    });
 
     let replica_sets_cache = context.caches.replica_sets.clone();
     let replica_set_stream = replica_sets_cache.watcher_stream(replica_sets, |_| {});
@@ -378,33 +318,19 @@ where
     let tls_routes_cache = context.caches.tls_routes.clone();
     let tls_route_stream = tls_routes_cache.watcher_stream(tls_routes, |_| {});
 
-    let proxy_route_stream = proxy_route_stream;
-
     // Initialize in-memory CTFInstance reflector store cache for watches mapping
     let (instance_store, instance_writer) = store();
 
     let instance_cache = context.caches.instances.clone();
     let instance_cache_task = instance_cache.clone();
 
-    let client_init_done = client.clone();
-    let system_ns_init_done = context.system_namespace.clone();
-    let proxy_routes_init_done = context.caches.proxy_routes.clone();
-
     let ready_task = ready.clone();
-    let namespace_task = namespace.clone();
-
-    let (fatal_tx, mut fatal_rx) = tokio::sync::broadcast::channel::<String>(1);
 
     let instance_watcher_stream = watcher(instances, Config::default())
         .default_backoff()
         .then(move |res| {
-            let client = client_init_done.clone();
-            let system_ns = system_ns_init_done.clone();
-            let proxy_routes = proxy_routes_init_done.clone();
             let cache = instance_cache_task.clone();
-            let fatal_tx = fatal_tx.clone();
             let ready = ready_task.clone();
-            let managed_ns = namespace_task.clone();
 
             async move {
                 // Hold instance events until every child cache has completed its initial sync.
@@ -412,19 +338,6 @@ where
 
                 if let Ok(ref event) = res {
                     handle_instance_watcher_event(event, &cache);
-                    if let Event::InitDone = event
-                        && let Err(e) = handle_instance_watcher_init_done(
-                            client,
-                            &system_ns,
-                            &cache,
-                            &proxy_routes,
-                            managed_ns.as_deref(),
-                        )
-                        .await
-                    {
-                        error!("fatal controller error: {e}");
-                        let _ = fatal_tx.send(e.to_string());
-                    }
                 }
                 res
             }
@@ -441,63 +354,54 @@ where
         info!("Starting CTFInstance controller across all namespaces with Template tracking");
     }
 
-    let proxy_route_ns = namespace.clone();
-
-    tokio::select! {
-        Ok(err_msg) = fatal_rx.recv() => {
-            Err(Error::Custom(err_msg))
-        }
-        _ = Controller::for_stream(controller_instance_stream, instance_store)
-            .watches_stream(template_stream, move |template| {
-                let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
-                info!(
-                    template_name = tmpl_name,
-                    "CTFTemplate updated, evaluating synced CTFInstances to retrigger"
-                );
-                instance_cache
-                    .instances_to_sync(&template)
-                    .into_iter()
-                    .map(|inst| ObjectRef::from_obj(&*inst))
-                    .collect::<Vec<_>>()
-            })
-            .watches_stream(proxy_route_stream, move |route| {
-                proxy_route_owner(&route, proxy_route_ns.as_deref())
-            })
-            .owns_stream(service_stream)
-            .owns_stream(replica_set_stream)
-            .owns_stream(tls_route_stream)
-            .run(reconcile, error_policy, context)
-            .for_each(|res| async {
-                match res {
-                    Ok((object, _action)) => {
-                        info!(name = %object.name, "Successfully reconciled CTFInstance");
-                    }
-                    Err(err) => {
-                        let err_msg = err.to_string();
-                        if err_msg.contains("not found") || err_msg.contains("NotFound") {
-                            tracing::debug!(%err, "Object deleted before reconciliation completed");
-                        } else {
-                            warn!(%err, "Controller error occurred");
-                        }
+    Controller::for_stream(controller_instance_stream, instance_store)
+        .watches_stream(template_stream, move |template| {
+            let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
+            info!(
+                template_name = tmpl_name,
+                "CTFTemplate updated, evaluating synced CTFInstances to retrigger"
+            );
+            instance_cache
+                .instances_to_sync(&template)
+                .into_iter()
+                .map(|inst| ObjectRef::from_obj(&*inst))
+                .collect::<Vec<_>>()
+        })
+        .owns_stream(service_stream)
+        .owns_stream(replica_set_stream)
+        .owns_stream(tls_route_stream)
+        .run(reconcile, error_policy, context)
+        .for_each(|res| async {
+            match res {
+                Ok((object, _action)) => {
+                    info!(name = %object.name, "Successfully reconciled CTFInstance");
+                }
+                Err(err) => {
+                    let err_msg = err.to_string();
+                    if err_msg.contains("not found") || err_msg.contains("NotFound") {
+                        tracing::debug!(%err, "Object deleted before reconciliation completed");
+                    } else {
+                        warn!(%err, "Controller error occurred");
                     }
                 }
-            }) => {
-                Ok(())
             }
-    }
+        })
+        .await;
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::tests::{
-        dummy_context, dummy_ctx, dummy_instance, dummy_kube_client, recording_kube_client,
+        dummy_context, dummy_ctx, dummy_instance, recording_kube_client,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use k8s_common::crd::{
         CTFInstanceSpec, CTFInstanceStatus, RouteBackend, RouteSpec, RouteSpecTCP,
     };
-    use k8s_common::labels::{EXPIRES_AT_ANNOTATION, RESTARTED_AT_ANNOTATION, ROUTES_FINALIZER};
+    use k8s_common::labels::{EXPIRES_AT_ANNOTATION, RESTARTED_AT_ANNOTATION};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::WatchStreamExt;
@@ -639,9 +543,7 @@ mod tests {
     async fn test_deletion_timestamp_instances_are_delivered_to_controller() {
         let mut inst = dummy_instance("chal-1", None);
         inst.metadata.uid = Some("uid-1".to_string());
-        inst.metadata.generation = Some(1);
         inst.metadata.resource_version = Some("1".to_string());
-        inst.metadata.finalizers = Some(vec![ROUTES_FINALIZER.to_string()]);
 
         let mut dying = inst.clone();
         dying.metadata.deletion_timestamp =
@@ -658,7 +560,7 @@ mod tests {
         assert_eq!(
             items.len(),
             2,
-            "finalizer cleanup reconcile for the deleted instance must be delivered"
+            "events for deleted instances must be delivered"
         );
         assert!(
             items
@@ -871,75 +773,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_instance_watcher_init_done_success() {
-        use crate::cache::{InstanceCache, ResourceCache};
+    async fn test_handle_service_port_map_event_binds_and_unbinds() {
+        use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 
-        let client = dummy_kube_client();
-        let mut inst = dummy_instance("chal-1", None);
-        inst.metadata.namespace = Some("team-1".into());
-        let cache = InstanceCache::new();
-        cache.update(&inst);
+        let (_store, ctx) = dummy_context();
+        let port_map = ctx.port_map.as_ref().unwrap();
 
-        let proxy_routes = ResourceCache::<CTFProxyRoute>::new();
-
-        let res = handle_instance_watcher_init_done(
-            client,
-            "aincrad-system",
-            &cache,
-            &proxy_routes,
-            None,
-        )
-        .await;
-        assert!(res.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_handle_instance_watcher_init_done_failure() {
-        use crate::cache::{InstanceCache, ResourceCache};
-        use tower::service_fn;
-        let mock_service = service_fn(|_req: axum::http::Request<kube::client::Body>| async move {
-            Ok::<_, std::convert::Infallible>(
-                axum::http::Response::builder()
-                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(axum::body::Body::from("Internal Server Error"))
-                    .unwrap(),
-            )
-        });
-        let client = kube::Client::new(mock_service, "default");
-        let cache = InstanceCache::new();
-
-        // Seed an orphaned route so the prune hits the always-500 mock client.
-        let proxy_routes = ResourceCache::<CTFProxyRoute>::new();
-        let orphan = CTFProxyRoute {
-            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
-                name: Some("p30005".to_string()),
+        let lb_svc = Service {
+            metadata: ObjectMeta {
+                name: Some("chal-1-lb-web".to_string()),
+                namespace: Some("default".to_string()),
                 labels: Some(crate::btreemap! {
-                    NAMESPACE_LABEL => "team-1",
-                    INSTANCE_LABEL => "dead-chal",
-                    RESOURCE_LABEL => "pwn",
+                    INSTANCE_LABEL => "chal-1",
+                    RESOURCE_LABEL => "web",
                 }),
                 ..Default::default()
             },
-            spec: k8s_common::crd::CTFProxyRouteSpec {
-                backend: "10.0.0.1:80".to_string(),
-                policy: Default::default(),
-            },
+            spec: Some(ServiceSpec {
+                type_: Some("LoadBalancer".to_string()),
+                load_balancer_class: Some(crate::utils::DUMMY_LB_CLASS.to_string()),
+                ports: Some(vec![ServicePort {
+                    name: Some("pwn".to_string()),
+                    port: 20005,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
         };
-        proxy_routes.handle(&kube::runtime::watcher::Event::Apply(orphan));
 
-        let res = handle_instance_watcher_init_done(
-            client,
-            "aincrad-system",
-            &cache,
-            &proxy_routes,
-            None,
-        )
-        .await;
-        assert!(res.is_err());
+        // Standard non-dummy service should be ignored
+        let standard_svc = Service {
+            metadata: ObjectMeta {
+                name: Some("chal-1-svc-web".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                ports: Some(vec![ServicePort {
+                    port: 20006,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        handle_service_port_map_event(&Event::Apply(standard_svc), port_map);
+        assert_eq!(port_map.get_key(20006), None);
+
+        // Dummy LB service should bind
+        handle_service_port_map_event(&Event::Apply(lb_svc.clone()), port_map);
+        let key = port_map.get_key(20005);
+        assert_eq!(key, Some(ResourceKey::new("default", "chal-1", "pwn")));
+
+        // Deleting dummy LB service should unbind
+        handle_service_port_map_event(&Event::Delete(lb_svc), port_map);
+        assert_eq!(port_map.get_key(20005), None);
     }
 
     #[tokio::test]
-    async fn test_instances_lock_when_route_allocator_reallocating() {
+    async fn test_handle_service_port_map_event_init_clears() {
+        use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
+
+        let (_store, ctx) = dummy_context();
+        let port_map = ctx.port_map.as_ref().unwrap();
+
+        let lb_svc = Service {
+            metadata: ObjectMeta {
+                name: Some("chal-1-lb-web".to_string()),
+                namespace: Some("default".to_string()),
+                labels: Some(crate::btreemap! {
+                    INSTANCE_LABEL => "chal-1",
+                    RESOURCE_LABEL => "web",
+                }),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                load_balancer_class: Some(crate::utils::DUMMY_LB_CLASS.to_string()),
+                ports: Some(vec![ServicePort {
+                    name: Some("pwn".to_string()),
+                    port: 20005,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        handle_service_port_map_event(&Event::InitApply(lb_svc), port_map);
+        assert!(port_map.get_key(20005).is_some());
+
+        handle_service_port_map_event(&Event::Init, port_map);
+        assert_eq!(port_map.get_key(20005), None);
+    }
+
+    #[tokio::test]
+    async fn test_instances_lock_when_services_reallocating() {
         use crate::cache::ReadyGate;
         use std::time::Duration;
 
@@ -949,21 +879,17 @@ mod tests {
         ctx.caches.replica_sets.mark_ready();
         ctx.caches.services.mark_ready();
         ctx.caches.templates.mark_ready();
-        ctx.caches.proxy_routes.mark_ready();
         ctx.caches.tls_routes.mark_ready();
 
         let gate = ReadyGate::from_caches(&ctx.caches);
         assert!(gate.is_ready(), "gate must be ready initially");
 
-        // Port map receives Event::Init (e.g. reconnection / re-list)
-        let port_map = ctx.port_map.as_ref().unwrap();
-        handle_proxy_route_port_map_event(&Event::Init, port_map, None);
-        // ProxyRoute watcher stream marks proxy_routes unready on Event::Init
-        ctx.caches.proxy_routes.mark_unready();
+        // Services cache receives Event::Init (e.g. reconnection / re-list)
+        ctx.caches.services.mark_unready();
 
         assert!(
             !gate.is_ready(),
-            "gate must not be ready while port map is re-syncing"
+            "gate must not be ready while services cache is re-syncing"
         );
 
         // Spawn a task that waits on the gate (simulating instance reconcile stream)
@@ -974,74 +900,22 @@ mod tests {
             let _ = unlocked_tx.send(()).await;
         });
 
-        // Verify the gate remains locked while routes are being reloaded
+        // Verify the gate remains locked while services are being reloaded
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             unlocked_rx.try_recv().is_err(),
-            "instance processing must be locked while port map is re-syncing"
+            "instance processing must be locked while services cache is re-syncing"
         );
 
-        // Re-stream routes during InitApply
-        let route = CTFProxyRoute {
-            metadata: ObjectMeta {
-                name: Some("r30000".to_string()),
-                namespace: Some("aincrad-system".to_string()),
-                labels: Some(crate::btreemap! {
-                    NAMESPACE_LABEL => "default",
-                    INSTANCE_LABEL => "chal-1",
-                    RESOURCE_LABEL => "web",
-                }),
-                ..Default::default()
-            },
-            spec: k8s_common::crd::CTFProxyRouteSpec {
-                backend: "web.default.svc.cluster.local:80".to_string(),
-                policy: Default::default(),
-            },
-        };
-        handle_proxy_route_port_map_event(&Event::InitApply(route.clone()), port_map, None);
-        ctx.caches.proxy_routes.handle(&Event::InitApply(route));
-
-        // Re-allocation finishes: Event::InitDone arrives
-        handle_proxy_route_port_map_event(&Event::InitDone, port_map, None);
-        ctx.caches.proxy_routes.mark_ready();
+        // Re-sync finishes: Event::InitDone arrives
+        ctx.caches.services.mark_ready();
 
         // Verify gate is ready and waiter task unlocks
         assert!(gate.is_ready(), "gate must be ready after InitDone");
         let unlocked = tokio::time::timeout(Duration::from_secs(1), unlocked_rx.recv()).await;
         assert!(
             unlocked.is_ok(),
-            "instance processing must resume once route allocator finishes"
+            "instance processing must resume once services sync finishes"
         );
-    }
-
-    #[tokio::test]
-    async fn test_handle_proxy_route_port_map_event_binds_unlabeled_static_route() {
-        let (_store, ctx) = dummy_context();
-        let port_map = ctx.port_map.as_ref().unwrap();
-
-        let unlabeled_route = CTFProxyRoute {
-            metadata: ObjectMeta {
-                name: Some("p30005".to_string()),
-                namespace: Some("aincrad-system".to_string()),
-                labels: None,
-                ..Default::default()
-            },
-            spec: k8s_common::crd::CTFProxyRouteSpec {
-                backend: "static-service.default.svc.cluster.local:80".to_string(),
-                policy: Default::default(),
-            },
-        };
-
-        handle_proxy_route_port_map_event(&Event::Apply(unlabeled_route), port_map, None);
-
-        let key = port_map.get_key(30005);
-        assert!(
-            key.is_some(),
-            "unlabeled TCP route must be bound in port map"
-        );
-        let key = key.unwrap();
-        assert_eq!(key.namespace, "");
-        assert_eq!(key.instance, "");
-        assert_eq!(key.resource, "");
     }
 }

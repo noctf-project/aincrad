@@ -9,8 +9,6 @@ pub const TEMPLATE_LABEL: &str = "aincrad.noctf.dev/template";
 pub const RESOURCE_LABEL: &str = "aincrad.noctf.dev/resource";
 pub const INSTANCE_GENERATION_LABEL: &str = "aincrad.noctf.dev/instance-generation";
 
-pub const ROUTES_FINALIZER: &str = "aincrad.noctf.dev/routes";
-
 pub const RESTARTED_AT_ANNOTATION: &str = "aincrad.noctf.dev/restartedAt";
 pub const MIN_TEMPLATE_GENERATION_ANNOTATION: &str = "aincrad.noctf.dev/minTemplateGeneration";
 pub const EXPIRES_AT_ANNOTATION: &str = "aincrad.noctf.dev/expiresAt";

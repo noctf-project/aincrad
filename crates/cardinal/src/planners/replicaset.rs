@@ -714,7 +714,7 @@ mod tests {
             web_pod_spec.containers[0].env.as_ref().unwrap()[0]
                 .value
                 .as_deref(),
-            Some("chal-web-db")
+            Some("chal-web-svc-db")
         );
     }
 

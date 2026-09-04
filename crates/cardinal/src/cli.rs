@@ -39,12 +39,8 @@ pub struct Opts {
     #[arg(long, env = "CLUSTER_DOMAIN", default_value = "cluster.local")]
     pub cluster_domain: String,
 
-    #[arg(
-        long = "namespace",
-        visible_alias = "managed-namespace",
-        action = clap::ArgAction::Append
-    )]
-    pub managed_namespaces: Vec<String>,
+    #[arg(long, env = "NAMESPACE", visible_alias = "managed-namespace")]
+    pub namespace: Option<String>,
 
     #[arg(
         long,
@@ -53,6 +49,9 @@ pub struct Opts {
         action = clap::ArgAction::Append
     )]
     pub image_aliases: Option<Vec<(String, String)>>,
+
+    #[arg(long, env = "LOAD_BALANCER_IP")]
+    pub load_balancer_ip: Option<String>,
 }
 
 /// Parses a single `key=value` image alias argument, validating the key and
@@ -170,8 +169,9 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            managed_namespaces: vec![],
+            namespace: None,
             image_aliases: None,
+            load_balancer_ip: None,
         };
         assert!(opts.validate().is_ok());
     }
@@ -186,8 +186,9 @@ mod tests {
             tls_port: 443,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            managed_namespaces: vec![],
+            namespace: None,
             image_aliases: None,
+            load_balancer_ip: None,
         };
         assert!(opts.validate().is_ok());
     }
@@ -202,8 +203,9 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            managed_namespaces: vec![],
+            namespace: None,
             image_aliases: None,
+            load_balancer_ip: None,
         };
         let err = opts.validate().unwrap_err();
         assert!(err.contains("overlaps with auto_ports"));
@@ -219,8 +221,9 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            managed_namespaces: vec![],
+            namespace: None,
             image_aliases: None,
+            load_balancer_ip: None,
         };
         let err = opts.validate().unwrap_err();
         assert!(err.contains("tls_port (4433) overlaps with reserved_ports"));
@@ -236,8 +239,9 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            managed_namespaces: vec![],
+            namespace: None,
             image_aliases: None,
+            load_balancer_ip: None,
         };
         let err = opts.validate().unwrap_err();
         assert!(err.contains("tls_port (4433) overlaps with auto_ports"));
@@ -252,8 +256,9 @@ mod tests {
             tls_port: 4433,
             system_namespace: None,
             cluster_domain: "cluster.local".into(),
-            managed_namespaces: vec![],
+            namespace: None,
             image_aliases,
+            load_balancer_ip: None,
         }
     }
 
@@ -330,21 +335,20 @@ mod tests {
 
     #[test]
     fn test_parse_namespace_args() {
-        let opts = Opts::try_parse_from(["cardinal", "--namespace", "ns-a", "--namespace", "ns-b"])
-            .unwrap();
-        assert_eq!(opts.managed_namespaces, vec!["ns-a", "ns-b"]);
+        let opts = Opts::try_parse_from(["cardinal", "--namespace", "ns-a"]).unwrap();
+        assert_eq!(opts.namespace, Some("ns-a".to_string()));
     }
 
     #[test]
     fn test_parse_managed_namespace_alias() {
         let opts = Opts::try_parse_from(["cardinal", "--managed-namespace", "team-1"]).unwrap();
-        assert_eq!(opts.managed_namespaces, vec!["team-1"]);
+        assert_eq!(opts.namespace, Some("team-1".to_string()));
     }
 
     #[test]
-    fn test_parse_no_namespaces_defaults_empty() {
+    fn test_parse_no_namespaces_defaults_none() {
         let opts = Opts::try_parse_from(["cardinal"]).unwrap();
-        assert!(opts.managed_namespaces.is_empty());
+        assert_eq!(opts.namespace, None);
     }
 
     #[test]

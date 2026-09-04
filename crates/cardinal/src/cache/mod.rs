@@ -6,7 +6,7 @@ pub use instance::{InstanceCache, InstanceKey};
 pub use resource::{CachedItem, ResourceCache, ResourceEntry, ResourceKey, ResourceProjection};
 pub use template::{CachedTemplateEntry, PodPatchersMap, TemplateCache, TemplateKey};
 
-use k8s_common::crd::{CTFProxyRoute, TLSRoute};
+use k8s_common::crd::TLSRoute;
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::core::v1::Service;
 use tokio::sync::watch;
@@ -18,7 +18,6 @@ pub struct Caches {
     pub instances: InstanceCache,
     pub replica_sets: ResourceCache<ReplicaSet>,
     pub services: ResourceCache<Service>,
-    pub proxy_routes: ResourceCache<CTFProxyRoute>,
     pub tls_routes: ResourceCache<TLSRoute>,
 }
 
@@ -51,7 +50,6 @@ impl ReadyGate {
                 caches.templates.watch(),
                 caches.services.watch(),
                 caches.replica_sets.watch(),
-                caches.proxy_routes.watch(),
                 caches.tls_routes.watch(),
             ],
         }
@@ -89,7 +87,6 @@ mod tests {
         caches.templates.mark_ready();
         caches.services.mark_ready();
         caches.replica_sets.mark_ready();
-        caches.proxy_routes.mark_ready();
         caches.tls_routes.mark_ready();
     }
 
@@ -104,10 +101,9 @@ mod tests {
         let caches = caches();
         let gate = ReadyGate::from_caches(&caches);
 
-        // Four of five caches synced; gate must stay closed.
+        // Three of four caches synced; gate must stay closed.
         caches.services.mark_ready();
         caches.replica_sets.mark_ready();
-        caches.proxy_routes.mark_ready();
         caches.tls_routes.mark_ready();
         assert!(!gate.is_ready());
         assert!(
@@ -200,9 +196,8 @@ mod tests {
     fn test_gate_order_of_ready_marks_does_not_matter() {
         let caches = caches();
         let gate = ReadyGate::from_caches(&caches);
-        // Mark in reverse order; still opens once all five are ready.
+        // Mark in reverse order; still opens once all four are ready.
         caches.tls_routes.mark_ready();
-        caches.proxy_routes.mark_ready();
         caches.replica_sets.mark_ready();
         caches.services.mark_ready();
         assert!(!gate.is_ready());

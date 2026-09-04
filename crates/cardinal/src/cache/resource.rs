@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use futures::{Stream, StreamExt};
-use k8s_common::crd::{CTFProxyRoute, TLSRoute};
+use k8s_common::crd::TLSRoute;
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
@@ -418,52 +418,6 @@ impl ResourceProjection for Service {
     fn value(_resource: &Self) -> Self::Value {}
 }
 
-impl ResourceProjection for CTFProxyRoute {
-    type Value = ();
-
-    fn key(resource: &Self) -> ResourceKey {
-        let ns = resource
-            .meta()
-            .labels
-            .as_ref()
-            .and_then(|l| l.get(NAMESPACE_LABEL))
-            .map(|s| s.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default();
-        let instance = resource
-            .meta()
-            .labels
-            .as_ref()
-            .and_then(|l| l.get(INSTANCE_LABEL))
-            .map(|s| s.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default();
-        let disambig = resource
-            .meta()
-            .labels
-            .as_ref()
-            .and_then(|l| l.get(RESOURCE_LABEL))
-            .map(|s| s.as_str())
-            .unwrap_or_default();
-        ResourceKey::new(ns, instance, disambig)
-    }
-
-    fn name(resource: &Self) -> String {
-        resource
-            .meta()
-            .name
-            .as_deref()
-            .unwrap_or_default()
-            .to_string()
-    }
-
-    fn meta(resource: &Self) -> ObjectMeta {
-        resource.meta().clone()
-    }
-
-    fn value(_resource: &Self) -> Self::Value {}
-}
-
 impl ResourceProjection for ReplicaSet {
     type Value = k8s_openapi::api::apps::v1::ReplicaSetStatus;
 
@@ -523,7 +477,6 @@ impl ResourceProjection for TLSRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_common::crd::CTFProxyRouteSpec;
     use k8s_openapi::api::apps::v1::{ReplicaSetSpec, ReplicaSetStatus};
     use k8s_openapi::api::core::v1::ServiceSpec;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -702,31 +655,6 @@ mod tests {
         }
     }
 
-    fn proxy_route(
-        name: &str,
-        system_ns: &str,
-        instance_ns: &str,
-        instance: &str,
-        resource: &str,
-    ) -> CTFProxyRoute {
-        CTFProxyRoute {
-            metadata: ObjectMeta {
-                name: Some(name.to_string()),
-                namespace: Some(system_ns.to_string()),
-                labels: Some(crate::btreemap! {
-                    NAMESPACE_LABEL => instance_ns,
-                    INSTANCE_LABEL => instance,
-                    RESOURCE_LABEL => resource,
-                }),
-                ..Default::default()
-            },
-            spec: CTFProxyRouteSpec {
-                backend: "10.0.0.1:80".to_string(),
-                policy: Default::default(),
-            },
-        }
-    }
-
     #[test]
     fn test_service_projection_extracts_key_and_name() {
         let svc = svc("chal-1-web", "team-1", "chal-1", "web");
@@ -833,44 +761,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_proxy_route_projection_keys_by_instance_namespace_not_system_ns() {
-        // The route physically lives in the system namespace, but the cache
-        // must group it under the owning instance's namespace.
-        let route = proxy_route("p30001", "aincrad-system", "team-1", "chal-1", "web");
-
-        let key = CTFProxyRoute::key(&route);
-        assert_eq!(key, ResourceKey::new("team-1", "chal-1", "web"));
-        assert_ne!(
-            key.namespace, "aincrad-system",
-            "the system namespace must not leak into the cache key"
-        );
-        assert_eq!(CTFProxyRoute::name(&route), "p30001");
-        assert_eq!(CTFProxyRoute::value(&route), ());
-    }
-
-    #[test]
-    fn test_proxy_route_projection_name_is_the_cluster_object_name() {
-        assert_eq!(
-            CTFProxyRoute::name(&proxy_route("rwhoami", "sys", "team-1", "chal-1", "main")),
-            "rwhoami"
-        );
-        assert_eq!(
-            CTFProxyRoute::name(&proxy_route("p30002", "sys", "team-2", "chal-2", "pwn")),
-            "p30002"
-        );
-    }
-
-    #[test]
-    fn test_proxy_route_projection_defaults_labels() {
-        let route = proxy_route("p30001", "sys", "", "", "");
-        assert_eq!(
-            CTFProxyRoute::key(&route),
-            ResourceKey::new("", "", ""),
-            "unlabeled proxy routes fall back to empty namespace and instance"
-        );
-    }
-
     /// ----- Cache integration with concrete projections -----------------
 
     #[test]
@@ -911,40 +801,6 @@ mod tests {
             "prefix 'chal' must not bleed into 'chal-1'"
         );
         assert_eq!(cache.for_instance("team-1", "chal-2").len(), 1);
-    }
-
-    #[test]
-    fn test_proxy_route_cache_groups_across_system_namespace() {
-        let cache = ResourceCache::<CTFProxyRoute>::new();
-        cache.handle(&Event::Apply(proxy_route(
-            "p30001",
-            "aincrad-system",
-            "team-1",
-            "chal-1",
-            "web",
-        )));
-        cache.handle(&Event::Apply(proxy_route(
-            "p30002",
-            "aincrad-system",
-            "team-1",
-            "chal-1",
-            "pwn",
-        )));
-        cache.handle(&Event::Apply(proxy_route(
-            "rwhoami",
-            "aincrad-system",
-            "team-2",
-            "chal-2",
-            "main",
-        )));
-
-        let mine = cache.for_instance("team-1", "chal-1");
-        assert_eq!(mine.len(), 2);
-        assert_eq!(cache.for_instance("team-2", "chal-2").len(), 1);
-
-        let mut names = cache.names("team-1", "chal-1");
-        names.sort();
-        assert_eq!(names, vec!["p30001".to_string(), "p30002".to_string()]);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use crate::{
     Context, Error, btreemap,
     cache::ResourceKey,
-    planners::{Planner, proxy_route::build_merged_route_spec},
+    planners::{Planner, helpers::build_merged_route_spec},
     reconcilers::template::ResolvedTemplate,
     routing::{derive_hostname, format_tls_host},
     utils::naming::resource_name,
@@ -48,9 +48,12 @@ impl Planner for TLSRoutePlanner {
 
             let route_key = ResourceKey::new(ns, instance_name, &route_tmpl.name);
             let hostname = derive_hostname(&ctx.route_seed, &route_key, tls.prefix.as_deref());
-            let fqdn = format_tls_host(&ctx.hostname_suffix, &hostname);
             let route_name = resource_name(instance_name, &route_tmpl.name);
-            let backend_svc = resource_name(instance_name, &merged_spec.backend.service);
+            let fqdn = format_tls_host(&ctx.hostname_suffix, &hostname);
+            let backend_svc = resource_name(
+                &format!("{instance_name}-svc"),
+                &merged_spec.backend.service,
+            );
 
             let labels = btreemap! {
                 RESOURCE_LABEL => route_tmpl.name.as_str(),
@@ -206,7 +209,7 @@ mod tests {
         assert_eq!(route.spec.rules.len(), 1);
         let backend_refs = &route.spec.rules[0].backend_refs;
         assert_eq!(backend_refs.len(), 1);
-        assert_eq!(backend_refs[0].name, "busybox-echo");
+        assert_eq!(backend_refs[0].name, "busybox-svc-echo");
         assert_eq!(backend_refs[0].port, Some(1337));
     }
 

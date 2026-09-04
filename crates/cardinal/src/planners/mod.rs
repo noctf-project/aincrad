@@ -1,16 +1,13 @@
 pub mod helpers;
 pub mod network_policy;
-pub mod proxy_route;
 pub mod replicaset;
 pub mod service;
 pub mod tls_route;
 
 use std::collections::BTreeMap;
 
-pub use helpers::apply_condition;
-pub use helpers::validate_overrides;
+pub use helpers::{apply_condition, build_merged_route_spec, validate_overrides};
 pub use network_policy::NetworkPolicyPlanner;
-pub use proxy_route::ProxyRoutePlanner;
 pub use replicaset::ReplicaSetPlanner;
 pub use service::ServicePlanner;
 pub use tls_route::TLSRoutePlanner;
@@ -170,7 +167,7 @@ pub fn get_services_map(
 ) -> BTreeMap<String, String> {
     let mut services_map = BTreeMap::new();
     for pod_tmpl in &template.spec.pods {
-        let svc_name = resource_name(instance_name, &pod_tmpl.name);
+        let svc_name = resource_name(&format!("{instance_name}-svc"), &pod_tmpl.name);
         services_map.insert(pod_tmpl.name.clone(), svc_name);
     }
     services_map
