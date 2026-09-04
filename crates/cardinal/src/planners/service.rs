@@ -11,7 +11,7 @@ use crate::cache::{ResourceCache, ResourceKey};
 use crate::planners::Planner;
 use crate::planners::helpers::build_merged_route_spec;
 use crate::reconcilers::template::ResolvedTemplate;
-use crate::routing::{PortError, RouteError};
+use crate::routing::{Port, PortError, RouteError};
 use crate::utils::naming::resource_name;
 use crate::{Context, Error, btreemap};
 
@@ -38,13 +38,23 @@ pub fn plan_services(
             RESOURCE_LABEL => pod.name.as_str(),
         };
 
-        let ports: BTreeSet<i32> = pod
+        let mut ports: BTreeSet<i32> = pod
             .spec
             .containers
             .iter()
             .filter_map(|x| x.ports.as_ref())
             .flat_map(|x| x.iter().map(|c| c.container_port))
             .collect();
+
+        for r in &template.spec.routes {
+            if r.backend.service == pod.name && r.tls.is_some() {
+                ports.insert(r.backend.port as i32);
+            }
+        }
+
+        if ports.is_empty() {
+            continue;
+        }
 
         let svc = Service {
             metadata: ObjectMeta {
@@ -103,21 +113,27 @@ pub fn plan_load_balancers(
                 continue;
             }
 
-            let Some(RouteTarget::Tcp(tcp)) = merged_spec.target() else {
+            let Some(RouteTarget::Port(port_opt, proto)) = merged_spec.target() else {
                 continue;
             };
 
-            let port = tcp.port.unwrap_or(0);
+            let port = port_opt.unwrap_or(0);
+            let port_enum = match proto {
+                k8s_common::crd::RouteProtocol::Tcp => Port::Tcp(port),
+                k8s_common::crd::RouteProtocol::Udp => Port::Udp(port),
+            };
+
             if port != 0
                 && let Some(port_map) = ctx.port_map.as_deref()
                 && !port_map.is_reserved_port(port)
             {
-                return Err(RouteError::Port(PortError::OutOfRange(port)).into());
+                return Err(RouteError::Port(PortError::OutOfRange(port_enum)).into());
             }
 
             service_ports.push(ServicePort {
                 name: Some(route_tmpl.name.clone()),
                 port: port as i32,
+                protocol: Some(proto.as_str().to_string()),
                 target_port: Some(IntOrString::Int(merged_spec.backend.port as i32)),
                 ..Default::default()
             });
@@ -199,13 +215,17 @@ pub async fn apply_load_balancers(
                 .unwrap_or(lb_name);
 
             if let Some(ref mut ports) = lb.spec.as_mut().and_then(|s| s.ports.as_mut()) {
-                let requests: Vec<(ResourceKey, u16)> = ports
+                let requests: Vec<(ResourceKey, Port)> = ports
                     .iter()
                     .map(|p| {
                         let route_name = p.name.as_deref().unwrap_or(pod_resource);
                         let key = ResourceKey::new(lb_ns, instance_name, route_name);
-                        let requested_port = if p.port == 0 { 0 } else { p.port as u16 };
-                        (key, requested_port)
+                        let port_num = if p.port == 0 { 0 } else { p.port as u16 };
+                        let port = match p.protocol.as_deref() {
+                            Some("UDP") => Port::Udp(port_num),
+                            _ => Port::Tcp(port_num),
+                        };
+                        (key, port)
                     })
                     .collect();
 
@@ -215,7 +235,7 @@ pub async fn apply_load_balancers(
                     .map_err(RouteError::Port)?;
 
                 for (p, cand) in ports.iter_mut().zip(&candidates) {
-                    p.port = cand.port() as i32;
+                    p.port = cand.port_number() as i32;
                 }
 
                 bound_entries.extend(requests.into_iter().map(|(key, _)| key).zip(candidates));
@@ -291,7 +311,7 @@ impl Planner for ServicePlanner {
 mod tests {
     use std::sync::Arc;
 
-    use k8s_common::crd::{RouteBackend, RouteSpec, RouteSpecTCP};
+    use k8s_common::crd::{RouteBackend, RouteSpec};
     use k8s_common::labels::INSTANCE_LABEL;
 
     use super::*;
@@ -308,8 +328,9 @@ mod tests {
             backend: RouteBackend {
                 service: "web".to_string(),
                 port: 1337,
+                protocol: None,
             },
-            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            port: Some(0),
             tls: None,
         });
 
@@ -360,8 +381,9 @@ mod tests {
             backend: RouteBackend {
                 service: "web".to_string(),
                 port: 1337,
+                protocol: None,
             },
-            tcp: Some(RouteSpecTCP { port: Some(20005) }),
+            port: Some(20005),
             tls: None,
         });
 
@@ -382,8 +404,9 @@ mod tests {
             backend: RouteBackend {
                 service: "web".to_string(),
                 port: 1337,
+                protocol: None,
             },
-            tcp: Some(RouteSpecTCP { port: Some(9999) }),
+            port: Some(9999),
             tls: None,
         });
 
@@ -406,8 +429,9 @@ mod tests {
             backend: RouteBackend {
                 service: "web".to_string(),
                 port: 1337,
+                protocol: None,
             },
-            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            port: Some(0),
             tls: None,
         });
 
@@ -459,5 +483,45 @@ mod tests {
         let instance = dummy_instance("chal-1", None);
         let names = ServicePlanner::cached_names(&instance, &ctx).unwrap();
         assert!(names.is_empty(), "an empty cache must surface no names");
+    }
+
+    #[tokio::test]
+    async fn test_plan_services_skips_pods_without_container_ports() {
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let mut tmpl = dummy_resolved_template(1);
+        tmpl.spec.pods[0].spec.containers[0].ports = None;
+        tmpl.spec.routes.clear();
+
+        let svcs = ServicePlanner::plan(&instance, &tmpl, &ctx).unwrap();
+        assert!(
+            svcs.is_empty(),
+            "pod without container ports and without routes must produce no ClusterIP service"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plan_services_includes_route_backend_ports() {
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let mut tmpl = dummy_resolved_template(1);
+        tmpl.spec.pods[0].spec.containers[0].ports = None;
+        tmpl.spec.routes = vec![RouteSpec {
+            name: "terminal".to_string(),
+            backend: RouteBackend {
+                service: "web".to_string(),
+                port: 7681,
+                protocol: None,
+            },
+            tls: Some(k8s_common::crd::RouteSpecTLS { prefix: None }),
+            ..Default::default()
+        }];
+
+        let svcs = ServicePlanner::plan(&instance, &tmpl, &ctx).unwrap();
+        assert_eq!(svcs.len(), 1);
+        assert_eq!(svcs[0].metadata.name.as_deref(), Some("chal-1-svc-web"));
+        let ports = svcs[0].spec.as_ref().unwrap().ports.as_ref().unwrap();
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].port, 7681);
     }
 }

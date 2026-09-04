@@ -18,14 +18,45 @@ pub struct EndpointTarget {
     pub port: u16,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum RouteProtocol {
+    #[default]
+    #[serde(rename = "TCP")]
+    Tcp,
+    #[serde(rename = "UDP")]
+    Udp,
+}
+
+impl RouteProtocol {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RouteProtocol::Tcp => "TCP",
+            RouteProtocol::Udp => "UDP",
+        }
+    }
+}
+
+impl std::fmt::Display for RouteProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteBackend {
     pub service: String,
     pub port: u16,
+    /// Transport protocol for the backend service (TCP or UDP). Defaults to TCP if omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<RouteProtocol>,
 }
 
 impl RouteBackend {
+    pub fn protocol(&self) -> RouteProtocol {
+        self.protocol.unwrap_or(RouteProtocol::Tcp)
+    }
+
     /// Returns the target address string `host:port`.
     /// If `host` contains a dot or colon, namespace is ignored and `host:port` is returned.
     /// Otherwise, it formats as a local K8s service: `{host}.{namespace}.svc.{cluster_domain}:{port}`.
@@ -43,14 +74,6 @@ impl RouteBackend {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct RouteSpecTCP {
-    /// Dedicated TCP port (0 or omitted for auto-allocation, or fixed port in reserved range).
-    #[serde(default)]
-    pub port: Option<u16>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct RouteSpecTLS {
     /// Subdomain prefix for the derived TLS hostname (e.g. 'web' in 'web-xxxx.c.noctf.dev'). Defaults to the route metadata name if omitted.
     #[schemars(length(max = 48), regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"))]
@@ -59,7 +82,7 @@ pub struct RouteSpecTLS {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteTarget<'a> {
-    Tcp(&'a RouteSpecTCP),
+    Port(Option<u16>, RouteProtocol),
     Tls(&'a RouteSpecTLS),
 }
 
@@ -88,28 +111,34 @@ pub struct RoutePolicySpec {
 #[schemars(
     extend("x-kubernetes-validations" = [
         {
-            "rule": "has(self.tcp) != has(self.tls)",
-            "message": "Route must specify either 'tcp' or 'tls', but not both"
+            "rule": "has(self.port) != has(self.tls)",
+            "message": "Route must specify either 'port' or 'tls', but not both"
         },
         {
-            "rule": "!has(self.tcp) || !has(self.tcp.port) || self.tcp.port == 0",
+            "rule": "!has(self.tls) || !has(self.backend.protocol) || self.backend.protocol == 'TCP'",
+            "message": "TLS routes cannot target a UDP backend"
+        },
+        {
+            "rule": "!has(self.port) || self.port == 0",
             "message": "Explicit external ports cannot be set; port must be omitted or set to 0"
         }
     ])
 )]
 #[serde(rename_all = "camelCase")]
-/// Specification for dynamic L4 TCP/TLS routing and traffic inspection.
+/// Specification for dynamic L4 TCP/UDP and L7 TLS routing.
 pub struct RouteSpec {
     #[schemars(
         regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
         length(min = 1, max = 24)
     )]
     pub name: String,
-    /// Target backend Kubernetes service name and port.
+    /// Target backend Kubernetes service name, port, and protocol.
     pub backend: RouteBackend,
-    /// TCP routing configuration (mutually exclusive with 'tls').
-    pub tcp: Option<RouteSpecTCP>,
-    /// TLS routing configuration (mutually exclusive with 'tcp').
+    /// Dedicated external L4 port (0 or omitted for auto-allocation, or fixed port in reserved range). Mutually exclusive with 'tls'.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// TLS routing configuration (mutually exclusive with 'port').
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<RouteSpecTLS>,
 }
 
@@ -119,8 +148,8 @@ impl KubeListKey for RouteSpec {
 
 impl RouteSpec {
     pub fn target(&self) -> Option<RouteTarget<'_>> {
-        match (&self.tcp, &self.tls) {
-            (Some(tcp), None) => Some(RouteTarget::Tcp(tcp)),
+        match (self.port, &self.tls) {
+            (Some(p), None) => Some(RouteTarget::Port(Some(p), self.backend.protocol())),
             (None, Some(tls)) => Some(RouteTarget::Tls(tls)),
             _ => None,
         }
@@ -148,16 +177,31 @@ mod tests {
                 "service": "127.0.0.1",
                 "port": 8080
             },
-            "tcp": {
-                "port": 20001
-            }
+            "port": 20001
         });
         let spec_tcp: RouteSpec = serde_json::from_value(json_tcp).unwrap();
         assert_eq!(spec_tcp.backend.service, "127.0.0.1");
         assert_eq!(spec_tcp.backend.port, 8080);
+        assert_eq!(spec_tcp.backend.protocol(), RouteProtocol::Tcp);
         assert_eq!(
             spec_tcp.target(),
-            Some(RouteTarget::Tcp(&RouteSpecTCP { port: Some(20001) }))
+            Some(RouteTarget::Port(Some(20001), RouteProtocol::Tcp))
+        );
+
+        let json_udp = serde_json::json!({
+            "name": "dns",
+            "backend": {
+                "service": "127.0.0.1",
+                "port": 53,
+                "protocol": "UDP"
+            },
+            "port": 0
+        });
+        let spec_udp: RouteSpec = serde_json::from_value(json_udp).unwrap();
+        assert_eq!(spec_udp.backend.protocol(), RouteProtocol::Udp);
+        assert_eq!(
+            spec_udp.target(),
+            Some(RouteTarget::Port(Some(0), RouteProtocol::Udp))
         );
 
         let json_tls = serde_json::json!({
@@ -184,6 +228,7 @@ mod tests {
         let b1 = RouteBackend {
             service: "web-service".to_string(),
             port: 80,
+            protocol: None,
         };
         assert_eq!(
             b1.address("default", "cluster.local"),
@@ -197,18 +242,21 @@ mod tests {
         let b2 = RouteBackend {
             service: "127.0.0.1".to_string(),
             port: 8080,
+            protocol: None,
         };
         assert_eq!(b2.address("default", "cluster.local"), "127.0.0.1:8080");
 
         let b3 = RouteBackend {
             service: "example.com".to_string(),
             port: 443,
+            protocol: None,
         };
         assert_eq!(b3.address("custom-ns", "cluster.local"), "example.com:443");
 
         let b4 = RouteBackend {
             service: "svc.other-ns.svc.cluster.local".to_string(),
             port: 8080,
+            protocol: None,
         };
         assert_eq!(
             b4.address("custom-ns", "cluster.local"),
@@ -218,6 +266,7 @@ mod tests {
         let b5 = RouteBackend {
             service: "::1".to_string(),
             port: 80,
+            protocol: None,
         };
         assert_eq!(b5.address("custom-ns", "cluster.local"), "::1:80");
     }

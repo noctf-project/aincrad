@@ -4,7 +4,7 @@ use k8s_common::{
     crd::CTFInstance,
     labels::{
         INSTANCE_GENERATION_LABEL, INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE,
-        NAMESPACE_LABEL,
+        NAMESPACE_LABEL, TEMPLATE_LABEL,
     },
 };
 use kube::{
@@ -42,6 +42,7 @@ pub async fn apply_planner<P: Planner>(
         labels.insert(MANAGED_BY_LABEL.to_string(), MANAGED_BY_VALUE.to_string());
         labels.insert(NAMESPACE_LABEL.to_string(), ns_str.clone());
         labels.insert(INSTANCE_LABEL.to_string(), name_str.clone());
+        labels.insert(TEMPLATE_LABEL.to_string(), instance.spec.template.clone());
         labels.insert(INSTANCE_GENERATION_LABEL.to_string(), gen_str.clone());
     }
 

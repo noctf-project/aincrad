@@ -46,6 +46,13 @@ impl Planner for TLSRoutePlanner {
                 continue;
             };
 
+            if merged_spec.backend.protocol() == k8s_common::crd::RouteProtocol::Udp {
+                return Err(Error::InvalidOverride(format!(
+                    "Route '{}' specifies TLS on a UDP backend",
+                    route_tmpl.name
+                )));
+            }
+
             let route_key = ResourceKey::new(ns, instance_name, &route_tmpl.name);
             let hostname = derive_hostname(&ctx.route_seed, &route_key, tls.prefix.as_deref());
             let route_name = resource_name(instance_name, &route_tmpl.name);
@@ -96,7 +103,7 @@ mod tests {
     use super::*;
     use crate::test_utils::tests::{dummy_context, dummy_instance, dummy_resolved_template};
     use k8s_common::{
-        crd::{CTFInstanceSpecRouteOverride, RouteBackend, RouteSpec, RouteSpecTCP, RouteSpecTLS},
+        crd::{CTFInstanceSpecRouteOverride, RouteBackend, RouteSpec, RouteSpecTLS},
         labels::{INSTANCE_LABEL, NAMESPACE_LABEL, RESOURCE_LABEL},
     };
 
@@ -166,6 +173,7 @@ mod tests {
                 backend: RouteBackend {
                     service: "echo".to_string(),
                     port: 1337,
+                    protocol: None,
                 },
                 tls: Some(RouteSpecTLS {
                     prefix: Some("echo".into()),
@@ -177,8 +185,9 @@ mod tests {
                 backend: RouteBackend {
                     service: "echo".to_string(),
                     port: 1338,
+                    protocol: None,
                 },
-                tcp: Some(RouteSpecTCP { port: Some(0) }),
+                port: Some(0),
                 ..Default::default()
             },
         ];
@@ -222,7 +231,7 @@ mod tests {
             tls: Some(RouteSpecTLS {
                 prefix: Some("custom-prefix".into()),
             }),
-            tcp: None,
+            port: None,
         }];
 
         let mut template = dummy_resolved_template(1);
@@ -231,6 +240,7 @@ mod tests {
             backend: RouteBackend {
                 service: "web".to_string(),
                 port: 80,
+                protocol: None,
             },
             tls: Some(RouteSpecTLS {
                 prefix: Some("default-prefix".into()),
@@ -242,5 +252,32 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert!(routes[0].spec.hostnames[0].starts_with("custom-prefix-"));
         assert!(routes[0].spec.hostnames[0].ends_with(".c.noctf.dev"));
+    }
+
+    #[tokio::test]
+    async fn test_plan_tls_routes_rejects_udp_backend() {
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let mut template = dummy_resolved_template(1);
+        template.spec.routes = vec![RouteSpec {
+            name: "dns".to_string(),
+            backend: RouteBackend {
+                service: "dns".to_string(),
+                port: 53,
+                protocol: Some(k8s_common::crd::RouteProtocol::Udp),
+            },
+            tls: Some(RouteSpecTLS {
+                prefix: Some("dns".into()),
+            }),
+            ..Default::default()
+        }];
+
+        let err = TLSRoutePlanner::plan(&instance, &template, &ctx).unwrap_err();
+        match err {
+            Error::InvalidOverride(msg) => {
+                assert!(msg.contains("specifies TLS on a UDP backend"), "{msg}");
+            }
+            other => panic!("expected InvalidOverride, got {other:?}"),
+        }
     }
 }

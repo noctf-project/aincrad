@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::crd::{
-    EndpointTarget, RouteSpecTCP, RouteSpecTLS,
+    EndpointTarget, RouteSpecTLS,
     util::{KubeListKey, PatchValue, immutable_property_schema, list_schema},
 };
 
@@ -97,8 +97,8 @@ impl KubeListKey for CTFInstanceSpecPodOverride {
 #[schemars(
     extend("x-kubernetes-validations" = [
         {
-            "rule": "!(has(self.tcp) && has(self.tls))",
-            "message": "Route override must not specify both 'tcp' and 'tls'; inherit from the template for the default route type"
+            "rule": "!(has(self.port) && has(self.tls))",
+            "message": "Route override must not specify both 'port' and 'tls'; inherit from the template for the default route type"
         }
     ])
 )]
@@ -107,10 +107,9 @@ pub struct CTFInstanceSpecRouteOverride {
     /// Name of the template route to override.
     #[schemars(length(min = 1, max = 24))]
     pub name: String,
-    /// TCP route override (explicit port or auto). Omitted: inherit from
-    /// CTFTemplate.
+    /// L4 external port override (explicit port or 0 for auto). Omitted: inherit from CTFTemplate.
     #[serde(default)]
-    pub tcp: Option<RouteSpecTCP>,
+    pub port: Option<u16>,
     /// TLS route override. Omitted: inherit from CTFTemplate.
     #[serde(default)]
     pub tls: Option<RouteSpecTLS>,
@@ -141,11 +140,11 @@ pub struct CTFInstanceSpec {
     #[serde(default)]
     #[schemars(schema_with = "list_schema::<CTFInstanceSpecParam>")]
     pub params: Vec<CTFInstanceSpecParam>,
-    /// Pod replica count overrides for this specific challenge instance.
+    /// Replica count overrides for specific pods in the challenge template.
     #[serde(default)]
     #[schemars(schema_with = "list_schema::<CTFInstanceSpecPodOverride>")]
     pub pods: Vec<CTFInstanceSpecPodOverride>,
-    /// Route port and TLS overrides for this specific challenge instance.
+    /// Route overrides for specific exposed endpoints in the challenge template.
     #[serde(default)]
     #[schemars(schema_with = "list_schema::<CTFInstanceSpecRouteOverride>")]
     pub routes: Vec<CTFInstanceSpecRouteOverride>,
@@ -159,17 +158,17 @@ mod tests {
     fn test_route_override_deserialization() {
         let json_inherit = r#"{"name": "pwn-tcp"}"#;
         let inherit: CTFInstanceSpecRouteOverride = serde_json::from_str(json_inherit).unwrap();
-        assert_eq!(inherit.tcp, None);
+        assert_eq!(inherit.port, None);
         assert_eq!(inherit.tls, None);
 
-        let json_tcp = r#"{"name": "pwn-tcp", "tcp": {"port": 20001}}"#;
+        let json_tcp = r#"{"name": "pwn-tcp", "port": 20001}"#;
         let tcp_override: CTFInstanceSpecRouteOverride = serde_json::from_str(json_tcp).unwrap();
-        assert_eq!(tcp_override.tcp, Some(RouteSpecTCP { port: Some(20001) }));
+        assert_eq!(tcp_override.port, Some(20001));
         assert_eq!(tcp_override.tls, None);
 
         let json_tls = r#"{"name": "web", "tls": {"prefix": "custom"}}"#;
         let tls_override: CTFInstanceSpecRouteOverride = serde_json::from_str(json_tls).unwrap();
-        assert_eq!(tls_override.tcp, None);
+        assert_eq!(tls_override.port, None);
         assert_eq!(
             tls_override.tls,
             Some(RouteSpecTLS {

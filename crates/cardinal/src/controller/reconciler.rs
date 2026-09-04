@@ -23,7 +23,7 @@ use crate::{
     cache::{Caches, ReadyGate, ResourceKey},
     cli::Opts,
     reconcilers,
-    routing::PortMap,
+    routing::{Port, PortMap},
 };
 
 /// Reconciles a single `CTFInstance` resource state.
@@ -177,7 +177,11 @@ pub fn handle_service_port_map_event(event: &Event<Service>, port_map: &PortMap)
                     if p.port > 0 {
                         let route_name = p.name.as_deref().unwrap_or(pod_name);
                         let key = ResourceKey::new(ns, instance_name, route_name);
-                        port_map.bind(p.port as u16, key);
+                        let port = match p.protocol.as_deref() {
+                            Some("UDP") => Port::Udp(p.port as u16),
+                            _ => Port::Tcp(p.port as u16),
+                        };
+                        port_map.bind(port, key);
                     }
                 }
             }
@@ -212,7 +216,11 @@ pub fn handle_service_port_map_event(event: &Event<Service>, port_map: &PortMap)
                     if p.port > 0 {
                         let route_name = p.name.as_deref().unwrap_or(pod_name);
                         let key = ResourceKey::new(ns, instance_name, route_name);
-                        port_map.unbind_key(p.port as u16, &key);
+                        let port = match p.protocol.as_deref() {
+                            Some("UDP") => Port::Udp(p.port as u16),
+                            _ => Port::Tcp(p.port as u16),
+                        };
+                        port_map.unbind_key(port, &key);
                     }
                 }
             }
@@ -398,9 +406,7 @@ mod tests {
         dummy_context, dummy_ctx, dummy_instance, recording_kube_client,
     };
     use chrono::{Duration as ChronoDuration, Utc};
-    use k8s_common::crd::{
-        CTFInstanceSpec, CTFInstanceStatus, RouteBackend, RouteSpec, RouteSpecTCP,
-    };
+    use k8s_common::crd::{CTFInstanceSpec, CTFInstanceStatus, RouteBackend, RouteSpec};
     use k8s_common::labels::{EXPIRES_AT_ANNOTATION, RESTARTED_AT_ANNOTATION};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -578,8 +584,9 @@ mod tests {
             backend: RouteBackend {
                 service: "web".into(),
                 port: 80,
+                protocol: None,
             },
-            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            port: Some(0),
             ..Default::default()
         };
         let (_store, ctx) = dummy_ctx(client, vec![tcp_route]);
@@ -636,8 +643,9 @@ mod tests {
             backend: RouteBackend {
                 service: "web".into(),
                 port: 80,
+                protocol: None,
             },
-            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            port: Some(0),
             ..Default::default()
         };
         let (_store, ctx) = dummy_ctx(client, vec![tcp_route]);
@@ -689,8 +697,9 @@ mod tests {
             backend: RouteBackend {
                 service: "web".into(),
                 port: 80,
+                protocol: None,
             },
-            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            port: Some(0),
             ..Default::default()
         };
         let (_store, ctx) = dummy_ctx(client, vec![tcp_route.clone()]);
@@ -820,16 +829,16 @@ mod tests {
         };
 
         handle_service_port_map_event(&Event::Apply(standard_svc), port_map);
-        assert_eq!(port_map.get_key(20006), None);
+        assert_eq!(port_map.get_key(Port::Tcp(20006)), None);
 
         // Dummy LB service should bind
         handle_service_port_map_event(&Event::Apply(lb_svc.clone()), port_map);
-        let key = port_map.get_key(20005);
+        let key = port_map.get_key(Port::Tcp(20005));
         assert_eq!(key, Some(ResourceKey::new("default", "chal-1", "pwn")));
 
         // Deleting dummy LB service should unbind
         handle_service_port_map_event(&Event::Delete(lb_svc), port_map);
-        assert_eq!(port_map.get_key(20005), None);
+        assert_eq!(port_map.get_key(Port::Tcp(20005)), None);
     }
 
     #[tokio::test]
@@ -862,10 +871,10 @@ mod tests {
         };
 
         handle_service_port_map_event(&Event::InitApply(lb_svc), port_map);
-        assert!(port_map.get_key(20005).is_some());
+        assert!(port_map.get_key(Port::Tcp(20005)).is_some());
 
         handle_service_port_map_event(&Event::Init, port_map);
-        assert_eq!(port_map.get_key(20005), None);
+        assert_eq!(port_map.get_key(Port::Tcp(20005)), None);
     }
 
     #[tokio::test]

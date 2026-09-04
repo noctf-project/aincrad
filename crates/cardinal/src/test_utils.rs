@@ -133,6 +133,10 @@ pub mod tests {
                         containers: vec![k8s_openapi::api::core::v1::Container {
                             name: "app".to_string(),
                             image: Some("nginx:latest".to_string()),
+                            ports: Some(vec![k8s_openapi::api::core::v1::ContainerPort {
+                                container_port: 80,
+                                ..Default::default()
+                            }]),
                             ..Default::default()
                         }],
                         ..Default::default()

@@ -77,16 +77,24 @@ spec:
                 default: []
                 description: List of RouteSpec definitions that expose backend services.
                 items:
-                  description: Specification for dynamic L4 TCP/TLS routing and traffic inspection.
+                  description: Specification for dynamic L4 TCP/UDP and L7 TLS routing.
                   properties:
                     backend:
-                      description: Target backend Kubernetes service name and port.
+                      description: Target backend Kubernetes service name, port, and protocol.
                       properties:
                         port:
                           format: uint16
                           maximum: 65535.0
                           minimum: 0.0
                           type: integer
+                        protocol:
+                          description: Transport protocol for the backend service (TCP or UDP). Defaults to TCP if omitted.
+                          enum:
+                          - TCP
+                          - UDP
+                          - null
+                          nullable: true
+                          type: string
                         service:
                           type: string
                       required:
@@ -98,20 +106,15 @@ spec:
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
-                    tcp:
-                      description: TCP routing configuration (mutually exclusive with 'tls').
+                    port:
+                      description: Dedicated external L4 port (0 or omitted for auto-allocation, or fixed port in reserved range). Mutually exclusive with 'tls'.
+                      format: uint16
+                      maximum: 65535.0
+                      minimum: 0.0
                       nullable: true
-                      properties:
-                        port:
-                          description: Dedicated TCP port (0 or omitted for auto-allocation, or fixed port in reserved range).
-                          format: uint16
-                          maximum: 65535.0
-                          minimum: 0.0
-                          nullable: true
-                          type: integer
-                      type: object
+                      type: integer
                     tls:
-                      description: TLS routing configuration (mutually exclusive with 'tcp').
+                      description: TLS routing configuration (mutually exclusive with 'port').
                       nullable: true
                       properties:
                         prefix:
@@ -126,10 +129,12 @@ spec:
                   - name
                   type: object
                   x-kubernetes-validations:
-                  - message: Route must specify either 'tcp' or 'tls', but not both
-                    rule: has(self.tcp) != has(self.tls)
+                  - message: Route must specify either 'port' or 'tls', but not both
+                    rule: has(self.port) != has(self.tls)
+                  - message: TLS routes cannot target a UDP backend
+                    rule: '!has(self.tls) || !has(self.backend.protocol) || self.backend.protocol == ''TCP'''
                   - message: Explicit external ports cannot be set; port must be omitted or set to 0
-                    rule: '!has(self.tcp) || !has(self.tcp.port) || self.tcp.port == 0'
+                    rule: '!has(self.port) || self.port == 0'
                 maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
@@ -236,7 +241,7 @@ spec:
                 x-kubernetes-list-type: map
               pods:
                 default: []
-                description: Pod replica count overrides for this specific challenge instance.
+                description: Replica count overrides for specific pods in the challenge template.
                 items:
                   properties:
                     name:
@@ -259,7 +264,7 @@ spec:
                 x-kubernetes-list-type: map
               routes:
                 default: []
-                description: Route port and TLS overrides for this specific challenge instance.
+                description: Route overrides for specific exposed endpoints in the challenge template.
                 items:
                   properties:
                     name:
@@ -267,20 +272,13 @@ spec:
                       maxLength: 24
                       minLength: 1
                       type: string
-                    tcp:
-                      description: |-
-                        TCP route override (explicit port or auto). Omitted: inherit from
-                        CTFTemplate.
+                    port:
+                      description: 'L4 external port override (explicit port or 0 for auto). Omitted: inherit from CTFTemplate.'
+                      format: uint16
+                      maximum: 65535.0
+                      minimum: 0.0
                       nullable: true
-                      properties:
-                        port:
-                          description: Dedicated TCP port (0 or omitted for auto-allocation, or fixed port in reserved range).
-                          format: uint16
-                          maximum: 65535.0
-                          minimum: 0.0
-                          nullable: true
-                          type: integer
-                      type: object
+                      type: integer
                     tls:
                       description: 'TLS route override. Omitted: inherit from CTFTemplate.'
                       nullable: true
@@ -296,8 +294,8 @@ spec:
                   - name
                   type: object
                   x-kubernetes-validations:
-                  - message: Route override must not specify both 'tcp' and 'tls'; inherit from the template for the default route type
-                    rule: '!(has(self.tcp) && has(self.tls))'
+                  - message: Route override must not specify both 'port' and 'tls'; inherit from the template for the default route type
+                    rule: '!(has(self.port) && has(self.tls))'
                 maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:

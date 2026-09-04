@@ -41,13 +41,31 @@ impl Planner for NetworkPolicyPlanner {
             .map(|pod| pod.name.as_str())
             .collect();
 
+        let route_ports: Vec<NetworkPolicyPort> = template
+            .spec
+            .routes
+            .iter()
+            .filter_map(|r| {
+                let override_spec = instance.spec.routes.iter().find(|ov| ov.name == r.name);
+                let merged = crate::planners::helpers::build_merged_route_spec(r, override_spec);
+                match merged.target() {
+                    Some(k8s_common::crd::RouteTarget::Port(_, proto)) => Some(NetworkPolicyPort {
+                        port: Some(IntOrString::Int(merged.backend.port as i32)),
+                        protocol: Some(proto.as_str().to_string()),
+                        end_port: None,
+                    }),
+                    _ => None,
+                }
+            })
+            .collect();
+
         let int = NetworkPolicy {
             metadata: ObjectMeta {
                 name: Some(resource_name(instance_name, "int")),
                 namespace: Some(ns.to_string()),
                 ..Default::default()
             },
-            spec: Some(plan_internal_spec(instance_name)),
+            spec: Some(plan_internal_spec(instance_name, route_ports)),
         };
 
         let ext = NetworkPolicy {
@@ -63,8 +81,11 @@ impl Planner for NetworkPolicyPlanner {
     }
 }
 
-fn plan_internal_spec(instance_name: &str) -> NetworkPolicySpec {
-    let ingress_rules = vec![NetworkPolicyIngressRule {
+fn plan_internal_spec(
+    instance_name: &str,
+    route_ports: Vec<NetworkPolicyPort>,
+) -> NetworkPolicySpec {
+    let mut ingress_rules = vec![NetworkPolicyIngressRule {
         from: Some(vec![NetworkPolicyPeer {
             pod_selector: Some(LabelSelector {
                 match_labels: Some(btreemap! {
@@ -76,6 +97,16 @@ fn plan_internal_spec(instance_name: &str) -> NetworkPolicySpec {
         }]),
         ..Default::default()
     }];
+
+    if !route_ports.is_empty() {
+        ingress_rules.push(NetworkPolicyIngressRule {
+            from: Some(vec![NetworkPolicyPeer {
+                pod_selector: Some(LabelSelector::default()),
+                ..Default::default()
+            }]),
+            ports: Some(route_ports),
+        });
+    }
 
     let egress_rules = {
         let mut rules = Vec::new();
@@ -320,5 +351,70 @@ mod tests {
             match_exprs[0].values,
             Some(vec!["web".to_string(), "api".to_string()])
         );
+    }
+
+    #[tokio::test]
+    async fn test_plan_network_policy_route_ports_allows_namespace_ingress() {
+        use k8s_common::crd::{RouteBackend, RouteProtocol, RouteSpec};
+
+        let (_store, ctx) = dummy_context();
+        let instance = dummy_instance("chal-1", None);
+        let mut template = dummy_resolved_template(1);
+        template.spec.routes = vec![
+            RouteSpec {
+                name: "web".to_string(),
+                backend: RouteBackend {
+                    service: "web".to_string(),
+                    port: 1337,
+                    protocol: Some(RouteProtocol::Tcp),
+                },
+                port: Some(0),
+                ..Default::default()
+            },
+            RouteSpec {
+                name: "tls-web".to_string(),
+                backend: RouteBackend {
+                    service: "web".to_string(),
+                    port: 8443,
+                    protocol: Some(RouteProtocol::Tcp),
+                },
+                tls: Some(k8s_common::crd::RouteSpecTLS {
+                    prefix: Some("tls".into()),
+                }),
+                ..Default::default()
+            },
+        ];
+
+        let policies = NetworkPolicyPlanner::plan(&instance, &template, &ctx).unwrap();
+        let int_spec = policies[0].spec.as_ref().unwrap();
+        let ingress = int_spec.ingress.as_ref().unwrap();
+        assert_eq!(ingress.len(), 2);
+
+        // First rule: pod-to-pod within instance
+        assert_eq!(
+            ingress[0].from.as_ref().unwrap()[0]
+                .pod_selector
+                .as_ref()
+                .unwrap()
+                .match_labels
+                .as_ref()
+                .unwrap()
+                .get(INSTANCE_LABEL),
+            Some(&"chal-1".to_string())
+        );
+
+        // Second rule: all namespace pods can reach declared raw route port 1337 only (not TLS 8443)
+        let route_rule = &ingress[1];
+        assert_eq!(
+            route_rule.from.as_ref().unwrap()[0]
+                .pod_selector
+                .as_ref()
+                .unwrap(),
+            &LabelSelector::default()
+        );
+        let ports = route_rule.ports.as_ref().unwrap();
+        assert_eq!(ports.len(), 1, "TLS route port must not be included");
+        assert_eq!(ports[0].port, Some(IntOrString::Int(1337)));
+        assert_eq!(ports[0].protocol, Some("TCP".to_string()));
     }
 }

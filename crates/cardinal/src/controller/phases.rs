@@ -353,7 +353,17 @@ mod tests {
                 spec: k8s_common::crd::CTFTemplateSpec {
                     pods: vec![k8s_common::crd::CTFTemplateSpecPod {
                         name: "web".to_string(),
-                        spec: k8s_openapi::api::core::v1::PodSpec::default(),
+                        spec: k8s_openapi::api::core::v1::PodSpec {
+                            containers: vec![k8s_openapi::api::core::v1::Container {
+                                name: "app".to_string(),
+                                ports: Some(vec![k8s_openapi::api::core::v1::ContainerPort {
+                                    container_port: 80,
+                                    ..Default::default()
+                                }]),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        },
                         replicas: 1,
                         allow_internet: false,
                         patch_spec: None,
@@ -363,8 +373,9 @@ mod tests {
                         backend: k8s_common::crd::RouteBackend {
                             service: "web".to_string(),
                             port: 80,
+                            protocol: None,
                         },
-                        tcp: Some(k8s_common::crd::RouteSpecTCP { port: None }),
+                        port: Some(0),
                         ..Default::default()
                     }],
                     params: Default::default(),

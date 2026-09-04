@@ -26,15 +26,26 @@ pub fn validate_overrides(
 ) -> Result<(), super::Error> {
     let mut bad: Vec<String> = Vec::new();
 
-    let route_names: HashSet<&str> = template
+    let routes_by_name: std::collections::HashMap<&str, &k8s_common::crd::RouteSpec> = template
         .spec
         .routes
         .iter()
-        .map(|r| r.name.as_str())
+        .map(|r| (r.name.as_str(), r))
         .collect();
+
     for ov in &instance.spec.routes {
-        if !route_names.contains(ov.name.as_str()) {
-            bad.push(format!("route '{}'", ov.name));
+        match routes_by_name.get(ov.name.as_str()) {
+            None => bad.push(format!("route '{}'", ov.name)),
+            Some(tmpl) => {
+                if ov.tls.is_some()
+                    && tmpl.backend.protocol() == k8s_common::crd::RouteProtocol::Udp
+                {
+                    bad.push(format!(
+                        "route '{}' specifies TLS on a UDP backend",
+                        ov.name
+                    ));
+                }
+            }
         }
     }
 
@@ -49,7 +60,7 @@ pub fn validate_overrides(
         Ok(())
     } else {
         Err(super::Error::InvalidOverride(format!(
-            "Instance overrides do not match any template definition: {}",
+            "Invalid instance overrides: {}",
             bad.join(", ")
         )))
     }
@@ -63,17 +74,13 @@ pub fn build_merged_route_spec(
     let mut merged = base.clone();
 
     if let Some(ov) = override_spec {
-        // Override wins on conflict. An explicit tcp turns the route into TCP and vice versa.
-        if let Some(tcp) = &ov.tcp {
-            let mut tcp_cfg = merged.tcp.unwrap_or_default();
-            if let Some(port) = tcp.port {
-                tcp_cfg.port = Some(port);
-            }
-            merged.tcp = Some(tcp_cfg);
+        // Override wins on conflict. An explicit port turns the route into L4 Port and vice versa.
+        if let Some(port) = ov.port {
+            merged.port = Some(port);
             merged.tls = None;
         } else if let Some(tls) = &ov.tls {
             merged.tls = Some(tls.clone());
-            merged.tcp = None;
+            merged.port = None;
         }
     }
 
@@ -86,7 +93,6 @@ mod tests {
     use crate::test_utils::tests::{dummy_instance, dummy_resolved_template};
     use k8s_common::crd::{
         CTFInstanceSpecPodOverride, CTFInstanceSpecRouteOverride, RouteBackend, RouteSpec,
-        RouteSpecTCP,
     };
 
     #[test]
@@ -98,7 +104,7 @@ mod tests {
         }];
         instance.spec.routes = vec![CTFInstanceSpecRouteOverride {
             name: "chal".into(),
-            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            port: Some(0),
             tls: None,
         }];
 
@@ -109,8 +115,9 @@ mod tests {
             backend: RouteBackend {
                 service: "web".into(),
                 port: 80,
+                protocol: None,
             },
-            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            port: Some(0),
             ..Default::default()
         }];
 
@@ -127,7 +134,7 @@ mod tests {
         }];
         instance.spec.routes = vec![CTFInstanceSpecRouteOverride {
             name: "typo-route".into(),
-            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            port: Some(0),
             tls: None,
         }];
 
@@ -138,6 +145,43 @@ mod tests {
             super::super::Error::InvalidOverride(msg) => {
                 assert!(msg.contains("pod 'typo-pod'"), "{msg}");
                 assert!(msg.contains("route 'typo-route'"), "{msg}");
+            }
+            other => panic!("expected InvalidOverride, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_overrides_rejects_tls_override_on_udp_route() {
+        use k8s_common::crd::{RouteProtocol, RouteSpecTLS};
+
+        let mut instance = dummy_instance("chal-1", None);
+        instance.spec.routes = vec![CTFInstanceSpecRouteOverride {
+            name: "dns".into(),
+            port: None,
+            tls: Some(RouteSpecTLS {
+                prefix: Some("dns".into()),
+            }),
+        }];
+
+        let mut template = dummy_resolved_template(1);
+        template.spec.routes = vec![RouteSpec {
+            name: "dns".into(),
+            backend: RouteBackend {
+                service: "dns".into(),
+                port: 53,
+                protocol: Some(RouteProtocol::Udp),
+            },
+            port: Some(0),
+            ..Default::default()
+        }];
+
+        let err = validate_overrides(&instance, &template).unwrap_err();
+        match err {
+            super::super::Error::InvalidOverride(msg) => {
+                assert!(
+                    msg.contains("route 'dns' specifies TLS on a UDP backend"),
+                    "{msg}"
+                );
             }
             other => panic!("expected InvalidOverride, got {other:?}"),
         }

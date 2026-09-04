@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use k8s_common::crd::{CTFInstance, CTFTemplateSpecPod};
-use k8s_common::labels::{INSTANCE_LABEL, RESOURCE_LABEL, RESTARTED_AT_ANNOTATION};
+use k8s_common::labels::{INSTANCE_LABEL, RESOURCE_LABEL, RESTARTED_AT_ANNOTATION, TEMPLATE_LABEL};
 use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetSpec};
 use k8s_openapi::api::core::v1::{PodSpec, PodTemplateSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector, ObjectMeta};
@@ -76,6 +76,7 @@ impl Planner for ReplicaSetPlanner {
 
             let rs_spec = build_replicaset_spec(
                 instance_name,
+                &instance.spec.template,
                 pod_tmpl,
                 patched_pod_spec,
                 replicas,
@@ -296,6 +297,7 @@ impl ImageReference for k8s_openapi::api::core::v1::EphemeralContainer {
 
 pub fn build_replicaset_spec(
     instance_name: &str,
+    template_name: &str,
     pod_tmpl: &CTFTemplateSpecPod,
     mut patched_pod_spec: PodSpec,
     replicas: i32,
@@ -305,6 +307,7 @@ pub fn build_replicaset_spec(
 
     let labels = btreemap! {
         INSTANCE_LABEL => instance_name,
+        TEMPLATE_LABEL => template_name,
         RESOURCE_LABEL => pod_tmpl.name.as_str(),
     };
 
@@ -425,6 +428,7 @@ mod tests {
 
         let spec = build_replicaset_spec(
             "team-alpha",
+            "web-template",
             &pod_tmpl,
             pod_tmpl.spec.clone(),
             3,
@@ -437,6 +441,10 @@ mod tests {
         assert_eq!(
             selector.get(INSTANCE_LABEL),
             Some(&"team-alpha".to_string())
+        );
+        assert_eq!(
+            selector.get(TEMPLATE_LABEL),
+            Some(&"web-template".to_string())
         );
         assert_eq!(selector.get(RESOURCE_LABEL), Some(&"web".to_string()));
 

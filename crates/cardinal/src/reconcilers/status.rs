@@ -100,14 +100,14 @@ pub fn generate_endpoints(
         let merged_spec = build_merged_route_spec(route_tmpl, route_override);
 
         match merged_spec.target() {
-            Some(RouteTarget::Tcp(tcp)) => {
-                let port = if let Some(p) = tcp.port
+            Some(RouteTarget::Port(port_opt, proto)) => {
+                let port = if let Some(p) = port_opt
                     && p != 0
                 {
                     p
                 } else if let Some(port_map) = ctx.port_map.as_deref() {
                     let key = ResourceKey::new(ns, name, &route_tmpl.name);
-                    port_map.get_port(&key).unwrap_or(0)
+                    port_map.get_port(&key).map(|p| p.number()).unwrap_or(0)
                 } else {
                     0
                 };
@@ -116,7 +116,7 @@ pub fn generate_endpoints(
                     let host = ctx.hostname_suffix.clone();
                     endpoints.push(CTFInstanceStatusEndpoint {
                         name: route_tmpl.name.clone(),
-                        type_: "tcp".to_string(),
+                        type_: proto.as_str().to_lowercase(),
                         target: EndpointTarget { host, port },
                     });
                 }
@@ -472,15 +472,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluate_synced_instance_is_ready() {
-        use k8s_common::crd::{RouteBackend, RouteSpec, RouteSpecTCP};
+        use k8s_common::crd::{RouteBackend, RouteSpec};
 
         let tcp_route = RouteSpec {
             name: "chal".to_string(),
             backend: RouteBackend {
                 service: "web".into(),
                 port: 80,
+                protocol: None,
             },
-            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            port: Some(0),
             ..Default::default()
         };
         let (_store, ctx) = dummy_context_with_routes(vec![tcp_route]);
@@ -530,15 +531,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_requires_upgrade_detects_template_bump() {
-        use k8s_common::crd::{RouteBackend, RouteSpec, RouteSpecTCP};
+        use k8s_common::crd::{RouteBackend, RouteSpec};
 
         let tcp_route = RouteSpec {
             name: "chal".to_string(),
             backend: RouteBackend {
                 service: "web".into(),
                 port: 80,
+                protocol: None,
             },
-            tcp: Some(RouteSpecTCP { port: Some(0) }),
+            port: Some(0),
             ..Default::default()
         };
         let (_store, ctx) = dummy_context_with_routes(vec![tcp_route.clone()]);
@@ -623,7 +625,7 @@ mod tests {
 
         let route_err = Error::RouteAllocationError(crate::routing::RouteError::Port(
             crate::routing::PortError::Occupied(
-                20001,
+                crate::routing::Port::Tcp(20001),
                 ResourceKey::new("default", "other-chal", "pwn"),
             ),
         ));
@@ -706,7 +708,7 @@ mod tests {
     #[tokio::test]
     async fn test_generate_endpoints() {
         use crate::test_utils::tests::dummy_resolved_template;
-        use k8s_common::crd::{RouteBackend, RouteSpec, RouteSpecTCP, RouteSpecTLS};
+        use k8s_common::crd::{RouteBackend, RouteSpec, RouteSpecTLS};
 
         let (_store, ctx) = dummy_context();
         let instance = dummy_instance("chal-1", None);
@@ -718,25 +720,30 @@ mod tests {
                 backend: RouteBackend {
                     service: "web".to_string(),
                     port: 80,
+                    protocol: None,
                 },
                 tls: Some(RouteSpecTLS {
                     prefix: Some("whoami".to_string()),
                 }),
-                tcp: None,
+                port: None,
             },
             RouteSpec {
                 name: "pwn".to_string(),
                 backend: RouteBackend {
                     service: "web".to_string(),
                     port: 1337,
+                    protocol: None,
                 },
                 tls: None,
-                tcp: Some(RouteSpecTCP { port: None }),
+                port: Some(0),
             },
         ];
 
         let key = ResourceKey::new("default", "chal-1", "pwn");
-        ctx.port_map.as_ref().unwrap().bind(30005, key);
+        ctx.port_map
+            .as_ref()
+            .unwrap()
+            .bind(crate::routing::Port::Tcp(30005), key);
 
         let endpoints = generate_endpoints(&instance, &template, &ctx);
         assert_eq!(endpoints.len(), 2);

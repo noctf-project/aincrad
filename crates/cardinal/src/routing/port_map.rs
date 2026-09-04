@@ -10,12 +10,50 @@ use crate::cache::ResourceKey;
 
 use super::port_finder::PortFinderFactory;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Port {
+    Tcp(u16),
+    Udp(u16),
+}
+
+impl Port {
+    pub fn number(&self) -> u16 {
+        match *self {
+            Port::Tcp(p) | Port::Udp(p) => p,
+        }
+    }
+
+    pub fn is_tcp(&self) -> bool {
+        matches!(self, Port::Tcp(_))
+    }
+
+    pub fn is_udp(&self) -> bool {
+        matches!(self, Port::Udp(_))
+    }
+
+    pub fn protocol_str(&self) -> &'static str {
+        match self {
+            Port::Tcp(_) => "TCP",
+            Port::Udp(_) => "UDP",
+        }
+    }
+}
+
+impl std::fmt::Display for Port {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Port::Tcp(p) => write!(f, "{p}/tcp"),
+            Port::Udp(p) => write!(f, "{p}/udp"),
+        }
+    }
+}
+
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum PortError {
     #[error("port {0} is outside reserved range")]
-    OutOfRange(u16),
+    OutOfRange(Port),
     #[error("port {0} is already occupied by route '{1}'")]
-    Occupied(u16, ResourceKey),
+    Occupied(Port, ResourceKey),
     #[error("auto port pool is exhausted")]
     Exhausted,
 }
@@ -24,17 +62,22 @@ pub enum PortError {
 #[derive(Debug)]
 pub enum PortCandidate {
     /// Port is already bound and owned by this resource key.
-    Bound(u16, OwnedMutexGuard<()>),
+    Bound(Port, OwnedMutexGuard<()>),
     /// Port is available and locked, but not yet committed/bound.
-    Available(u16, OwnedMutexGuard<()>),
+    Available(Port, OwnedMutexGuard<()>),
 }
 
 impl PortCandidate {
-    /// Returns the port number regardless of whether it is bound or available.
-    pub fn port(&self) -> u16 {
+    /// Returns the port enum regardless of whether it is bound or available.
+    pub fn port(&self) -> Port {
         match *self {
             PortCandidate::Bound(p, _) | PortCandidate::Available(p, _) => p,
         }
+    }
+
+    /// Returns the port number regardless of whether it is bound or available.
+    pub fn port_number(&self) -> u16 {
+        self.port().number()
     }
 
     /// Returns true if the port was already bound to this resource key.
@@ -44,21 +87,21 @@ impl PortCandidate {
 }
 
 struct Inner {
-    bindings: BTreeMap<u16, ResourceKey>,
+    bindings: BTreeMap<Port, ResourceKey>,
 }
 
 impl Inner {
-    fn bind(&mut self, port: u16, key: ResourceKey) {
+    fn bind(&mut self, port: Port, key: ResourceKey) {
         // Clear any previous port allocated to this key
         self.bindings.retain(|&p, owner| p == port || *owner != key);
         self.bindings.insert(port, key);
     }
 
-    fn unbind(&mut self, port: u16) -> Option<ResourceKey> {
+    fn unbind(&mut self, port: Port) -> Option<ResourceKey> {
         self.bindings.remove(&port)
     }
 
-    fn unbind_key(&mut self, port: u16, expected_key: &ResourceKey) -> Option<ResourceKey> {
+    fn unbind_key(&mut self, port: Port, expected_key: &ResourceKey) -> Option<ResourceKey> {
         if self.bindings.get(&port) == Some(expected_key) {
             self.bindings.remove(&port)
         } else {
@@ -82,7 +125,7 @@ pub struct PortMap {
     range_auto: Vec<PortRange>,
     finder: PortFinderFactory,
     inner: RwLock<Inner>,
-    locks: RwLock<HashMap<u16, Arc<AsyncMutex<()>>>>,
+    locks: RwLock<HashMap<Port, Arc<AsyncMutex<()>>>>,
 }
 
 impl PortMap {
@@ -105,7 +148,7 @@ impl PortMap {
         }
     }
 
-    /// Checks if a port is within any reserved range without acquiring a lock.
+    /// Checks if a port number is within any reserved range without acquiring a lock.
     pub fn is_reserved_port(&self, port: u16) -> bool {
         self.range_reserved.iter().any(|r| r.contains(port))
     }
@@ -121,7 +164,7 @@ impl PortMap {
     }
 
     /// Returns or lazily creates a per-port mutex.
-    fn get_or_create_port_lock(&self, port: u16) -> Arc<AsyncMutex<()>> {
+    fn get_or_create_port_lock(&self, port: Port) -> Arc<AsyncMutex<()>> {
         if let Some(lock) = self.locks.read().get(&port) {
             return lock.clone();
         }
@@ -133,7 +176,7 @@ impl PortMap {
     }
 
     /// Attempts to lock a per-port mutex non-blockingly.
-    fn try_lock_port(&self, port: u16) -> Option<OwnedMutexGuard<()>> {
+    fn try_lock_port(&self, port: Port) -> Option<OwnedMutexGuard<()>> {
         let lock = self.get_or_create_port_lock(port);
         lock.try_lock_owned().ok()
     }
@@ -142,16 +185,19 @@ impl PortMap {
     /// Auto ports try locks non-blockingly, advancing to next permutation candidates immediately.
     pub async fn find_free_ports(
         &self,
-        requests: &[(ResourceKey, u16)],
+        requests: &[(ResourceKey, Port)],
     ) -> Result<Vec<PortCandidate>, PortError> {
         let mut candidates = Vec::with_capacity(requests.len());
         let mut batch_reserved = HashSet::new();
 
         for (key, requested_port) in requests {
+            let port_num = requested_port.number();
+            let is_udp = requested_port.is_udp();
+
             // Fixed port request
-            if *requested_port != 0 {
+            if port_num != 0 {
                 let port = *requested_port;
-                if !self.is_reserved_port(port) {
+                if !self.is_reserved_port(port_num) {
                     return Err(PortError::OutOfRange(port));
                 }
 
@@ -192,7 +238,8 @@ impl PortMap {
                 let inner = self.inner.read();
                 inner.bindings.iter().find_map(|(&port, owner)| {
                     if *owner == *key
-                        && self.range_auto.iter().any(|r| r.contains(port))
+                        && port.is_udp() == is_udp
+                        && self.range_auto.iter().any(|r| r.contains(port.number()))
                         && !batch_reserved.contains(&port)
                     {
                         Some(port)
@@ -214,7 +261,13 @@ impl PortMap {
             let cycle = self.finder.random_cycle();
             let mut allocated = None;
 
-            for candidate in cycle {
+            for candidate_num in cycle {
+                let candidate = if is_udp {
+                    Port::Udp(candidate_num)
+                } else {
+                    Port::Tcp(candidate_num)
+                };
+
                 let is_free = {
                     let inner = self.inner.read();
                     !inner.bindings.contains_key(&candidate) && !batch_reserved.contains(&candidate)
@@ -237,27 +290,27 @@ impl PortMap {
     }
 
     /// Updates mapping with an observed or committed port binding.
-    pub fn bind(&self, port: u16, key: ResourceKey) {
+    pub fn bind(&self, port: Port, key: ResourceKey) {
         self.inner.write().bind(port, key);
     }
 
-    /// Removes binding for a given port number.
-    pub fn unbind(&self, port: u16) -> Option<ResourceKey> {
+    /// Removes binding for a given port.
+    pub fn unbind(&self, port: Port) -> Option<ResourceKey> {
         self.inner.write().unbind(port)
     }
 
-    /// Removes binding for a given port number only if it is owned by `expected_key`.
-    pub fn unbind_key(&self, port: u16, expected_key: &ResourceKey) -> Option<ResourceKey> {
+    /// Removes binding for a given port only if it is owned by `expected_key`.
+    pub fn unbind_key(&self, port: Port, expected_key: &ResourceKey) -> Option<ResourceKey> {
         self.inner.write().unbind_key(port, expected_key)
     }
 
     /// Gets resource key owning a port if present.
-    pub fn get_key(&self, port: u16) -> Option<ResourceKey> {
+    pub fn get_key(&self, port: Port) -> Option<ResourceKey> {
         self.inner.read().bindings.get(&port).cloned()
     }
 
     /// Gets port allocated to a resource key if present.
-    pub fn get_port(&self, key: &ResourceKey) -> Option<u16> {
+    pub fn get_port(&self, key: &ResourceKey) -> Option<Port> {
         self.inner
             .read()
             .bindings
@@ -294,7 +347,7 @@ mod tests {
     async fn find_one(
         map: &PortMap,
         key: &ResourceKey,
-        port: u16,
+        port: Port,
     ) -> Result<PortCandidate, PortError> {
         map.find_free_ports(&[(key.clone(), port)])
             .await
@@ -304,25 +357,27 @@ mod tests {
     #[tokio::test]
     async fn test_find_fixed_port_within_range() {
         let map = make_map();
-        let candidate = find_one(&map, &k("web"), 20001).await.unwrap();
-        assert_eq!(candidate.port(), 20001);
+        let candidate = find_one(&map, &k("web"), Port::Tcp(20001)).await.unwrap();
+        assert_eq!(candidate.port(), Port::Tcp(20001));
         assert!(!candidate.is_bound());
 
         // Binding marks it as occupied
-        map.bind(20001, k("web"));
-        assert_eq!(map.get_key(20001), Some(k("web")));
+        map.bind(Port::Tcp(20001), k("web"));
+        assert_eq!(map.get_key(Port::Tcp(20001)), Some(k("web")));
         drop(candidate);
 
         // Same key finding same port returns Bound
-        let bound = find_one(&map, &k("web"), 20001).await.unwrap();
-        assert_eq!(bound.port(), 20001);
+        let bound = find_one(&map, &k("web"), Port::Tcp(20001)).await.unwrap();
+        assert_eq!(bound.port(), Port::Tcp(20001));
         assert!(bound.is_bound());
         drop(bound);
 
         // Different key finding occupied port fails
         assert_eq!(
-            find_one(&map, &k("pwn"), 20001).await.map(|c| c.port()),
-            Err(PortError::Occupied(20001, k("web")))
+            find_one(&map, &k("pwn"), Port::Tcp(20001))
+                .await
+                .map(|c| c.port()),
+            Err(PortError::Occupied(Port::Tcp(20001), k("web")))
         );
     }
 
@@ -342,42 +397,45 @@ mod tests {
         assert!(map.is_reserved_port(8080));
         assert!(!map.is_reserved_port(9000));
 
-        let c1 = find_one(&map, &k("svc1"), 1005).await.unwrap();
-        assert_eq!(c1.port(), 1005);
+        let c1 = find_one(&map, &k("svc1"), Port::Tcp(1005)).await.unwrap();
+        assert_eq!(c1.port(), Port::Tcp(1005));
 
-        let c2 = find_one(&map, &k("svc2"), 8080).await.unwrap();
-        assert_eq!(c2.port(), 8080);
+        let c2 = find_one(&map, &k("svc2"), Port::Udp(8080)).await.unwrap();
+        assert_eq!(c2.port(), Port::Udp(8080));
     }
 
     #[tokio::test]
     async fn test_find_fixed_port_out_of_range() {
         let map = make_map();
         assert_eq!(
-            find_one(&map, &k("web"), 8080).await.map(|c| c.port()),
-            Err(PortError::OutOfRange(8080))
+            find_one(&map, &k("web"), Port::Tcp(8080))
+                .await
+                .map(|c| c.port()),
+            Err(PortError::OutOfRange(Port::Tcp(8080)))
         );
     }
 
     #[tokio::test]
     async fn test_find_auto_port_lcg_selection() {
         let map = make_map();
-        let c1 = find_one(&map, &k("pwn"), 0).await.unwrap();
+        let c1 = find_one(&map, &k("pwn"), Port::Tcp(0)).await.unwrap();
         let p1 = c1.port();
-        assert!((30000..=30010).contains(&p1));
+        assert!((30000..=30010).contains(&p1.number()));
+        assert!(p1.is_tcp());
 
         map.bind(p1, k("pwn"));
         drop(c1);
 
         // Idempotency: same key gets same port as Bound
-        let bound = find_one(&map, &k("pwn"), 0).await.unwrap();
+        let bound = find_one(&map, &k("pwn"), Port::Tcp(0)).await.unwrap();
         assert_eq!(bound.port(), p1);
         assert!(bound.is_bound());
         drop(bound);
 
         // Next key gets a different free port as Available
-        let c2 = find_one(&map, &k("web"), 0).await.unwrap();
+        let c2 = find_one(&map, &k("web"), Port::Tcp(0)).await.unwrap();
         let p2 = c2.port();
-        assert!((30000..=30010).contains(&p2));
+        assert!((30000..=30010).contains(&p2.number()));
         assert_ne!(p1, p2);
     }
 
@@ -391,10 +449,11 @@ mod tests {
         let mut allocated = Vec::new();
         for i in 0..6 {
             let key = k(&format!("task-{i}"));
-            let cand = find_one(&map, &key, 0).await.unwrap();
+            let cand = find_one(&map, &key, Port::Tcp(0)).await.unwrap();
             let port = cand.port();
             assert!(
-                (30000..=30002).contains(&port) || (40000..=40002).contains(&port),
+                (30000..=30002).contains(&port.number())
+                    || (40000..=40002).contains(&port.number()),
                 "Allocated port {port} must be within one of the auto ranges"
             );
             map.bind(port, key);
@@ -409,7 +468,9 @@ mod tests {
 
         // Pool should now be exhausted
         assert_eq!(
-            find_one(&map, &k("overflow"), 0).await.map(|c| c.port()),
+            find_one(&map, &k("overflow"), Port::Tcp(0))
+                .await
+                .map(|c| c.port()),
             Err(PortError::Exhausted)
         );
     }
@@ -420,40 +481,42 @@ mod tests {
             vec![PortRange(20000..=20010)],
             vec![PortRange(30000..=30001)],
         );
-        let c1 = find_one(&map, &k("r1"), 0).await.unwrap();
+        let c1 = find_one(&map, &k("r1"), Port::Tcp(0)).await.unwrap();
         let p1 = c1.port();
         map.bind(p1, k("r1"));
         drop(c1);
 
-        let c2 = find_one(&map, &k("r2"), 0).await.unwrap();
+        let c2 = find_one(&map, &k("r2"), Port::Tcp(0)).await.unwrap();
         map.bind(c2.port(), k("r2"));
         drop(c2);
 
         assert_eq!(
-            find_one(&map, &k("r3"), 0).await.map(|c| c.port()),
+            find_one(&map, &k("r3"), Port::Tcp(0))
+                .await
+                .map(|c| c.port()),
             Err(PortError::Exhausted)
         );
 
         // Unbind frees a slot
         assert_eq!(map.unbind(p1), Some(k("r1")));
-        let c3 = find_one(&map, &k("r3"), 0).await.unwrap();
+        let c3 = find_one(&map, &k("r3"), Port::Tcp(0)).await.unwrap();
         assert_eq!(c3.port(), p1);
     }
 
     #[test]
     fn test_unbind_port() {
         let map = make_map();
-        map.bind(20005, k("admin"));
-        assert_eq!(map.get_key(20005), Some(k("admin")));
+        map.bind(Port::Tcp(20005), k("admin"));
+        assert_eq!(map.get_key(Port::Tcp(20005)), Some(k("admin")));
 
-        assert_eq!(map.unbind(20005), Some(k("admin")));
-        assert_eq!(map.get_key(20005), None);
+        assert_eq!(map.unbind(Port::Tcp(20005)), Some(k("admin")));
+        assert_eq!(map.get_key(Port::Tcp(20005)), None);
     }
 
     #[tokio::test]
     async fn test_find_free_ports_ordered_locks() {
         let map = make_map();
-        let requests = vec![(k("pwn"), 0), (k("admin"), 20005)];
+        let requests = vec![(k("pwn"), Port::Tcp(0)), (k("admin"), Port::Tcp(20005))];
 
         let candidates = map.find_free_ports(&requests).await.unwrap();
         assert_eq!(candidates.len(), 2);
@@ -462,7 +525,11 @@ mod tests {
     #[tokio::test]
     async fn test_find_free_ports_multiple_auto_ports_in_single_batch() {
         let map = make_map();
-        let requests = vec![(k("web"), 0), (k("api"), 0), (k("admin"), 0)];
+        let requests = vec![
+            (k("web"), Port::Tcp(0)),
+            (k("api"), Port::Tcp(0)),
+            (k("admin"), Port::Udp(0)),
+        ];
 
         let candidates = map.find_free_ports(&requests).await.unwrap();
         assert_eq!(candidates.len(), 3);
@@ -483,18 +550,20 @@ mod tests {
         ));
 
         // Task A acquires port 30000
-        let c1 = find_one(&map, &k("task_a"), 0).await.unwrap();
+        let c1 = find_one(&map, &k("task_a"), Port::Tcp(0)).await.unwrap();
         let p1 = c1.port();
 
         // Task B immediately gets the other port without waiting on task A
-        let c2 = find_one(&map, &k("task_b"), 0).await.unwrap();
+        let c2 = find_one(&map, &k("task_b"), Port::Tcp(0)).await.unwrap();
         let p2 = c2.port();
 
         assert_ne!(p1, p2);
 
         // Third task finds pool exhausted (both ports in flight)
         assert_eq!(
-            find_one(&map, &k("task_c"), 0).await.map(|c| c.port()),
+            find_one(&map, &k("task_c"), Port::Tcp(0))
+                .await
+                .map(|c| c.port()),
             Err(PortError::Exhausted)
         );
 
@@ -503,7 +572,7 @@ mod tests {
         drop(c1);
 
         // Task A can re-query its own bound port
-        let bound = find_one(&map, &k("task_a"), 0).await.unwrap();
+        let bound = find_one(&map, &k("task_a"), Port::Tcp(0)).await.unwrap();
         assert_eq!(bound.port(), p1);
         assert!(bound.is_bound());
     }
@@ -519,7 +588,7 @@ mod tests {
 
             let map_a = map.clone();
             let handle_a = tokio::spawn(async move {
-                let reqs = vec![(k("a1"), 20001), (k("a2"), 20002)];
+                let reqs = vec![(k("a1"), Port::Tcp(20001)), (k("a2"), Port::Tcp(20002))];
                 if let Ok(cands) = map_a.find_free_ports(&reqs).await {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                     for c in cands {
@@ -531,7 +600,7 @@ mod tests {
             let map_b = map.clone();
             let handle_b = tokio::spawn(async move {
                 // Reverse port order in request
-                let reqs = vec![(k("b1"), 20002), (k("b2"), 20001)];
+                let reqs = vec![(k("b1"), Port::Tcp(20002)), (k("b2"), Port::Tcp(20001))];
                 if let Ok(cands) = map_b.find_free_ports(&reqs).await {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                     for c in cands {
@@ -555,13 +624,13 @@ mod tests {
             vec![PortRange(30000..=30005)],
         );
 
-        // Port 20001 is valid, but 99999 is invalid/out of range
-        let reqs = vec![(k("web"), 20001), (k("err"), 9999)];
+        // Port 20001 is valid, but 9999 is invalid/out of range
+        let reqs = vec![(k("web"), Port::Tcp(20001)), (k("err"), Port::Tcp(9999))];
         let res = map.find_free_ports(&reqs).await;
-        assert_eq!(res.err(), Some(PortError::OutOfRange(9999)));
+        assert_eq!(res.err(), Some(PortError::OutOfRange(Port::Tcp(9999))));
 
         // Verify port 20001 lock was immediately released and can be acquired
-        let res_retry = map.find_free_ports(&[(k("web"), 20001)]).await;
+        let res_retry = map.find_free_ports(&[(k("web"), Port::Tcp(20001))]).await;
         assert!(res_retry.is_ok());
     }
 
@@ -581,8 +650,8 @@ mod tests {
                     let team = format!("team-{i}");
                     // Mix of auto and fixed requests
                     let reqs = vec![
-                        (k(&format!("{team}-web")), 0),
-                        (k(&format!("{team}-pwn")), 0),
+                        (k(&format!("{team}-web")), Port::Tcp(0)),
+                        (k(&format!("{team}-pwn")), Port::Udp(0)),
                     ];
                     if let Ok(candidates) = map.find_free_ports(&reqs).await {
                         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -607,13 +676,13 @@ mod tests {
         let k1 = ResourceKey::new("team-1", "chal-1", "web");
         let k2 = ResourceKey::new("team-2", "chal-2", "web");
 
-        map.bind(20001, k1.clone());
-        map.bind(20002, k2.clone());
+        map.bind(Port::Tcp(20001), k1.clone());
+        map.bind(Port::Tcp(20002), k2.clone());
 
         map.clear_namespace("team-1");
 
-        assert_eq!(map.get_key(20001), None);
-        assert_eq!(map.get_key(20002), Some(k2));
+        assert_eq!(map.get_key(Port::Tcp(20001)), None);
+        assert_eq!(map.get_key(Port::Tcp(20002)), Some(k2));
     }
 
     #[test]
@@ -622,9 +691,9 @@ mod tests {
         let k1 = ResourceKey::new("team-1", "chal-1", "web");
         let k2 = ResourceKey::new("team-1", "chal-1", "pwn");
 
-        map.bind(20005, k1.clone());
+        map.bind(Port::Tcp(20005), k1.clone());
 
-        assert_eq!(map.get_port(&k1), Some(20005));
+        assert_eq!(map.get_port(&k1), Some(Port::Tcp(20005)));
         assert_eq!(map.get_port(&k2), None);
     }
 
@@ -634,14 +703,14 @@ mod tests {
         let k1 = ResourceKey::new("team-1", "chal-1", "web");
         let k2 = ResourceKey::new("team-2", "chal-2", "web");
 
-        map.bind(20005, k1.clone());
+        map.bind(Port::Tcp(20005), k1.clone());
 
         // Unbinding with wrong key does nothing
-        assert_eq!(map.unbind_key(20005, &k2), None);
-        assert_eq!(map.get_key(20005), Some(k1.clone()));
+        assert_eq!(map.unbind_key(Port::Tcp(20005), &k2), None);
+        assert_eq!(map.get_key(Port::Tcp(20005)), Some(k1.clone()));
 
         // Unbinding with matching key succeeds
-        assert_eq!(map.unbind_key(20005, &k1), Some(k1));
-        assert_eq!(map.get_key(20005), None);
+        assert_eq!(map.unbind_key(Port::Tcp(20005), &k1), Some(k1));
+        assert_eq!(map.get_key(Port::Tcp(20005)), None);
     }
 }
