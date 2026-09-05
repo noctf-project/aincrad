@@ -11,7 +11,7 @@ use crate::{
     cache::ResourceKey,
     planners::{Planner, helpers::build_merged_route_spec},
     reconcilers::template::ResolvedTemplate,
-    routing::{derive_hostname, format_tls_host},
+    routing::{default_tls_prefix, derive_hostname, format_tls_host},
     utils::naming::resource_name,
 };
 
@@ -32,6 +32,7 @@ impl Planner for TLSRoutePlanner {
     ) -> Result<Vec<TLSRoute>, Error> {
         let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
+        let template_name = template.metadata.name.as_deref().unwrap_or("unknown");
         let mut routes = Vec::new();
 
         for route_tmpl in &template.spec.routes {
@@ -54,7 +55,9 @@ impl Planner for TLSRoutePlanner {
             }
 
             let route_key = ResourceKey::new(ns, instance_name, &route_tmpl.name);
-            let hostname = derive_hostname(&ctx.route_seed, &route_key, tls.prefix.as_deref());
+            let default_prefix = default_tls_prefix(template_name, &route_tmpl.name);
+            let prefix = tls.prefix.as_deref().unwrap_or(&default_prefix);
+            let hostname = derive_hostname(&ctx.route_seed, &route_key, Some(prefix));
             let route_name = resource_name(instance_name, &route_tmpl.name);
             let fqdn = format_tls_host(&ctx.hostname_suffix, &hostname);
             let backend_svc = resource_name(

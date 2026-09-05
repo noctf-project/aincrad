@@ -3,7 +3,7 @@ pub mod port_map;
 pub mod tls;
 
 pub use port_map::{Port, PortCandidate, PortError, PortMap};
-pub use tls::{derive_hostname, format_tls_host, sanitize_prefix};
+pub use tls::{default_tls_prefix, derive_hostname, format_tls_host, sanitize_prefix};
 
 use thiserror::Error;
 

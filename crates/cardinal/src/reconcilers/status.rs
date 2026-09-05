@@ -17,7 +17,7 @@ use crate::{
         apply_condition, build_merged_route_spec,
     },
     reconcilers::template::ResolvedTemplate,
-    routing::{derive_hostname, format_tls_host},
+    routing::{default_tls_prefix, derive_hostname, format_tls_host},
 };
 
 /// The outcome of evaluating an instance's readiness. Produced by `evaluate_status`
@@ -123,7 +123,10 @@ pub fn generate_endpoints(
             }
             Some(RouteTarget::Tls(tls)) => {
                 let route_key = ResourceKey::new(ns, name, &route_tmpl.name);
-                let hostname = derive_hostname(&ctx.route_seed, &route_key, tls.prefix.as_deref());
+                let template_name = template.metadata.name.as_deref().unwrap_or("unknown");
+                let default_prefix = default_tls_prefix(template_name, &route_tmpl.name);
+                let prefix = tls.prefix.as_deref().unwrap_or(&default_prefix);
+                let hostname = derive_hostname(&ctx.route_seed, &route_key, Some(prefix));
                 let fqdn = format_tls_host(&ctx.hostname_suffix, &hostname);
                 endpoints.push(CTFInstanceStatusEndpoint {
                     name: route_tmpl.name.clone(),

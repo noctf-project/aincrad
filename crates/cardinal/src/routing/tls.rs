@@ -10,8 +10,7 @@ const MAX_PREFIX_LEN: usize = 56 - HOSTNAME_ID_LEN - 1;
 
 /// Derives the base hostname label (`{prefix}-{hash14}`).
 pub fn derive_hostname(route_seed: &str, key: &ResourceKey, prefix: Option<&str>) -> String {
-    let raw_prefix = prefix.filter(|s| !s.is_empty()).unwrap_or(&key.resource);
-    let clean_prefix = sanitize_prefix(raw_prefix);
+    let clean_prefix = sanitize_prefix(prefix.filter(|s| !s.is_empty()).unwrap_or(&key.resource));
 
     let seed_tag = format!("aincrad:route:v1:{route_seed}:{key}");
     let mut hasher = Sha256::new();
@@ -21,6 +20,15 @@ pub fn derive_hostname(route_seed: &str, key: &ResourceKey, prefix: Option<&str>
     let mut id = base32::encode(base32::Alphabet::Crockford, &hash).to_lowercase();
     id.truncate(HOSTNAME_ID_LEN);
     format!("{clean_prefix}-{id}")
+}
+
+/// Resolves the default prefix from template name and route name.
+pub fn default_tls_prefix(template_name: &str, route_name: &str) -> String {
+    if route_name == "main" || route_name == template_name {
+        template_name.to_string()
+    } else {
+        format!("{template_name}-{route_name}")
+    }
 }
 
 /// Formats a base hostname into an FQDN with `hostname_suffix`.
@@ -93,5 +101,36 @@ mod tests {
             "web-abc.c.noctf.dev"
         );
         assert_eq!(format_tls_host("", "web-abc"), "web-abc");
+    }
+
+    #[test]
+    fn test_default_tls_prefix() {
+        assert_eq!(default_tls_prefix("my-chal", "web"), "my-chal-web");
+        assert_eq!(default_tls_prefix("my-chal", "main"), "my-chal");
+        assert_eq!(default_tls_prefix("my-chal", "my-chal"), "my-chal");
+    }
+
+    #[test]
+    fn test_long_template_and_route_prefix_clipping() {
+        let long_template = "super-long-challenge-name-that-is-very-descriptive";
+        let long_route = "super-long-internal-route-backend-target";
+        let raw_prefix = default_tls_prefix(long_template, long_route);
+
+        let key = ResourceKey::new("default", "chal-1", long_route);
+        let hostname = derive_hostname("test-seed", &key, Some(&raw_prefix));
+
+        // Total label length must not exceed DNS 63-char limit
+        assert!(hostname.len() <= 63);
+
+        // Hostname format is {prefix}-{hash14}
+        let parts: Vec<&str> = hostname.rsplitn(2, '-').collect();
+        assert_eq!(parts.len(), 2);
+        let id = parts[0];
+        let prefix = parts[1];
+
+        assert_eq!(id.len(), HOSTNAME_ID_LEN);
+        assert_eq!(prefix.len(), MAX_PREFIX_LEN);
+        assert!(!prefix.ends_with('-'));
+        assert_eq!(hostname.len(), MAX_PREFIX_LEN + 1 + HOSTNAME_ID_LEN);
     }
 }
