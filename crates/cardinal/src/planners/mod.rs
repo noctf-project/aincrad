@@ -12,6 +12,20 @@ pub use replicaset::ReplicaSetPlanner;
 pub use service::ServicePlanner;
 pub use tls_route::TLSRoutePlanner;
 
+/// Runs validation for all planners against the instance and template.
+pub fn validate_all(
+    instance: &CTFInstance,
+    template: &ResolvedTemplate,
+    ctx: &Context,
+) -> Result<(), Error> {
+    validate_overrides(instance, template)?;
+    ReplicaSetPlanner::validate(instance, template, ctx)?;
+    ServicePlanner::validate(instance, template, ctx)?;
+    NetworkPolicyPlanner::validate(instance, template, ctx)?;
+    TLSRoutePlanner::validate(instance, template, ctx)?;
+    Ok(())
+}
+
 use k8s_common::crd::CTFInstance;
 use kube::{Resource, core::NamespaceResourceScope};
 use serde::{Serialize, de::DeserializeOwned};
@@ -33,6 +47,15 @@ pub trait Planner {
         + Send
         + Sync
         + 'static;
+
+    /// Validates the instance and template before planning or applying any resources.
+    fn validate(
+        _instance: &CTFInstance,
+        _template: &ResolvedTemplate,
+        _ctx: &Context,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
 
     /// Pure planning function that returns all desired resources for this instance and template.
     fn plan(

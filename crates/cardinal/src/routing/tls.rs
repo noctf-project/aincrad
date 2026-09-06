@@ -9,10 +9,11 @@ const HOSTNAME_ID_LEN: usize = 14;
 const MAX_PREFIX_LEN: usize = 56 - HOSTNAME_ID_LEN - 1;
 
 /// Derives the base hostname label (`{prefix}-{hash14}`).
+/// Uses a consistent hash for all routes within the same instance.
 pub fn derive_hostname(route_seed: &str, key: &ResourceKey, prefix: Option<&str>) -> String {
     let clean_prefix = sanitize_prefix(prefix.filter(|s| !s.is_empty()).unwrap_or(&key.resource));
 
-    let seed_tag = format!("aincrad:route:v1:{route_seed}:{key}");
+    let seed_tag = format!("aincrad:route:v1:{route_seed}:{}/{}", key.namespace, key.instance);
     let mut hasher = Sha256::new();
     hasher.update(seed_tag.as_bytes());
     let hash = hasher.finalize();
@@ -88,6 +89,18 @@ mod tests {
         let h2 = derive_hostname("seed", &key, Some("whoami"));
         assert_eq!(h1, h2);
         assert!(h1.starts_with("whoami-"));
+    }
+
+    #[test]
+    fn test_derive_hostname_consistent_across_routes_of_same_instance() {
+        let key1 = ResourceKey::new("default", "chal-1", "web");
+        let key2 = ResourceKey::new("default", "chal-1", "api");
+        let h1 = derive_hostname("seed", &key1, Some("web"));
+        let h2 = derive_hostname("seed", &key2, Some("api"));
+
+        let id1 = h1.strip_prefix("web-").unwrap();
+        let id2 = h2.strip_prefix("api-").unwrap();
+        assert_eq!(id1, id2, "instance hash should be consistent across routes");
     }
 
     #[test]

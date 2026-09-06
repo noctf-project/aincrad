@@ -25,6 +25,46 @@ impl Planner for TLSRoutePlanner {
         Some(&ctx.caches.tls_routes)
     }
 
+    fn validate(
+        instance: &CTFInstance,
+        template: &ResolvedTemplate,
+        _ctx: &Context,
+    ) -> Result<(), Error> {
+        let mut seen_tls_prefixes = std::collections::HashMap::new();
+        let template_name = template.metadata.name.as_deref().unwrap_or("unknown");
+
+        for route_tmpl in &template.spec.routes {
+            let route_override = instance
+                .spec
+                .routes
+                .iter()
+                .find(|r| r.name == route_tmpl.name);
+            let merged = build_merged_route_spec(route_tmpl, route_override);
+
+            if let Some(RouteTarget::Tls(tls)) = merged.target() {
+                if merged.backend.protocol() == k8s_common::crd::RouteProtocol::Udp {
+                    return Err(Error::InvalidOverride(format!(
+                        "Route '{}' specifies TLS on a UDP backend",
+                        route_tmpl.name
+                    )));
+                }
+
+                let default_prefix = default_tls_prefix(template_name, &route_tmpl.name);
+                let prefix = tls.prefix.as_deref().unwrap_or(&default_prefix);
+                let sanitized = crate::routing::sanitize_prefix(prefix);
+
+                if let Some(prev_route) = seen_tls_prefixes.insert(sanitized.clone(), &route_tmpl.name) {
+                    return Err(Error::InvalidOverride(format!(
+                        "conflicting TLS prefix '{sanitized}' between routes '{prev_route}' and '{}'",
+                        route_tmpl.name
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn plan(
         instance: &CTFInstance,
         template: &ResolvedTemplate,
@@ -279,6 +319,58 @@ mod tests {
         match err {
             Error::InvalidOverride(msg) => {
                 assert!(msg.contains("specifies TLS on a UDP backend"), "{msg}");
+            }
+            other => panic!("expected InvalidOverride, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tls_route_planner_validate_detects_conflicts() {
+        let (_store, ctx) = dummy_context();
+        let mut instance = dummy_instance("chal-1", None);
+        instance.spec.routes = vec![CTFInstanceSpecRouteOverride {
+            name: "api".into(),
+            port: None,
+            tls: Some(RouteSpecTLS {
+                prefix: Some("web".into()),
+            }),
+        }];
+
+        let mut template = dummy_resolved_template(1);
+        template.spec.routes = vec![
+            RouteSpec {
+                name: "web".into(),
+                backend: RouteBackend {
+                    service: "web".into(),
+                    port: 80,
+                    protocol: None,
+                },
+                tls: Some(RouteSpecTLS {
+                    prefix: Some("web".into()),
+                }),
+                ..Default::default()
+            },
+            RouteSpec {
+                name: "api".into(),
+                backend: RouteBackend {
+                    service: "web".into(),
+                    port: 81,
+                    protocol: None,
+                },
+                tls: Some(RouteSpecTLS {
+                    prefix: Some("api".into()),
+                }),
+                ..Default::default()
+            },
+        ];
+
+        let err = TLSRoutePlanner::validate(&instance, &template, &ctx).unwrap_err();
+        match err {
+            Error::InvalidOverride(msg) => {
+                assert!(
+                    msg.contains("conflicting TLS prefix 'web' between routes 'web' and 'api'"),
+                    "{msg}"
+                );
             }
             other => panic!("expected InvalidOverride, got {other:?}"),
         }

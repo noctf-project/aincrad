@@ -131,9 +131,9 @@ pub mod prepare {
         // Resolve the CTFTemplate referenced by instance.spec.template.
         let template = reconcilers::template::reconcile(instance, ctx).await?;
 
-        // Reject overrides that name template entries which do not exist,
-        // rather than silently ignoring them.
-        crate::planners::validate_overrides(instance, &template)?;
+        // Reject invalid overrides and run pre-flight validation across all planners
+        // before any resources are planned or applied.
+        crate::planners::validate_all(instance, &template, ctx)?;
 
         // Skip planning and applying if the instance is already synced with its
         // observed spec generation and template version. Runtime child unreadiness

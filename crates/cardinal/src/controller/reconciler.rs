@@ -152,7 +152,7 @@ pub fn handle_service_port_map_event(event: &Event<Service>, port_map: &PortMap)
                 .spec
                 .as_ref()
                 .and_then(|s| s.load_balancer_class.as_deref())
-                != Some(crate::utils::DUMMY_LB_CLASS)
+                != Some(crate::utils::CARDINAL_LB_CLASS)
             {
                 return;
             }
@@ -191,7 +191,7 @@ pub fn handle_service_port_map_event(event: &Event<Service>, port_map: &PortMap)
                 .spec
                 .as_ref()
                 .and_then(|s| s.load_balancer_class.as_deref())
-                != Some(crate::utils::DUMMY_LB_CLASS)
+                != Some(crate::utils::CARDINAL_LB_CLASS)
             {
                 return;
             }
@@ -800,7 +800,7 @@ mod tests {
             },
             spec: Some(ServiceSpec {
                 type_: Some("LoadBalancer".to_string()),
-                load_balancer_class: Some(crate::utils::DUMMY_LB_CLASS.to_string()),
+                load_balancer_class: Some(crate::utils::CARDINAL_LB_CLASS.to_string()),
                 ports: Some(vec![ServicePort {
                     name: Some("pwn".to_string()),
                     port: 20005,
@@ -859,7 +859,7 @@ mod tests {
                 ..Default::default()
             },
             spec: Some(ServiceSpec {
-                load_balancer_class: Some(crate::utils::DUMMY_LB_CLASS.to_string()),
+                load_balancer_class: Some(crate::utils::CARDINAL_LB_CLASS.to_string()),
                 ports: Some(vec![ServicePort {
                     name: Some("pwn".to_string()),
                     port: 20005,

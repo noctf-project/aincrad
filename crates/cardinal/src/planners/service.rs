@@ -15,7 +15,7 @@ use crate::routing::{Port, PortError, RouteError};
 use crate::utils::naming::resource_name;
 use crate::{Context, Error, btreemap};
 
-pub use crate::utils::DUMMY_LB_CLASS;
+pub use crate::utils::CARDINAL_LB_CLASS;
 
 pub struct ServicePlanner;
 
@@ -77,6 +77,7 @@ pub fn plan_services(
                         })
                         .collect(),
                 ),
+                cluster_ip: Some("None".to_string()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -158,7 +159,7 @@ pub fn plan_load_balancers(
             },
             spec: Some(ServiceSpec {
                 type_: Some("LoadBalancer".to_string()),
-                load_balancer_class: Some(DUMMY_LB_CLASS.to_string()),
+                load_balancer_class: Some(CARDINAL_LB_CLASS.to_string()),
                 external_traffic_policy: Some("Cluster".to_string()),
                 allocate_load_balancer_node_ports: Some(false),
                 selector: Some(btreemap! {
@@ -350,7 +351,7 @@ mod tests {
             lb.spec
                 .as_ref()
                 .and_then(|s| s.load_balancer_class.as_deref()),
-            Some(DUMMY_LB_CLASS)
+            Some(CARDINAL_LB_CLASS)
         );
         assert_eq!(
             lb.spec
