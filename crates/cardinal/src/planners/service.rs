@@ -19,7 +19,7 @@ pub use crate::utils::CARDINAL_LB_CLASS;
 
 pub struct ServicePlanner;
 
-/// Plans standard ClusterIP Services for internal inter-pod communication.
+/// Plans Services for internal inter-pod communication and routing backends.
 pub fn plan_services(
     instance: &CTFInstance,
     template: &ResolvedTemplate,
@@ -178,7 +178,7 @@ pub fn plan_load_balancers(
     Ok(desired)
 }
 
-/// Applies ClusterIP services using Server-Side Apply.
+/// Applies internal services using Server-Side Apply.
 pub async fn apply_services(
     api: &kube::Api<Service>,
     services: Vec<Service>,
@@ -497,7 +497,7 @@ mod tests {
         let svcs = ServicePlanner::plan(&instance, &tmpl, &ctx).unwrap();
         assert!(
             svcs.is_empty(),
-            "pod without container ports and without routes must produce no ClusterIP service"
+            "pod without container ports and without routes must produce no service"
         );
     }
 

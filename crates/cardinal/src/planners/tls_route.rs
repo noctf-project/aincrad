@@ -53,7 +53,9 @@ impl Planner for TLSRoutePlanner {
                 let prefix = tls.prefix.as_deref().unwrap_or(&default_prefix);
                 let sanitized = crate::routing::sanitize_prefix(prefix);
 
-                if let Some(prev_route) = seen_tls_prefixes.insert(sanitized.clone(), &route_tmpl.name) {
+                if let Some(prev_route) =
+                    seen_tls_prefixes.insert(sanitized.clone(), &route_tmpl.name)
+                {
                     return Err(Error::InvalidOverride(format!(
                         "conflicting TLS prefix '{sanitized}' between routes '{prev_route}' and '{}'",
                         route_tmpl.name

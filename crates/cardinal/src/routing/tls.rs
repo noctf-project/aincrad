@@ -13,7 +13,10 @@ const MAX_PREFIX_LEN: usize = 56 - HOSTNAME_ID_LEN - 1;
 pub fn derive_hostname(route_seed: &str, key: &ResourceKey, prefix: Option<&str>) -> String {
     let clean_prefix = sanitize_prefix(prefix.filter(|s| !s.is_empty()).unwrap_or(&key.resource));
 
-    let seed_tag = format!("aincrad:route:v1:{route_seed}:{}/{}", key.namespace, key.instance);
+    let seed_tag = format!(
+        "aincrad:route:v1:{route_seed}:{}/{}",
+        key.namespace, key.instance
+    );
     let mut hasher = Sha256::new();
     hasher.update(seed_tag.as_bytes());
     let hash = hasher.finalize();

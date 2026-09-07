@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 chrono = { workspace = true }
-futures = { workspace = true }
 globset = { workspace = true }
 json-patch = { workspace = true }
 k8s-openapi = { workspace = true }
@@ -15,12 +14,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-tracing = { workspace = true }
 sha2 = { workspace = true }
 upon = "0.11"
-
-axum = { workspace = true }
-tower = { workspace = true }
 aincrad-macros = { path = "../macros" }

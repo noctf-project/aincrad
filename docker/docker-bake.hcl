@@ -11,7 +11,7 @@ target "base" {
 target "services" {
   inherits = ["base"]
   matrix = {
-    svc = ["fluct", "cardinal"]
+    svc = ["cardinal"]
   }
   name = svc
 
