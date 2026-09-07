@@ -1,0 +1,57 @@
+apiVersion: aincrad.noctf.dev/v1
+kind: CTFTemplate
+metadata:
+  name: multi-web-db
+  namespace: challenges
+spec:
+  pods:
+    - name: web
+      replicas: 1
+      allowInternet: false
+      spec:
+        containers:
+          - name: frontend
+            image: nginx:alpine
+            ports:
+              - containerPort: 80
+            env:
+              # Cardinal automatically injects internal cluster DNS for sibling services:
+              # {{ services.<pod_name> }} resolves to <instance_name>-svc-<pod_name>
+              - name: DB_HOST
+                value: "{{ services.db }}"
+              - name: DB_PORT
+                value: "6379"
+            resources:
+              limits:
+                cpu: "100m"
+                memory: "64Mi"
+    - name: db
+      replicas: 1
+      allowInternet: false
+      spec:
+        containers:
+          - name: redis
+            image: redis:alpine
+            ports:
+              - containerPort: 6379
+            resources:
+              limits:
+                cpu: "100m"
+                memory: "64Mi"
+  routes:
+    # Multiple routes on the same instance share the consistent instance hash
+    - name: frontend
+      backend:
+        service: web
+        port: 80
+      tls:
+        prefix: web
+---
+apiVersion: aincrad.noctf.dev/v1
+kind: CTFInstance
+metadata:
+  name: team1-multi
+  namespace: challenges
+spec:
+  template: multi-web-db
+  sync: true

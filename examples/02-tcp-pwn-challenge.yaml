@@ -1,0 +1,44 @@
+apiVersion: aincrad.noctf.dev/v1
+kind: CTFTemplate
+metadata:
+  name: pwn-echo
+  namespace: challenges
+spec:
+  pods:
+    - name: chal
+      replicas: 1
+      allowInternet: false
+      spec:
+        containers:
+          - name: chal
+            image: busybox:latest
+            command:
+              - "/bin/sh"
+              - "-c"
+              - "while true; do nc -ll -p 1337 -e /bin/cat; done"
+            ports:
+              - containerPort: 1337
+            resources:
+              limits:
+                cpu: "100m"
+                memory: "64Mi"
+              requests:
+                cpu: "10m"
+                memory: "16Mi"
+  routes:
+    # Dedicated TCP port allocated dynamically from Cardinal's auto-ports pool
+    - name: nc
+      backend:
+        service: chal
+        port: 1337
+        protocol: TCP
+      port: 0
+---
+apiVersion: aincrad.noctf.dev/v1
+kind: CTFInstance
+metadata:
+  name: team1-echo
+  namespace: challenges
+spec:
+  template: pwn-echo
+  sync: true

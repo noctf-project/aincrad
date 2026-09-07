@@ -1,0 +1,198 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cardinal-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: challenges
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aincrad-cardinal
+  namespace: cardinal-system
+  labels:
+    app.kubernetes.io/name: aincrad
+    app.kubernetes.io/component: cardinal
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aincrad-cardinal
+  labels:
+    app.kubernetes.io/name: aincrad
+    app.kubernetes.io/component: cardinal
+rules:
+  - apiGroups:
+      - aincrad.noctf.dev
+    resources:
+      - ctfinstances
+      - ctfinstances/status
+      - ctftemplates
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+      - deletecollection
+  - apiGroups:
+      - apps
+    resources:
+      - replicasets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+      - deletecollection
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - services/status
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+      - deletecollection
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - networkpolicies
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+      - deletecollection
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - tlsroutes
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+      - deletecollection
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aincrad-cardinal
+  namespace: cardinal-system
+  labels:
+    app.kubernetes.io/name: aincrad
+    app.kubernetes.io/component: cardinal
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ksa-aincrad-cardinal
+  labels:
+    app.kubernetes.io/name: aincrad
+    app.kubernetes.io/component: cardinal
+subjects:
+  - kind: ServiceAccount
+    name: aincrad-cardinal
+    namespace: cardinal-system
+roleRef:
+  kind: ClusterRole
+  name: aincrad-cardinal
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ksa-aincrad-cardinal
+  namespace: cardinal-system
+  labels:
+    app.kubernetes.io/name: aincrad
+    app.kubernetes.io/component: cardinal
+subjects:
+  - kind: ServiceAccount
+    name: aincrad-cardinal
+    namespace: cardinal-system
+roleRef:
+  kind: Role
+  name: aincrad-cardinal
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aincrad-cardinal
+  namespace: cardinal-system
+  labels:
+    app.kubernetes.io/name: aincrad-cardinal
+    app.kubernetes.io/component: aincrad
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aincrad-cardinal
+      app.kubernetes.io/component: aincrad
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aincrad-cardinal
+        app.kubernetes.io/component: aincrad
+    spec:
+      serviceAccountName: aincrad-cardinal
+      containers:
+        - name: cardinal
+          image: ghcr.io/your-org/cardinal:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--system-namespace=cardinal-system"
+            - "--hostname-suffix=c.example.com"
+            - "--tls-port=443"
+            - "--reserved-ports=11000-11999"
+            - "--auto-ports=12000-29999,32768-65535"
+            - "--namespace=challenges"
+            - "--route-seed=change-me-to-a-random-secret-key"
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 512Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL

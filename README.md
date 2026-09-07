@@ -1,0 +1,100 @@
+# Aincrad
+
+A Kubernetes-native CTF infrastructure orchestrator and collection of deployment utilities.
+
+Aincrad is an overhaul of our previous challenge instancing setup (`kube-ctf`). The goal is to cut down the administrative friction of testing and deploying CTF challenges: replacing raw YAML templates, ad-hoc cleanup scripts, and over-privileged web frontends with a proper Kubernetes controller.
+
+[`QUICKSTART.md`](QUICKSTART.md) should have all the information you have to deploy Cardinal and write your first challenge.
+
+## Background
+Managing on-demand isolated challenge infrastructure for CTFs came with a lot of operational pain:
+- Challenge authors had to pass in raw Kubernetes manifests without validation, so broken configs only showed up when applied to the cluster.
+- Shared and isolated challenges were treated as different systems, requiring separate templates and deployment pipelines.
+- When an instancer crashed mid-provision, abandoned resources were left in an indeterminate state because there was no reconciliation loop to clean them up.
+- Port management across dozens of challenges meant manually tracking reservations and port forwarding rules in spreadsheets. Which is why we never gotten around to having port-based isolated challenges.
+- Instancer frontends often needed broad cluster-admin permissions in order to create arbitrary workloads.
+
+
+## How Cardinal Works
+
+Everything in Cardinal is modeled around two Custom Resource Definitions:
+
+- `CTFTemplate` (`aincrad.noctf.dev/v1`): The blueprint defining a challenge. It wraps standard PodSpecs (giving authors flexibility plus toggles like `allowInternet`), parameters, and route definitions. Shared challenges and per-team instances use the exact same format.
+- `CTFInstance` (`aincrad.noctf.dev/v1`): A running sandbox provisioned for a player or team, pointing at a template with a TTL (`expiresAt`).
+
+Moving this to a controller solves the main administrative headaches:
+- A single `CTFTemplate` works whether a challenge is shared across all players or instanced hundreds of times. Cardinal handles child ReplicaSets, headless discovery Services, and NetworkPolicies automatically.
+- Child resources carry standard Kubernetes `ownerReferences`, so when an instance expires or is deleted, Kubernetes cascades the cleanup cleanly without needing external tools like `kube-janitor`.
+- Web frontends only need permissions to create and watch `CTFInstance` objects in a single namespace. Cardinal evaluates child readiness and surfaces conditions directly on the instance status.
+- Cardinal handles dynamic TCP/UDP port allocation from a pool (`--auto-ports`) and derives deterministic TLS hostnames via Gateway API.
+
+
+## Architecture
+
+```mermaid
+flowchart TD
+    UI["CTF Instancer API"] -->|"creates / watches"| Instance
+
+    subgraph Kube ["Kubernetes Cluster"]
+        direction TB
+
+        subgraph ControlPlane ["Control Plane"]
+            Cardinal["Cardinal"]
+            Template[("CTFTemplate")] -.-> Cardinal
+            Instance[("CTFInstance")]
+        end
+
+        subgraph ChallengeNS ["Challenge Namespace"]
+            direction LR
+            Routes["Gateway API TLSRoutes"]
+            SVC["Services"]
+            RS["ReplicaSets"]
+            NP["NetworkPolicies"]
+        end
+
+        Instance -->|"triggers"| Cardinal
+        Cardinal --> Routes
+        Cardinal --> SVC
+        Cardinal --> RS
+        Cardinal --> NP
+        Cardinal -->|"updates status"| Instance
+    end
+```
+
+
+## Workspace Structure
+
+The project is organised as a cargo workspace:
+
+- [`crates/cardinal`](crates/cardinal): The core Kubernetes controller daemon, CLI, and reconciliation logic.
+- [`crates/k8s-common`](crates/k8s-common): Shared Kubernetes data types, CRD definitions, label constants, and policy helpers.
+- [`crates/macros`](crates/macros): Workspace procedural macros.
+- [`crds/`](crds): Auto-generated Custom Resource Definition manifests.
+- [`examples/`](examples): Example manifests for deploying Cardinal, web challenges, TCP/pwn challenges, and multi-service setups.
+
+
+## Cluster & Environment Requirements
+
+So far, Aincrad has only been validated in production on **Google Kubernetes Engine (GKE)**, though it should work in other environments as well.
+
+The main piece you need is some routing layer to handle the L4 LoadBalancer Services:
+- On GKE, we run Dataplane v2 (Cilium). To avoid cloud load balancer quotas and expensive per-challenge forwarding rules, we set the `loadBalancerClass` so that GKE's cloud controller ignores the service. We then patch the service spec with our load-balancer's IP to get Cilium to route it. 
+- On bare metal, you'll need an on- or off-cluster proxy (or load balancer controller) capable of watching these `LoadBalancer` specs to route the incoming port range to your nodes.
+
+
+## Configuration & Flags
+Cardinal can be configured via CLI flags or environment variables:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--namespace` | *(all)* | Target challenge namespace to watch |
+| `--system-namespace` | Current namespace | Namespace where Cardinal and proxy routes reside |
+| `--load-balancer-ip` | — | External IP to assign to LoadBalancer services for L4 routing |
+| `--hostname-suffix` | `c.noctf.dev` | Base domain for TLS endpoints (e.g. `c.example.com`) |
+| `--tls-port` | `443` | Port for the shared TLS listener |
+| `--auto-ports` | `30000-32767` | Port range reserved for dynamic L4 TCP/UDP allocation |
+| `--reserved-ports` | `20000-29999` | Port range reserved for fixed/pinned challenge ports |
+| `--route-seed` | `link-start` | Cryptographic seed used for deterministic route generation |
+
+## Notes
+This codebase was written with the assistance of AI coding tools.
