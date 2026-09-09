@@ -72,7 +72,7 @@ impl Planner for ReplicaSetPlanner {
                 .unwrap_or(pod_tmpl.replicas);
 
             let mut patched_pod_spec = template.get_patched_pod_spec(pod_tmpl, &context_map)?;
-            apply_image_aliases(&mut patched_pod_spec, &ctx.image_aliases);
+            apply_image_aliases(&mut patched_pod_spec, ctx.image_aliases());
 
             let rs_spec = build_replicaset_spec(
                 instance_name,

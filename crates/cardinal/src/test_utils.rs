@@ -192,7 +192,6 @@ pub mod tests {
             "c.noctf.dev",
             4433,
             "aincrad-system",
-            "cluster.local",
             std::collections::BTreeMap::new(),
         );
 

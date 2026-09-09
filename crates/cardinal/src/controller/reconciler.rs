@@ -21,7 +21,6 @@ use tracing::{error, info, instrument, warn};
 use crate::{
     Context, Error,
     cache::{Caches, ReadyGate, ResourceKey},
-    cli::Opts,
     reconcilers,
     routing::{Port, PortMap},
 };
@@ -232,40 +231,23 @@ pub fn handle_service_port_map_event(event: &Event<Service>, port_map: &PortMap)
     }
 }
 
-pub async fn run(client: Client, opts: Opts) -> Result<(), Error> {
-    let Opts {
-        system_namespace,
-        reserved_ports,
-        auto_ports,
-        route_seed,
-        hostname_suffix,
-        tls_port,
-        cluster_domain,
-        namespace,
-        image_aliases: image_alias,
-        load_balancer_ip,
-    } = opts;
-    let system_namespace =
-        system_namespace.unwrap_or_else(|| client.default_namespace().to_string());
+pub async fn run(client: Client, config: crate::config::CardinalConfig) -> Result<(), Error> {
+    let port_map = Arc::new(PortMap::new(
+        config.ports.reserved.clone(),
+        config.ports.auto.clone(),
+    ));
 
-    let port_map = Arc::new(PortMap::new(reserved_ports, auto_ports));
-
-    let image_alias_map = image_alias
-        .into_iter()
-        .flatten()
-        .collect::<std::collections::BTreeMap<String, String>>();
+    let namespace = if config.namespaces.len() == 1 {
+        Some(config.namespaces[0].clone())
+    } else {
+        None
+    };
 
     let context = Arc::new(Context {
         client: client.clone(),
         caches: Caches::default(),
         port_map: Some(port_map.clone()),
-        route_seed,
-        hostname_suffix,
-        tls_port,
-        system_namespace,
-        cluster_domain,
-        image_aliases: image_alias_map,
-        load_balancer_ip,
+        config,
     });
 
     run_controller(namespace, context).await
@@ -356,10 +338,13 @@ pub async fn run_controller(namespace: Option<String>, context: Arc<Context>) ->
         .touched_objects()
         .predicate_filter(instance_predicate(), Default::default());
 
-    if let Some(ref ns) = namespace {
-        info!(namespace = %ns, "Starting CTFInstance controller with Template tracking");
-    } else {
-        info!("Starting CTFInstance controller across all namespaces with Template tracking");
+    match namespace.as_deref() {
+        Some(ns) => {
+            info!(namespace = %ns, "Starting CTFInstance controller with Template tracking");
+        }
+        None => {
+            info!("Starting CTFInstance controller across all namespaces with Template tracking");
+        }
     }
 
     Controller::for_stream(controller_instance_stream, instance_store)

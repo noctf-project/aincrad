@@ -253,7 +253,7 @@ pub async fn apply_load_balancers(
         }
     }
 
-    if let Some(ref ip) = ctx.load_balancer_ip {
+    if let Some(ip) = ctx.load_balancer_ip() {
         let status_patch = serde_json::json!({
             "status": {
                 "loadBalancer": {
@@ -419,7 +419,7 @@ mod tests {
     async fn test_apply_load_balancers_allocates_port_and_patches_ip() {
         let (_store, ctx_inner) = dummy_context();
         let mut ctx = Arc::unwrap_or_clone(ctx_inner);
-        ctx.load_balancer_ip = Some("192.168.1.100".to_string());
+        ctx.config.routing.load_balancer_ip = Some("192.168.1.100".to_string());
         let ctx = Arc::new(ctx);
 
         let instance = dummy_instance("chal-1", None);

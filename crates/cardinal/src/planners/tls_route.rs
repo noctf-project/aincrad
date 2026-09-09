@@ -99,9 +99,9 @@ impl Planner for TLSRoutePlanner {
             let route_key = ResourceKey::new(ns, instance_name, &route_tmpl.name);
             let default_prefix = default_tls_prefix(template_name, &route_tmpl.name);
             let prefix = tls.prefix.as_deref().unwrap_or(&default_prefix);
-            let hostname = derive_hostname(&ctx.route_seed, &route_key, Some(prefix));
+            let hostname = derive_hostname(ctx.route_seed(), &route_key, Some(prefix));
             let route_name = resource_name(instance_name, &route_tmpl.name);
-            let fqdn = format_tls_host(&ctx.hostname_suffix, &hostname);
+            let fqdn = format_tls_host(ctx.hostname_suffix(), &hostname);
             let backend_svc = resource_name(
                 &format!("{instance_name}-svc"),
                 &merged_spec.backend.service,
@@ -121,7 +121,7 @@ impl Planner for TLSRoutePlanner {
                 spec: TLSRouteSpec {
                     parent_refs: Some(vec![ParentReference {
                         name: "envoy".to_string(),
-                        namespace: Some(ctx.system_namespace.clone()),
+                        namespace: Some(ctx.system_namespace().to_string()),
                         ..Default::default()
                     }]),
                     hostnames: vec![fqdn],

@@ -1,0 +1,42 @@
+# Cardinal Configuration Example
+
+# Namespaces to watch for CTFInstance and CTFTemplate resources.
+# If empty or omitted, watches all namespaces.
+namespaces:
+  - challenges
+
+# Namespace where Cardinal's leader election lease resides.
+# Defaults to the controller pod's namespace if omitted.
+systemNamespace: cardinal-system
+
+# Routing and Ingress configuration
+routing:
+  # Base domain suffix for TLS routes and default host in status
+  hostnameSuffix: c.example.com
+
+  # Port for shared external TLS listener
+  tlsPort: 443
+
+  # Secret seed for deterministic, unguessable TLS subdomain derivation
+  seed: super-secret-random-seed-value
+
+  # External IP to write into LoadBalancer services for L4 passthrough
+  loadBalancerIp: 1.2.3.4
+
+# L4 TCP/UDP port allocation pools
+ports:
+  # Pinned port ranges allowed in challenge templates
+  reserved:
+    - 11000-11999
+    - 20000-29999
+
+  # Dynamic pool from which Cardinal allocates challenge ports
+  auto:
+    - 12000-19999
+    - 30000-32767
+    - 32768-65535
+
+# Image registry aliases
+# Images referencing "_challenges/image:tag" get rewritten to "gcr.io/.../image:tag"
+imageAliases:
+  _challenges: gcr.io/my-ctf-project/challenges

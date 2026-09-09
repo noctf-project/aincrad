@@ -149,6 +149,30 @@ roleRef:
   name: aincrad-cardinal
   apiGroup: rbac.authorization.k8s.io
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cardinal-config
+  namespace: cardinal-system
+  labels:
+    app.kubernetes.io/name: aincrad
+    app.kubernetes.io/component: cardinal
+data:
+  config.yaml: |
+    namespaces:
+      - challenges
+    systemNamespace: cardinal-system
+    routing:
+      hostnameSuffix: c.example.com
+      tlsPort: 443
+      seed: change-me-to-a-random-secret-key
+    ports:
+      reserved:
+        - 11000-11999
+      auto:
+        - 12000-29999
+        - 32768-65535
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -174,14 +198,10 @@ spec:
         - name: cardinal
           image: ghcr.io/your-org/cardinal:latest
           imagePullPolicy: IfNotPresent
-          args:
-            - "--system-namespace=cardinal-system"
-            - "--hostname-suffix=c.example.com"
-            - "--tls-port=443"
-            - "--reserved-ports=11000-11999"
-            - "--auto-ports=12000-29999,32768-65535"
-            - "--namespace=challenges"
-            - "--route-seed=change-me-to-a-random-secret-key"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cardinal
+              readOnly: true
           resources:
             requests:
               cpu: 25m
@@ -196,3 +216,7 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        - name: config
+          configMap:
+            name: cardinal-config

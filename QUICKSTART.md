@@ -36,21 +36,10 @@ This sets up:
 You can run Cardinal directly against your active kubeconfig context:
 
 ```bash
-cargo run --bin cardinal -- \
-  --namespace=challenges \
-  --hostname-suffix=c.example.com \
-  --tls-port=443 \
-  --route-seed=super-secret-random-seed-value \
-  --auto-ports=30000-32767
+cargo run --bin cardinal -- --config examples/config.example.yaml
 ```
 
-Key CLI flags:
-- `--namespace`: Target namespace to watch (omit to watch all namespaces).
-- `--hostname-suffix`: Base domain for TLS endpoints (e.g. `c.example.com`).
-- `--route-seed`: Cryptographic seed used to generate deterministic, unguessable route hashes.
-- `--auto-ports`: Port range reserved for dynamic L4 TCP/UDP load-balanced challenge ports.
-- `--reserved-ports`: Optional fixed port range for pinned challenges.
-- `--load-balancer-ip`: External IP to assign to LoadBalancer services if not using a cloud LB controller.
+If `--config` is omitted, Cardinal automatically attempts to load `/etc/cardinal/config.yaml` or falls back to built-in defaults. See [`examples/config.example.yaml`](examples/config.example.yaml) for a full example of all configuration settings.
 
 ## Deploying Your First Challenge
 

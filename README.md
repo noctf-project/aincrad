@@ -82,19 +82,39 @@ The main piece you need is some routing layer to handle the L4 LoadBalancer Serv
 - On bare metal, you'll need an on- or off-cluster proxy (or load balancer controller) capable of watching these `LoadBalancer` specs to route the incoming port range to your nodes.
 
 
-## Configuration & Flags
-Cardinal can be configured via CLI flags or environment variables:
+## Configuration
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--namespace` | *(all)* | Target challenge namespace to watch |
-| `--system-namespace` | Current namespace | Namespace where Cardinal and proxy routes reside |
-| `--load-balancer-ip` | — | External IP to assign to LoadBalancer services for L4 routing |
-| `--hostname-suffix` | `c.noctf.dev` | Base domain for TLS endpoints (e.g. `c.example.com`) |
-| `--tls-port` | `443` | Port for the shared TLS listener |
-| `--auto-ports` | `30000-32767` | Port range reserved for dynamic L4 TCP/UDP allocation |
-| `--reserved-ports` | `20000-29999` | Port range reserved for fixed/pinned challenge ports |
-| `--route-seed` | `link-start` | Cryptographic seed used for deterministic route generation |
+Cardinal is configured via a YAML configuration file. By default, it automatically loads `/etc/cardinal/config.yaml` (typically mounted from a ConfigMap in Kubernetes), or uses built-in defaults if running without a config file.
+
+You can specify a custom configuration file path using `--config <path>` (or `CARDINAL_CONFIG=<path>`):
+
+```bash
+cargo run --bin cardinal -- --config ./examples/config.example.yaml
+```
+
+An example configuration:
+
+```yaml
+namespaces:
+  - challenges
+
+systemNamespace: cardinal-system
+
+routing:
+  hostnameSuffix: c.example.com
+  tlsPort: 443
+  seed: super-secret-random-seed-value
+  loadBalancerIp: 1.2.3.4
+
+ports:
+  reserved:
+    - 20000-29999
+  auto:
+    - 30000-32767
+
+imageAliases:
+  _challenges: gcr.io/my-ctf-project/challenges
+```
 
 ## Notes
 This codebase was written with the assistance of AI coding tools.

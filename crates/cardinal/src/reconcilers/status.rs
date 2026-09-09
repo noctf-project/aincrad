@@ -113,7 +113,7 @@ pub fn generate_endpoints(
                 };
 
                 if port != 0 {
-                    let host = ctx.hostname_suffix.clone();
+                    let host = ctx.hostname_suffix().to_string();
                     endpoints.push(CTFInstanceStatusEndpoint {
                         name: route_tmpl.name.clone(),
                         type_: proto.as_str().to_lowercase(),
@@ -126,14 +126,14 @@ pub fn generate_endpoints(
                 let template_name = template.metadata.name.as_deref().unwrap_or("unknown");
                 let default_prefix = default_tls_prefix(template_name, &route_tmpl.name);
                 let prefix = tls.prefix.as_deref().unwrap_or(&default_prefix);
-                let hostname = derive_hostname(&ctx.route_seed, &route_key, Some(prefix));
-                let fqdn = format_tls_host(&ctx.hostname_suffix, &hostname);
+                let hostname = derive_hostname(ctx.route_seed(), &route_key, Some(prefix));
+                let fqdn = format_tls_host(ctx.hostname_suffix(), &hostname);
                 endpoints.push(CTFInstanceStatusEndpoint {
                     name: route_tmpl.name.clone(),
                     type_: "tls".to_string(),
                     target: EndpointTarget {
                         host: fqdn,
-                        port: ctx.tls_port,
+                        port: ctx.tls_port(),
                     },
                 });
             }
