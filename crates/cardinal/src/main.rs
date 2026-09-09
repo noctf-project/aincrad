@@ -74,12 +74,50 @@ async fn run_as_leader(
     loaded_path: Option<std::path::PathBuf>,
     mut lease_channel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Error> {
-    let (reload_tx, mut reload_rx) = mpsc::channel::<()>(16);
-    let _watcher = loaded_path.as_deref().and_then(|path| {
-        setup_config_watcher(path, reload_tx)
-            .map_err(|e| warn!(error = %e, "Failed to watch config file"))
-            .ok()
-    });
+    let (config_changed_tx, mut config_changed_rx) = mpsc::channel::<CardinalConfig>(4);
+    let mut _watcher = None;
+
+    if let Some(path) = loaded_path {
+        let (raw_event_tx, mut raw_event_rx) = mpsc::channel::<()>(16);
+        match setup_config_watcher(&path, raw_event_tx) {
+            Ok(w) => {
+                _watcher = Some(w);
+                let path_clone = path.clone();
+                let initial_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                let mut current_config = active_config.clone();
+
+                tokio::spawn(async move {
+                    let mut last_mtime = initial_mtime;
+                    while raw_event_rx.recv().await.is_some() {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        while raw_event_rx.try_recv().is_ok() {}
+
+                        let current_mtime = std::fs::metadata(&path_clone)
+                            .and_then(|m| m.modified())
+                            .ok();
+                        if current_mtime.is_some() && current_mtime == last_mtime {
+                            continue;
+                        }
+
+                        if let Ok((new_cfg, _)) = CardinalConfig::load_or_default(Some(&path_clone))
+                        {
+                            last_mtime = current_mtime;
+                            if new_cfg != current_config {
+                                info!(
+                                    "Configuration changed on disk; signalling controller restart..."
+                                );
+                                current_config = new_cfg.clone();
+                                if config_changed_tx.send(new_cfg).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => warn!(error = %e, "Failed to watch config file"),
+        }
+    }
 
     loop {
         tokio::select! {
@@ -91,18 +129,9 @@ async fn run_as_leader(
                     }
                 }
             } => break Ok(()),
-            Some(()) = reload_rx.recv() => {
-                if let Some(ref path) = loaded_path {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    while reload_rx.try_recv().is_ok() {}
-
-                    if let Ok((new_cfg, _)) = CardinalConfig::load_or_default(Some(path)) {
-                        if new_cfg != active_config {
-                            info!("Configuration changed on disk; restarting controller loop...");
-                            active_config = new_cfg;
-                        }
-                    }
-                }
+            Some(new_cfg) = config_changed_rx.recv() => {
+                info!("Restarting controller loop with updated configuration...");
+                active_config = new_cfg;
             }
             res = cardinal::controller::run(kube_client.clone(), active_config.clone()) => {
                 if let Err(err) = res {
@@ -126,7 +155,9 @@ fn setup_config_watcher(
         .unwrap_or(path);
 
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-        if res.is_ok() {
+        if let Ok(event) = res
+            && (event.kind.is_modify() || event.kind.is_create())
+        {
             let _ = tx.try_send(());
         }
     })?;

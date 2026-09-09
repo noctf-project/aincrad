@@ -3,11 +3,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use k8s_common::{PortRange, parse_port_range};
+use k8s_openapi::api::networking::v1::NetworkPolicySpec;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/cardinal/config.yaml";
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CardinalConfig {
     #[serde(default)]
@@ -24,6 +25,26 @@ pub struct CardinalConfig {
 
     #[serde(default)]
     pub image_aliases: BTreeMap<String, String>,
+
+    #[serde(default)]
+    pub network_policies: NetworkPoliciesConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPoliciesConfig {
+    #[serde(default)]
+    pub template: TemplateNetworkPolicyConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateNetworkPolicyConfig {
+    #[serde(default)]
+    pub available: Option<NetworkPolicySpec>,
+
+    #[serde(default)]
+    pub unavailable: Option<NetworkPolicySpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,5 +325,42 @@ ports:
 "#;
         let cfg = CardinalConfig::from_yaml(yaml).unwrap();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_network_policies_deserialization() {
+        let yaml = r#"
+networkPolicies:
+  template:
+    available:
+      ingress:
+        - from:
+            - ipBlock:
+                cidr: 0.0.0.0/0
+            - namespaceSelector:
+                matchExpressions:
+                  - key: kubernetes.io/metadata.name
+                    operator: In
+                    values:
+                      - kubectf-infra
+                      - envoy-gateway-system
+      policyTypes:
+        - Ingress
+        - Egress
+"#;
+        let cfg = CardinalConfig::from_yaml(yaml).unwrap();
+        let template_np = &cfg.network_policies.template;
+        assert!(template_np.available.is_some());
+        assert!(template_np.unavailable.is_none());
+
+        let avail = template_np.available.as_ref().unwrap();
+        assert_eq!(
+            avail.policy_types,
+            Some(vec!["Ingress".to_string(), "Egress".to_string()])
+        );
+        let ingress = avail.ingress.as_ref().unwrap();
+        assert_eq!(ingress.len(), 1);
+        let peers = ingress[0].from.as_ref().unwrap();
+        assert_eq!(peers.len(), 2);
     }
 }

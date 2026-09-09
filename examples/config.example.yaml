@@ -1,5 +1,3 @@
-# Cardinal Configuration Example
-
 # Namespaces to watch for CTFInstance and CTFTemplate resources.
 # If empty or omitted, watches all namespaces.
 namespaces:
@@ -40,3 +38,26 @@ ports:
 # Images referencing "_challenges/image:tag" get rewritten to "gcr.io/.../image:tag"
 imageAliases:
   _challenges: gcr.io/my-ctf-project/challenges
+
+# Template network policy rules
+networkPolicies:
+  template:
+    # Applied when challenge is available (now >= availableAt or availableAt not set)
+    available:
+      ingress:
+        - from:
+            - ipBlock:
+                cidr: 0.0.0.0/0
+            - namespaceSelector:
+                matchExpressions:
+                  - key: kubernetes.io/metadata.name
+                    operator: In
+                    values:
+                      - infra
+                      - envoy-gateway-system
+      policyTypes:
+        - Ingress
+        - Egress
+    # Applied when challenge is unavailable (now < availableAt)
+    # unavailable:
+    #   ingress: []

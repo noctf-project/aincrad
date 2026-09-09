@@ -12,6 +12,7 @@ pub const INSTANCE_GENERATION_LABEL: &str = "aincrad.noctf.dev/instance-generati
 pub const RESTARTED_AT_ANNOTATION: &str = "aincrad.noctf.dev/restartedAt";
 pub const MIN_TEMPLATE_GENERATION_ANNOTATION: &str = "aincrad.noctf.dev/minTemplateGeneration";
 pub const EXPIRES_AT_ANNOTATION: &str = "aincrad.noctf.dev/expiresAt";
+pub const AVAILABLE_AT_ANNOTATION: &str = "aincrad.noctf.dev/availableAt";
 
 /// Constructs standard selector labels for child resources belonging to a CTFInstance.
 pub fn instance_labels(instance_name: &str) -> BTreeMap<String, String> {

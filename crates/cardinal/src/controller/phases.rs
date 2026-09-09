@@ -9,11 +9,11 @@ use tracing::info;
 use k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION;
 
 use crate::{
-    Context, Error, reconcilers,
+    Context, Error,
+    controller::TIME_BASED_REQUEUE_BUFFER,
+    reconcilers,
     utils::ttl::{calculate_remaining_ttl, is_expired, parse_expires_at},
 };
-
-const EXPIRES_REQUEUE_BUFFER: Duration = Duration::from_secs(5);
 
 /// Shared context threaded through every reconcile phase.
 pub struct Flow<'a> {
@@ -78,7 +78,7 @@ pub async fn run(instance: &CTFInstance, ctx: &Context) -> Result<Action, Error>
 /// or await further changes.
 fn completed_action(flow: &Flow<'_>) -> Action {
     if let Some(remaining) = calculate_remaining_ttl(flow.expires_at) {
-        Action::requeue(remaining + EXPIRES_REQUEUE_BUFFER)
+        Action::requeue(remaining + TIME_BASED_REQUEUE_BUFFER)
     } else {
         Action::await_change()
     }
