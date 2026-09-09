@@ -95,6 +95,31 @@ kubectl apply -f examples/04-instance-with-ttl.yaml
 
 By annotating the instance with `aincrad.noctf.dev/expiresAt` (an RFC3339 timestamp), Cardinal automatically schedules an expiration check. Once the timestamp passes, Cardinal deletes the `CTFInstance`, triggering cascading deletion of all child pods, services, and routes.
 
+## Instance Lifecycle & Upgrades
+
+Instances are **immutable snapshots** pinned to the template version at creation time. Updating a `CTFTemplate` does not auto-roll running instances, preventing active player sessions or shared challenge state from being wiped accidentally.
+
+To apply template changes to running instances:
+
+1. **Recreate the instance (standard player flow):**
+   ```bash
+   kubectl delete ctfinstance <instance-name> -n challenges
+   kubectl apply -f <instance-manifest>.yaml
+   ```
+
+2. **Trigger a rolling restart (preserves routes and allocated ports):**
+   ```bash
+   kubectl annotate ctfinstance <instance-name> -n challenges \
+     aincrad.noctf.dev/restartedAt="$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite
+   ```
+
+3. **Emergency global upgrade (forces all active instances to roll up):**
+   ```bash
+   kubectl annotate ctftemplate <template-name> -n challenges \
+     aincrad.noctf.dev/minTemplateGeneration="9999" --overwrite
+   ```
+   Cardinal automatically caps this annotation to the template's current generation so future template edits do not trigger unwanted rolls.
+
 ## Cleaning Up
 
 Delete instances manually when done:

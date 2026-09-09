@@ -293,7 +293,7 @@ pub async fn run_controller(namespace: Option<String>, context: Arc<Context>) ->
             let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
             info!(
                 template_name = tmpl_name,
-                "CTFTemplate updated, evaluating synced CTFInstances to retrigger"
+                "CTFTemplate updated, evaluating CTFInstances requiring upgrade"
             );
             instance_cache
                 .instances_to_sync(&template)

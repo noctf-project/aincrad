@@ -133,9 +133,6 @@ pub struct CTFInstanceSpec {
     /// Name of the CTFTemplate resource to instantiate.
     #[schemars(schema_with = "immutable_property_schema")]
     pub template: String,
-    /// Sync instance with the upstream template if enabled.
-    #[serde(default)]
-    pub sync: bool,
     /// Parameter overrides for this specific challenge instance.
     #[serde(default)]
     #[schemars(schema_with = "list_schema::<CTFInstanceSpecParam>")]

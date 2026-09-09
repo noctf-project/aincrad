@@ -18,8 +18,7 @@ pub fn apply_condition(status: &mut CTFInstanceStatus, condition: Condition) {
 
 /// Fails the reconcile if any instance pod or route override names a template
 /// entry that does not exist. Silent overrides against a template are a
-/// misconfiguration — for a `sync: true` instance a deleted template entry
-/// (and its override) is valid, but a never-existent name is always a mistake.
+/// misconfiguration — a non-existent name is always an error.
 pub fn validate_overrides(
     instance: &CTFInstance,
     template: &crate::reconcilers::template::ResolvedTemplate,

@@ -140,16 +140,28 @@ mod tests {
         }
     }
 
-    fn inst(name: &str, template: &str, sync: bool, observed: Option<i64>) -> CTFInstance {
+    fn inst(
+        name: &str,
+        template: &str,
+        observed: Option<i64>,
+        min_gen: Option<i64>,
+    ) -> CTFInstance {
         CTFInstance {
             metadata: ObjectMeta {
                 name: Some(name.into()),
                 namespace: Some("default".into()),
+                annotations: min_gen.map(|m| {
+                    [(
+                        k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+                        m.to_string(),
+                    )]
+                    .into_iter()
+                    .collect()
+                }),
                 ..Default::default()
             },
             spec: CTFInstanceSpec {
                 template: template.into(),
-                sync,
                 ..Default::default()
             },
             status: Some(CTFInstanceStatus {
@@ -160,68 +172,82 @@ mod tests {
     }
 
     #[test]
-    fn test_instance_cache_find_synced_instances() {
+    fn test_instance_cache_instances_to_sync_with_template_floor() {
         let cache = InstanceCache::new();
-        let tmpl = tmpl("whoami-template", 2);
+        let tmpl_no_floor = tmpl("whoami-template", 2);
+        let mut tmpl_with_floor = tmpl("whoami-template", 2);
+        tmpl_with_floor.metadata.annotations = Some(
+            [(
+                k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+                "2".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
 
-        let inst_sync_true = inst("inst-1", "whoami-template", true, Some(1));
-        let inst_sync_false = inst("inst-2", "whoami-template", false, Some(1));
-        let inst_other_tmpl = inst("inst-3", "other-template", true, Some(1));
+        let inst_1 = inst("inst-1", "whoami-template", Some(1), None);
+        let inst_other_tmpl = inst("inst-2", "other-template", Some(1), None);
 
-        cache.update(&inst_sync_true);
-        cache.update(&inst_sync_false);
+        cache.update(&inst_1);
         cache.update(&inst_other_tmpl);
 
-        let matched = cache.instances_to_sync(&tmpl);
+        // Without floor on template or instance, instances_to_sync returns nothing
+        assert_eq!(cache.instances_to_sync(&tmpl_no_floor).len(), 0);
 
+        // With floor on template, inst-1 requires upgrade
+        let matched = cache.instances_to_sync(&tmpl_with_floor);
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].metadata.name.as_deref(), Some("inst-1"));
-        assert_eq!(matched[0].metadata.namespace.as_deref(), Some("default"));
 
-        cache.remove(&inst_sync_true);
-        let matched_after_remove = cache.instances_to_sync(&tmpl);
+        cache.remove(&inst_1);
+        let matched_after_remove = cache.instances_to_sync(&tmpl_with_floor);
         assert_eq!(matched_after_remove.len(), 0);
     }
 
     #[test]
-    fn test_instance_cache_update_sync_flag_toggles() {
+    fn test_instance_cache_instances_to_sync_with_instance_floor() {
         let cache = InstanceCache::new();
         let tmpl = tmpl("whoami-template", 2);
 
-        let mut inst = inst("inst-toggle", "whoami-template", true, Some(1));
-
-        // Initial add with sync = true and stale template generation
-        cache.update(&inst);
-        assert_eq!(cache.instances_to_sync(&tmpl).len(), 1);
-
-        // Update with sync = false -> filtered out of sync results
-        inst.spec.sync = false;
-        cache.update(&inst);
+        let mut inst_stale = inst("inst-stale", "whoami-template", Some(1), None);
+        cache.update(&inst_stale);
         assert_eq!(cache.instances_to_sync(&tmpl).len(), 0);
 
-        // Toggle sync back to true -> needs upgrade again
-        inst.spec.sync = true;
-        cache.update(&inst);
+        // Add instance floor
+        inst_stale.metadata.annotations = Some(
+            [(
+                k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+                "2".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        cache.update(&inst_stale);
         assert_eq!(cache.instances_to_sync(&tmpl).len(), 1);
-    }
 
-    #[test]
-    fn test_instance_cache_skips_caught_up_synced_instances() {
-        let cache = InstanceCache::new();
-        let tmpl = tmpl("whoami-template", 2);
-
-        // Synced but already current: must not be returned for re-apply.
-        let caught_up = inst("inst-up-to-date", "whoami-template", true, Some(2));
-        cache.update(&caught_up);
+        // Caught up
+        inst_stale.status = Some(CTFInstanceStatus {
+            template_generation: Some(2),
+            ..Default::default()
+        });
+        cache.update(&inst_stale);
         assert_eq!(cache.instances_to_sync(&tmpl).len(), 0);
     }
 
     #[test]
     fn test_instance_cache_deletion_timestamp_pruning() {
         let cache = InstanceCache::new();
-        let tmpl = tmpl("whoami-template", 2);
+        let mut tmpl = tmpl("whoami-template", 2);
+        tmpl.metadata.annotations = Some(
+            [(
+                k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+                "2".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
 
-        let mut inst = inst("inst-del", "whoami-template", true, Some(1));
+        let mut inst = inst("inst-del", "whoami-template", Some(1), None);
 
         cache.update(&inst);
         assert_eq!(cache.instances_to_sync(&tmpl).len(), 1);
@@ -238,10 +264,26 @@ mod tests {
     #[test]
     fn test_instance_cache_template_change_migration() {
         let cache = InstanceCache::new();
-        let tmpl_a = tmpl("tmpl-a", 2);
-        let tmpl_b = tmpl("tmpl-b", 2);
+        let mut tmpl_a = tmpl("tmpl-a", 2);
+        tmpl_a.metadata.annotations = Some(
+            [(
+                k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+                "2".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut tmpl_b = tmpl("tmpl-b", 2);
+        tmpl_b.metadata.annotations = Some(
+            [(
+                k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+                "2".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
 
-        let mut inst = inst("inst-migrate", "tmpl-a", true, Some(1));
+        let mut inst = inst("inst-migrate", "tmpl-a", Some(1), None);
 
         cache.update(&inst);
         assert_eq!(cache.instances_to_sync(&tmpl_a).len(), 1);
@@ -264,34 +306,12 @@ mod tests {
     }
 
     #[test]
-    fn test_instance_cache_synced_unobserved_instance_needs_catch_up() {
-        let cache = InstanceCache::new();
-        let tmpl = tmpl("whoami-template", 1);
-
-        // Synced instance that has never applied the template (template_generation
-        // absent) must be returned so its first apply happens.
-        let inst_fresh = inst("inst-fresh", "whoami-template", true, None);
-        cache.update(&inst_fresh);
-        assert_eq!(cache.instances_to_sync(&tmpl).len(), 1);
-
-        // After a successful apply, template_generation is caught up and it drops out.
-        let mut inst_done = inst_fresh.clone();
-        inst_done.status = Some(CTFInstanceStatus {
-            template_generation: Some(1),
-            ..Default::default()
-        });
-        cache.update(&inst_done);
-        assert_eq!(cache.instances_to_sync(&tmpl).len(), 0);
-    }
-
-    #[test]
-    fn test_instance_cache_non_synced_not_returned_for_sync() {
+    fn test_instance_cache_instances_without_floor_never_sync() {
         let cache = InstanceCache::new();
         let tmpl = tmpl("whoami-template", 2);
 
-        // Non-synced instances never track the template, even if stale.
-        let non_synced = inst("inst-static", "whoami-template", false, Some(1));
-        cache.update(&non_synced);
+        let inst_static = inst("inst-static", "whoami-template", Some(1), None);
+        cache.update(&inst_static);
         assert_eq!(cache.instances_to_sync(&tmpl).len(), 0);
     }
 }

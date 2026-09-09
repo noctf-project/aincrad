@@ -357,6 +357,8 @@ pub mod tests {
                 ("apps/v1", "ReplicaSet")
             } else if path.contains("tlsroutes") {
                 ("gateway.networking.k8s.io/v1alpha2", "TLSRoute")
+            } else if path.contains("ctftemplates") {
+                ("aincrad.noctf.dev/v1", "CTFTemplate")
             } else if path.contains("ctfinstances") {
                 ("aincrad.noctf.dev/v1", "CTFInstance")
             } else {
@@ -380,6 +382,8 @@ pub mod tests {
             });
             if kind == "CTFInstance" {
                 body["spec"] = serde_json::json!({ "template": "whoami-template" });
+            } else if kind == "CTFTemplate" {
+                body["spec"] = serde_json::json!({ "pods": [], "routes": [] });
             }
             let body_str = serde_json::to_string(&body).unwrap();
             Ok(axum::http::Response::builder()

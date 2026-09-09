@@ -41,4 +41,3 @@ metadata:
   namespace: challenges
 spec:
   template: pwn-echo
-  sync: true

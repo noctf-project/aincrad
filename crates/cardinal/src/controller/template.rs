@@ -18,14 +18,43 @@ use tracing::{error, info, warn};
 
 use crate::{Context, Error, btreemap, controller::AVAILABILITY_LEAD_TIME};
 
+use k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION;
+
 pub async fn reconcile_template(
     template: Arc<CTFTemplate>,
     ctx: Arc<Context>,
 ) -> Result<Action, Error> {
     let name = template.metadata.name.as_deref().unwrap_or_default();
     let ns = template.metadata.namespace.as_deref().unwrap_or("default");
-    let netpol_name = format!("{name}-tpl");
 
+    // Normalize minTemplateGeneration: rewrite invalid values and cap exceeding values.
+    if let Some(raw_val) = template
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(MIN_TEMPLATE_GENERATION_ANNOTATION))
+    {
+        let current_gen = template.metadata.generation.unwrap_or(1);
+        let normalized = match raw_val.parse::<i64>() {
+            Ok(parsed) if parsed > current_gen => Some(current_gen),
+            Ok(parsed) if parsed > 0 => None,
+            _ => Some(current_gen),
+        };
+
+        if let Some(target_gen) = normalized {
+            info!(
+                template = %name,
+                ns,
+                raw_val,
+                target_gen,
+                "Rewriting template minTemplateGeneration annotation"
+            );
+            patch_template_min_generation(&template, &ctx, target_gen).await?;
+            return Ok(Action::requeue(Duration::from_millis(100)));
+        }
+    }
+
+    let netpol_name = format!("{name}-tpl");
     let api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), ns);
 
     let (is_available, requeue_duration) = check_availability(&template);
@@ -154,6 +183,30 @@ fn check_availability(template: &CTFTemplate) -> (bool, Option<Duration>) {
     }
 }
 
+async fn patch_template_min_generation(
+    template: &CTFTemplate,
+    ctx: &Context,
+    target_gen: i64,
+) -> Result<(), Error> {
+    let name = template.metadata.name.as_deref().unwrap_or_default();
+    let ns = template.metadata.namespace.as_deref().unwrap_or("default");
+    let api: Api<CTFTemplate> = Api::namespaced(ctx.client.clone(), ns);
+    let patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                MIN_TEMPLATE_GENERATION_ANNOTATION: target_gen.to_string()
+            }
+        }
+    });
+    api.patch(
+        name,
+        &kube::api::PatchParams::default(),
+        &kube::api::Patch::Merge(patch),
+    )
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +266,65 @@ mod tests {
         let (avail, requeue) = check_availability(&template);
         assert!(avail);
         assert!(requeue.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_template_caps_min_generation() {
+        use crate::test_utils::tests::recording_kube_client;
+
+        let (client, log) = recording_kube_client();
+        let (_store, ctx) = crate::test_utils::tests::dummy_ctx(client, vec![]);
+
+        let mut template = test_template(Some(
+            [(
+                MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+                "9999".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        ));
+        template.metadata.generation = Some(3);
+
+        let action = reconcile_template(Arc::new(template), ctx).await.unwrap();
+        assert_eq!(action, Action::requeue(Duration::from_millis(100)));
+
+        let patches: Vec<_> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.starts_with("PATCH") && s.contains("/ctftemplates/test-chal"))
+            .cloned()
+            .collect();
+        assert_eq!(patches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_template_rewrites_invalid_min_generation() {
+        use crate::test_utils::tests::recording_kube_client;
+
+        let (client, log) = recording_kube_client();
+        let (_store, ctx) = crate::test_utils::tests::dummy_ctx(client, vec![]);
+
+        let mut template = test_template(Some(
+            [(
+                MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+                "not-a-number".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        ));
+        template.metadata.generation = Some(2);
+
+        let action = reconcile_template(Arc::new(template), ctx).await.unwrap();
+        assert_eq!(action, Action::requeue(Duration::from_millis(100)));
+
+        let patches: Vec<_> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.starts_with("PATCH") && s.contains("/ctftemplates/test-chal"))
+            .cloned()
+            .collect();
+        assert_eq!(patches.len(), 1);
     }
 }

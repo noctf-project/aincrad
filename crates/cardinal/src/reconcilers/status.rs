@@ -506,10 +506,9 @@ mod tests {
             .replica_sets
             .handle(&kube::runtime::watcher::Event::Apply(rs));
 
-        let mut synced = dummy_instance("chal-1", None);
-        synced.spec.sync = true;
-        synced.metadata.generation = Some(1);
-        synced.status = Some(CTFInstanceStatus {
+        let mut instance = dummy_instance("chal-1", None);
+        instance.metadata.generation = Some(1);
+        instance.status = Some(CTFInstanceStatus {
             observed_generation: Some(1),
             template_generation: None,
             restarted_at: None,
@@ -518,16 +517,16 @@ mod tests {
             ..Default::default()
         });
 
-        let _resolved = crate::reconcilers::template::reconcile(&synced, &ctx)
+        let _resolved = crate::reconcilers::template::reconcile(&instance, &ctx)
             .await
             .unwrap();
 
-        let evaluation = evaluate_status(&synced, &ctx).unwrap();
+        let evaluation = evaluate_status(&instance, &ctx).unwrap();
         assert!(
             evaluation.is_ready(),
-            "synced instance at current template generation must evaluate ready"
+            "instance at current template generation must evaluate ready"
         );
-        commit(&synced, &evaluation, &ctx)
+        commit(&instance, &evaluation, &ctx)
             .await
             .expect("commit succeeds");
     }
@@ -548,10 +547,9 @@ mod tests {
         };
         let (_store, ctx) = dummy_context_with_routes(vec![tcp_route.clone()]);
 
-        let mut synced = dummy_instance("chal-1", None);
-        synced.spec.sync = true;
-        synced.metadata.generation = Some(1);
-        synced.status = Some(CTFInstanceStatus {
+        let mut instance = dummy_instance("chal-1", None);
+        instance.metadata.generation = Some(1);
+        instance.status = Some(CTFInstanceStatus {
             observed_generation: Some(1),
             template_generation: Some(1),
             restarted_at: None,
@@ -569,8 +567,8 @@ mod tests {
             .metadata
             .clone();
         assert!(
-            !crate::utils::versions::requires_template_upgrade(&template_meta, &synced),
-            "synced instance at the current template generation must not require an upgrade"
+            !crate::utils::versions::requires_template_upgrade(&template_meta, &instance),
+            "instance without floor must not require an upgrade"
         );
 
         let bump_tmpl = k8s_common::crd::CTFTemplate {
@@ -578,6 +576,14 @@ mod tests {
                 name: Some("whoami-template".into()),
                 namespace: Some("default".into()),
                 generation: Some(2),
+                annotations: Some(
+                    [(
+                        k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string(),
+                        "2".to_string(),
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
                 ..Default::default()
             },
             spec: k8s_common::crd::CTFTemplateSpec {
@@ -597,11 +603,11 @@ mod tests {
             .metadata
             .clone();
         assert!(
-            crate::utils::versions::requires_template_upgrade(&template_meta, &synced),
-            "a template generation bump surfaces as an upgrade so children get re-applied"
+            crate::utils::versions::requires_template_upgrade(&template_meta, &instance),
+            "a template minTemplateGeneration floor surfaces as an upgrade so children get re-applied"
         );
 
-        let mut caught_up = synced.clone();
+        let mut caught_up = instance.clone();
         caught_up.status = Some(CTFInstanceStatus {
             observed_generation: Some(1),
             template_generation: Some(2),

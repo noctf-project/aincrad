@@ -54,4 +54,3 @@ metadata:
   namespace: challenges
 spec:
   template: multi-web-db
-  sync: true

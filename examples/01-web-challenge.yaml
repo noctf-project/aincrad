@@ -36,4 +36,3 @@ metadata:
   namespace: challenges
 spec:
   template: web-whoami
-  sync: true

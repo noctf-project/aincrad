@@ -8,4 +8,3 @@ metadata:
     aincrad.noctf.dev/expiresAt: "2026-12-31T23:59:59Z"
 spec:
   template: web-whoami
-  sync: true

@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
-use k8s_common::crd::{CTFInstance, CTFTemplate};
-use kube::runtime::{Predicate, controller::Action, predicates, reflector::ObjectRef};
+use k8s_common::crd::CTFInstance;
+use kube::runtime::{Predicate, controller::Action, predicates};
 use tracing::{error, instrument};
 
 use crate::{Context, Error, reconcilers};
@@ -50,25 +50,6 @@ pub fn error_policy(instance: Arc<CTFInstance>, error: &Error, _ctx: Arc<Context
         },
         _ => Action::requeue(Duration::from_secs(60)),
     }
-}
-
-/// Maps a `CTFTemplate` update event to a vector of `ObjectRef<CTFInstance>` for all instances
-/// in the same namespace referencing the template that have `spec.sync == true`.
-pub fn find_synced_instances(
-    template: &CTFTemplate,
-    instances: &[Arc<CTFInstance>],
-) -> Vec<ObjectRef<CTFInstance>> {
-    let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
-    let tmpl_ns = template.metadata.namespace.as_deref().unwrap_or("default");
-
-    instances
-        .iter()
-        .filter(|inst| {
-            let inst_ns = inst.metadata.namespace.as_deref().unwrap_or("default");
-            inst_ns == tmpl_ns && inst.spec.template == tmpl_name && inst.spec.sync
-        })
-        .map(|inst| ObjectRef::from_obj(&**inst))
-        .collect()
 }
 
 /// Predicate for streaming CTFInstances into the controller. Includes deletion
@@ -403,7 +384,9 @@ mod tests {
 
         let mut instance = Arc::new(dummy_instance("chal-1", None));
         let inst = Arc::get_mut(&mut instance).unwrap();
-        inst.spec.sync = true;
+        inst.metadata.annotations = Some(crate::btreemap! {
+            k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string() => "2".to_string(),
+        });
         inst.metadata.generation = Some(1);
         inst.status = Some(CTFInstanceStatus {
             observed_generation: Some(1),
