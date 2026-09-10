@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
-use k8s_common::crd::{CTFInstance, CTFInstanceStatus};
+use k8s_common::crd::{Instance, InstanceStatus};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 
 /// Adds or replaces a status condition by type.
-pub fn apply_condition(status: &mut CTFInstanceStatus, condition: Condition) {
+pub fn apply_condition(status: &mut InstanceStatus, condition: Condition) {
     if let Some(pos) = status
         .conditions
         .iter_mut()
@@ -20,7 +20,7 @@ pub fn apply_condition(status: &mut CTFInstanceStatus, condition: Condition) {
 /// entry that does not exist. Silent overrides against a template are a
 /// misconfiguration — a non-existent name is always an error.
 pub fn validate_overrides(
-    instance: &CTFInstance,
+    instance: &Instance,
     template: &crate::reconcilers::template::ResolvedTemplate,
 ) -> Result<(), super::Error> {
     let mut bad: Vec<String> = Vec::new();
@@ -68,7 +68,7 @@ pub fn validate_overrides(
 /// Builds a merged `RouteSpec` applying optional instance-level overrides.
 pub fn build_merged_route_spec(
     base: &k8s_common::crd::RouteSpec,
-    override_spec: Option<&k8s_common::crd::CTFInstanceSpecRouteOverride>,
+    override_spec: Option<&k8s_common::crd::InstanceSpecRouteOverride>,
 ) -> k8s_common::crd::RouteSpec {
     let mut merged = base.clone();
 
@@ -91,17 +91,17 @@ mod tests {
     use super::*;
     use crate::test_utils::tests::{dummy_instance, dummy_resolved_template};
     use k8s_common::crd::{
-        CTFInstanceSpecPodOverride, CTFInstanceSpecRouteOverride, RouteBackend, RouteSpec,
+        InstanceSpecPodOverride, InstanceSpecRouteOverride, RouteBackend, RouteSpec,
     };
 
     #[test]
     fn test_validate_overrides_accepts_matching_overrides() {
         let mut instance = dummy_instance("chal-1", None);
-        instance.spec.pods = vec![CTFInstanceSpecPodOverride {
+        instance.spec.pods = vec![InstanceSpecPodOverride {
             name: "web".into(),
             replicas: 2,
         }];
-        instance.spec.routes = vec![CTFInstanceSpecRouteOverride {
+        instance.spec.routes = vec![InstanceSpecRouteOverride {
             name: "chal".into(),
             port: Some(0),
             tls: None,
@@ -127,11 +127,11 @@ mod tests {
     fn test_validate_overrides_rejects_unknown_pod_and_route() {
         let instance = dummy_instance("chal-1", None);
         let mut instance = instance;
-        instance.spec.pods = vec![CTFInstanceSpecPodOverride {
+        instance.spec.pods = vec![InstanceSpecPodOverride {
             name: "typo-pod".into(),
             replicas: 2,
         }];
-        instance.spec.routes = vec![CTFInstanceSpecRouteOverride {
+        instance.spec.routes = vec![InstanceSpecRouteOverride {
             name: "typo-route".into(),
             port: Some(0),
             tls: None,
@@ -154,7 +154,7 @@ mod tests {
         use k8s_common::crd::{RouteProtocol, RouteSpecTLS};
 
         let mut instance = dummy_instance("chal-1", None);
-        instance.spec.routes = vec![CTFInstanceSpecRouteOverride {
+        instance.spec.routes = vec![InstanceSpecRouteOverride {
             name: "dns".into(),
             port: None,
             tls: Some(RouteSpecTLS {

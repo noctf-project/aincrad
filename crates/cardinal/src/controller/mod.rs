@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt;
 use k8s_common::{
-    crd::{CTFInstance, CTFTemplate, TLSRoute},
+    crd::{Instance, TLSRoute, Template},
     labels::{INSTANCE_LABEL, RESOURCE_LABEL},
 };
 use k8s_openapi::api::{apps::v1::ReplicaSet, core::v1::Service};
@@ -33,11 +33,8 @@ pub use instance::{error_policy, reconcile};
 pub const TIME_BASED_REQUEUE_BUFFER: Duration = Duration::from_secs(3);
 pub const AVAILABILITY_LEAD_TIME: Duration = Duration::from_secs(30);
 
-/// Handles watcher events for `CTFInstance` to update or clear the in-memory index.
-pub fn handle_instance_watcher_event(
-    event: &Event<CTFInstance>,
-    cache: &crate::cache::InstanceCache,
-) {
+/// Handles watcher events for `Instance` to update or clear the in-memory index.
+pub fn handle_instance_watcher_event(event: &Event<Instance>, cache: &crate::cache::InstanceCache) {
     match event {
         Event::Apply(inst) | Event::InitApply(inst) => {
             cache.update(inst);
@@ -53,11 +50,8 @@ pub fn handle_instance_watcher_event(
     }
 }
 
-/// Handles watcher events for `CTFTemplate` to update or clear the in-memory cache.
-pub fn handle_template_watcher_event(
-    event: &Event<CTFTemplate>,
-    cache: &crate::cache::TemplateCache,
-) {
+/// Handles watcher events for `Template` to update or clear the in-memory cache.
+pub fn handle_template_watcher_event(event: &Event<Template>, cache: &crate::cache::TemplateCache) {
     match event {
         Event::Apply(t) | Event::InitApply(t) => {
             cache.update(t);
@@ -68,11 +62,11 @@ pub fn handle_template_watcher_event(
         Event::Init => {
             cache.clear();
             cache.mark_unready();
-            info!("Cleared CTFTemplate cache on watcher init");
+            info!("Cleared Template cache on watcher init");
         }
         Event::InitDone => {
             cache.mark_ready();
-            info!("CTFTemplate initial sync complete");
+            info!("Template initial sync complete");
         }
     }
 }
@@ -188,22 +182,22 @@ pub async fn run(client: Client, config: crate::config::CardinalConfig) -> Resul
     run_controller(namespace, context).await
 }
 
-/// Spawns and runs the `CTFInstance` and `CTFTemplate` controller loops concurrently.
+/// Spawns and runs the `Instance` and `Template` controller loops concurrently.
 pub async fn run_controller(namespace: Option<String>, context: Arc<Context>) -> Result<(), Error> {
     let client = &context.client;
     let (instances, templates, services, replica_sets, tls_routes) = if let Some(ref ns) = namespace
     {
         (
-            Api::<CTFInstance>::namespaced(client.clone(), ns),
-            Api::<CTFTemplate>::namespaced(client.clone(), ns),
+            Api::<Instance>::namespaced(client.clone(), ns),
+            Api::<Template>::namespaced(client.clone(), ns),
             Api::<Service>::namespaced(client.clone(), ns),
             Api::<ReplicaSet>::namespaced(client.clone(), ns),
             Api::<TLSRoute>::namespaced(client.clone(), ns),
         )
     } else {
         (
-            Api::<CTFInstance>::all(client.clone()),
-            Api::<CTFTemplate>::all(client.clone()),
+            Api::<Instance>::all(client.clone()),
+            Api::<Template>::all(client.clone()),
             Api::<Service>::all(client.clone()),
             Api::<ReplicaSet>::all(client.clone()),
             Api::<TLSRoute>::all(client.clone()),
@@ -224,7 +218,7 @@ pub async fn run_controller(namespace: Option<String>, context: Arc<Context>) ->
             }
         });
 
-    // Shared in-memory reflector store for CTFTemplate
+    // Shared in-memory reflector store for Template
     let (template_store, template_writer) = store_shared(64);
     let template_subscriber = template_writer
         .subscribe()
@@ -249,7 +243,7 @@ pub async fn run_controller(namespace: Option<String>, context: Arc<Context>) ->
     let tls_routes_cache = context.caches.tls_routes.clone();
     let tls_route_stream = tls_routes_cache.watcher_stream(tls_routes, |_| {});
 
-    // Initialize in-memory CTFInstance reflector store cache for watches mapping
+    // Initialize in-memory Instance reflector store cache for watches mapping
     let (instance_store, instance_writer) = store();
 
     let instance_cache = context.caches.instances.clone();
@@ -281,10 +275,10 @@ pub async fn run_controller(namespace: Option<String>, context: Arc<Context>) ->
 
     match namespace.as_deref() {
         Some(ns) => {
-            info!(namespace = %ns, "Starting CTFInstance controller with Template tracking");
+            info!(namespace = %ns, "Starting Instance controller with Template tracking");
         }
         None => {
-            info!("Starting CTFInstance controller across all namespaces with Template tracking");
+            info!("Starting Instance controller across all namespaces with Template tracking");
         }
     }
 
@@ -293,7 +287,7 @@ pub async fn run_controller(namespace: Option<String>, context: Arc<Context>) ->
             let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
             info!(
                 template_name = tmpl_name,
-                "CTFTemplate updated, evaluating CTFInstances requiring upgrade"
+                "Template updated, evaluating Instances requiring upgrade"
             );
             instance_cache
                 .instances_to_sync(&template)
@@ -308,7 +302,7 @@ pub async fn run_controller(namespace: Option<String>, context: Arc<Context>) ->
         .for_each(|res| async {
             match res {
                 Ok((object, _action)) => {
-                    info!(name = %object.name, "Successfully reconciled CTFInstance");
+                    info!(name = %object.name, "Successfully reconciled Instance");
                 }
                 Err(err) => {
                     let err_msg = err.to_string();
@@ -331,7 +325,7 @@ pub async fn run_controller(namespace: Option<String>, context: Arc<Context>) ->
         .for_each(|res| async {
             match res {
                 Ok((object, _action)) => {
-                    info!(name = %object.name, "Successfully reconciled CTFTemplate");
+                    info!(name = %object.name, "Successfully reconciled Template");
                 }
                 Err(err) => {
                     let err_msg = err.to_string();

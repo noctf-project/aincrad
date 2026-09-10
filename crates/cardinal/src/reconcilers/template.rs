@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use k8s_common::crd::{CTFInstance, CTFTemplateSpec, CTFTemplateSpecPod, PatchValue};
+use k8s_common::crd::{Instance, PatchValue, TemplateSpec, TemplateSpecPod};
 use k8s_openapi::api::core::v1::PodSpec;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use tracing::instrument;
@@ -9,11 +9,11 @@ use crate::{Context, Error};
 
 pub use crate::cache::{CachedTemplateEntry, PodPatchersMap, TemplateCache};
 
-/// Resolved CTFTemplate with merged parameter map and pre-compiled SpecPatchers for pod JSON patches.
+/// Resolved Template with merged parameter map and pre-compiled SpecPatchers for pod JSON patches.
 #[derive(Debug, Clone)]
 pub struct ResolvedTemplate {
     pub metadata: ObjectMeta,
-    pub spec: CTFTemplateSpec,
+    pub spec: TemplateSpec,
     pub pod_patchers: PodPatchersMap,
     pub params_map: BTreeMap<String, String>,
 }
@@ -22,7 +22,7 @@ impl ResolvedTemplate {
     /// Evaluates pre-compiled JSON patches for `pod_tmpl` and returns the final `PodSpec`.
     pub fn get_patched_pod_spec<V>(
         &self,
-        pod_tmpl: &CTFTemplateSpecPod,
+        pod_tmpl: &TemplateSpecPod,
         context_map: &BTreeMap<String, V>,
     ) -> Result<PodSpec, Error>
     where
@@ -38,10 +38,10 @@ impl ResolvedTemplate {
     }
 }
 
-/// Resolves the `CTFTemplate` referenced by `instance.spec.template`, applying parameter overrides,
+/// Resolves the `Template` referenced by `instance.spec.template`, applying parameter overrides,
 /// generating the merged params_map, and querying the in-memory TemplateCache for pre-compiled SpecPatchers.
 #[instrument(skip(ctx, instance), fields(instance = %instance.metadata.name.as_deref().unwrap_or_default()))]
-pub async fn reconcile(instance: &CTFInstance, ctx: &Context) -> Result<ResolvedTemplate, Error> {
+pub async fn reconcile(instance: &Instance, ctx: &Context) -> Result<ResolvedTemplate, Error> {
     let template_name = &instance.spec.template;
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
@@ -62,16 +62,16 @@ pub async fn reconcile(instance: &CTFInstance, ctx: &Context) -> Result<Resolved
     })
 }
 
-/// Merges CTFTemplateSpec params with instance.spec.params into a BTreeMap<String, String>.
+/// Merges TemplateSpec params with instance.spec.params into a BTreeMap<String, String>.
 /// Instance overrides have higher priority.
 /// If an instance param override has PatchValue::Null (`value: null`), it is removed from the merged map.
 pub fn resolve_template_params(
-    template_spec: &CTFTemplateSpec,
-    instance: &CTFInstance,
+    template_spec: &TemplateSpec,
+    instance: &Instance,
 ) -> BTreeMap<String, String> {
     let mut param_map: BTreeMap<String, String> = BTreeMap::new();
 
-    // Base parameters from CTFTemplate
+    // Base parameters from Template
     for param in &template_spec.params {
         map_insert_param(&mut param_map, param.name.clone(), param.value.clone());
     }
@@ -102,7 +102,7 @@ mod tests {
     use super::*;
     use crate::planners::replicaset::POD_PATCH_BLACKLIST;
     use k8s_common::SpecPatcher;
-    use k8s_common::crd::{CTFInstanceSpec, CTFInstanceSpecParam, CTFTemplateSpecParam};
+    use k8s_common::crd::{InstanceSpec, InstanceSpecParam, TemplateSpecParam};
     use k8s_openapi::api::core::v1::Container;
     use serde_json::json;
     use std::collections::HashMap;
@@ -110,17 +110,17 @@ mod tests {
 
     #[test]
     fn test_merge_template_params_override_and_remove() {
-        let template_spec = CTFTemplateSpec {
+        let template_spec = TemplateSpec {
             params: vec![
-                CTFTemplateSpecParam {
+                TemplateSpecParam {
                     name: "PORT".into(),
                     value: "8080".into(),
                 },
-                CTFTemplateSpecParam {
+                TemplateSpecParam {
                     name: "DEBUG".into(),
                     value: "true".into(),
                 },
-                CTFTemplateSpecParam {
+                TemplateSpecParam {
                     name: "FLAG".into(),
                     value: "CTF{base}".into(),
                 },
@@ -128,22 +128,22 @@ mod tests {
             ..Default::default()
         };
 
-        let instance = CTFInstance {
-            spec: CTFInstanceSpec {
+        let instance = Instance {
+            spec: InstanceSpec {
                 template: "whoami".into(),
                 params: vec![
                     // Override PORT value
-                    CTFInstanceSpecParam {
+                    InstanceSpecParam {
                         name: "PORT".into(),
                         value: PatchValue::Value("9000".into()),
                     },
                     // Remove DEBUG parameter via null
-                    CTFInstanceSpecParam {
+                    InstanceSpecParam {
                         name: "DEBUG".into(),
                         value: PatchValue::Null,
                     },
                     // Add new param
-                    CTFInstanceSpecParam {
+                    InstanceSpecParam {
                         name: "SECRET".into(),
                         value: PatchValue::Value("supersecret".into()),
                     },
@@ -173,7 +173,7 @@ mod tests {
         ]);
         let patch: json_patch::Patch = serde_json::from_value(patch_json).unwrap();
 
-        let pod_tmpl = CTFTemplateSpecPod {
+        let pod_tmpl = TemplateSpecPod {
             name: "web".into(),
             patch_spec: Some(patch.clone()),
             spec: PodSpec {
@@ -196,7 +196,7 @@ mod tests {
 
         let resolved = ResolvedTemplate {
             metadata: ObjectMeta::default(),
-            spec: CTFTemplateSpec {
+            spec: TemplateSpec {
                 pods: vec![pod_tmpl.clone()],
                 ..Default::default()
             },
@@ -216,17 +216,17 @@ mod tests {
     #[test]
     fn test_template_cache_eviction() {
         let cache = TemplateCache::new();
-        let pod_tmpl = CTFTemplateSpecPod {
+        let pod_tmpl = TemplateSpecPod {
             name: "web".into(),
             ..Default::default()
         };
-        let tmpl = k8s_common::crd::CTFTemplate {
+        let tmpl = k8s_common::crd::Template {
             metadata: ObjectMeta {
                 name: Some("web-template".into()),
                 namespace: Some("default".into()),
                 ..Default::default()
             },
-            spec: CTFTemplateSpec {
+            spec: TemplateSpec {
                 pods: vec![pod_tmpl],
                 ..Default::default()
             },
@@ -259,18 +259,18 @@ mod tests {
             }
         ]);
         let patch: json_patch::Patch = serde_json::from_value(patch_json).unwrap();
-        let pod_tmpl = CTFTemplateSpecPod {
+        let pod_tmpl = TemplateSpecPod {
             name: "web".into(),
             patch_spec: Some(patch),
             ..Default::default()
         };
-        let tmpl = k8s_common::crd::CTFTemplate {
+        let tmpl = k8s_common::crd::Template {
             metadata: ObjectMeta {
                 name: Some("blacklisted-template".into()),
                 namespace: Some("default".into()),
                 ..Default::default()
             },
-            spec: CTFTemplateSpec {
+            spec: TemplateSpec {
                 pods: vec![pod_tmpl],
                 ..Default::default()
             },

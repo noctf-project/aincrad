@@ -1,14 +1,14 @@
 use std::{sync::Arc, time::Duration};
 
-use k8s_common::crd::CTFInstance;
+use k8s_common::crd::Instance;
 use kube::runtime::{Predicate, controller::Action, predicates};
 use tracing::{error, instrument};
 
 use crate::{Context, Error, reconcilers};
 
-/// Reconciles a single `CTFInstance` resource state.
+/// Reconciles a single `Instance` resource state.
 #[instrument(skip(ctx, instance), fields(name = %instance.metadata.name.as_deref().unwrap_or_default()))]
-pub async fn reconcile(instance: Arc<CTFInstance>, ctx: Arc<Context>) -> Result<Action, Error> {
+pub async fn reconcile(instance: Arc<Instance>, ctx: Arc<Context>) -> Result<Action, Error> {
     match crate::controller::phases::run(&instance, &ctx).await {
         Ok(action) => Ok(action),
         Err(err) => {
@@ -18,7 +18,7 @@ pub async fn reconcile(instance: Arc<CTFInstance>, ctx: Arc<Context>) -> Result<
     }
 }
 
-pub fn error_policy(instance: Arc<CTFInstance>, error: &Error, _ctx: Arc<Context>) -> Action {
+pub fn error_policy(instance: Arc<Instance>, error: &Error, _ctx: Arc<Context>) -> Action {
     let name = instance.metadata.name.as_deref().unwrap_or("unknown");
 
     if let Error::Kube(kube::Error::Api(status)) = error
@@ -52,13 +52,13 @@ pub fn error_policy(instance: Arc<CTFInstance>, error: &Error, _ctx: Arc<Context
     }
 }
 
-/// Predicate for streaming CTFInstances into the controller. Includes deletion
+/// Predicate for streaming Instances into the controller. Includes deletion
 /// state so finalizer cleanup reconciles (deletionTimestamp changes) are delivered
 /// even when generation and annotations are untouched.
-pub(crate) fn instance_predicate() -> impl Predicate<CTFInstance> {
+pub(crate) fn instance_predicate() -> impl Predicate<Instance> {
     predicates::generation
         .combine(predicates::annotations)
-        .combine(|obj: &CTFInstance| Some(u64::from(obj.metadata.deletion_timestamp.is_some())))
+        .combine(|obj: &Instance| Some(u64::from(obj.metadata.deletion_timestamp.is_some())))
 }
 
 #[cfg(test)]
@@ -69,7 +69,7 @@ mod tests {
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use futures::StreamExt;
-    use k8s_common::crd::{CTFInstanceSpec, CTFInstanceStatus, RouteBackend, RouteSpec};
+    use k8s_common::crd::{InstanceSpec, InstanceStatus, RouteBackend, RouteSpec};
     use k8s_common::labels::{EXPIRES_AT_ANNOTATION, RESTARTED_AT_ANNOTATION};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -116,13 +116,13 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_no_expiration() {
         let (_store, ctx) = dummy_context();
-        let instance = Arc::new(CTFInstance {
+        let instance = Arc::new(Instance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
                 namespace: Some("default".into()),
                 ..Default::default()
             },
-            spec: CTFInstanceSpec {
+            spec: InstanceSpec {
                 template: "whoami-template".into(),
                 ..Default::default()
             },
@@ -140,14 +140,14 @@ mod tests {
         let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(EXPIRES_AT_ANNOTATION.to_string(), future_time.to_rfc3339());
 
-        let instance = Arc::new(CTFInstance {
+        let instance = Arc::new(Instance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
                 namespace: Some("default".into()),
                 annotations: Some(annotations),
                 ..Default::default()
             },
-            spec: CTFInstanceSpec {
+            spec: InstanceSpec {
                 template: "whoami-template".into(),
                 ..Default::default()
             },
@@ -165,14 +165,14 @@ mod tests {
         let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(EXPIRES_AT_ANNOTATION.to_string(), past_time.to_rfc3339());
 
-        let instance = Arc::new(CTFInstance {
+        let instance = Arc::new(Instance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
                 namespace: Some("default".into()),
                 annotations: Some(annotations),
                 ..Default::default()
             },
-            spec: CTFInstanceSpec {
+            spec: InstanceSpec {
                 template: "whoami-template".into(),
                 ..Default::default()
             },
@@ -188,7 +188,7 @@ mod tests {
         let (_store, ctx) = dummy_context();
         let now = Utc::now();
 
-        let instance = Arc::new(CTFInstance {
+        let instance = Arc::new(Instance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
                 namespace: Some("default".into()),
@@ -197,7 +197,7 @@ mod tests {
                 )),
                 ..Default::default()
             },
-            spec: CTFInstanceSpec {
+            spec: InstanceSpec {
                 template: "whoami-template".into(),
                 ..Default::default()
             },
@@ -221,11 +221,11 @@ mod tests {
             ));
         dying.metadata.resource_version = Some("2".to_string());
 
-        let events: Vec<Result<CTFInstance, WatcherError>> = vec![Ok(inst), Ok(dying)];
+        let events: Vec<Result<Instance, WatcherError>> = vec![Ok(inst), Ok(dying)];
         let filtered = futures::stream::iter(events)
             .predicate_filter(instance_predicate(), Default::default());
 
-        let items: Vec<CTFInstance> = filtered.map(|r| r.unwrap()).collect().await;
+        let items: Vec<Instance> = filtered.map(|r| r.unwrap()).collect().await;
         assert_eq!(
             items.len(),
             2,
@@ -265,7 +265,7 @@ mod tests {
         let mut instance = Arc::new(dummy_instance("chal-1", None));
         let inst = Arc::get_mut(&mut instance).unwrap();
         inst.metadata.generation = Some(1);
-        inst.status = Some(CTFInstanceStatus {
+        inst.status = Some(InstanceStatus {
             observed_generation: Some(1),
             template_generation: Some(1),
             restarted_at: None,
@@ -284,12 +284,10 @@ mod tests {
         log.lock().unwrap().clear();
         let inst = Arc::get_mut(&mut instance).unwrap();
         inst.metadata.generation = Some(2);
-        inst.spec
-            .params
-            .push(k8s_common::crd::CTFInstanceSpecParam {
-                name: "FLAG".into(),
-                value: k8s_common::crd::PatchValue::Value("CTF{rotated}".into()),
-            });
+        inst.spec.params.push(k8s_common::crd::InstanceSpecParam {
+            name: "FLAG".into(),
+            value: k8s_common::crd::PatchValue::Value("CTF{rotated}".into()),
+        });
 
         reconcile(instance, ctx).await.unwrap();
         assert!(
@@ -324,7 +322,7 @@ mod tests {
         let mut instance = Arc::new(dummy_instance("chal-1", None));
         let inst = Arc::get_mut(&mut instance).unwrap();
         inst.metadata.generation = Some(1);
-        inst.status = Some(CTFInstanceStatus {
+        inst.status = Some(InstanceStatus {
             observed_generation: Some(1),
             template_generation: Some(1),
             restarted_at: None,
@@ -367,14 +365,14 @@ mod tests {
         };
         let (_store, ctx) = dummy_ctx(client, vec![tcp_route.clone()]);
 
-        let tmpl = k8s_common::crd::CTFTemplate {
+        let tmpl = k8s_common::crd::Template {
             metadata: ObjectMeta {
                 name: Some("whoami-template".into()),
                 namespace: Some("default".into()),
                 generation: Some(2),
                 ..Default::default()
             },
-            spec: k8s_common::crd::CTFTemplateSpec {
+            spec: k8s_common::crd::TemplateSpec {
                 routes: vec![tcp_route],
                 ..Default::default()
             },
@@ -388,7 +386,7 @@ mod tests {
             k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION.to_string() => "2".to_string(),
         });
         inst.metadata.generation = Some(1);
-        inst.status = Some(CTFInstanceStatus {
+        inst.status = Some(InstanceStatus {
             observed_generation: Some(1),
             template_generation: Some(1),
             restarted_at: None,
@@ -414,25 +412,25 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_observed_generation_skips() {
         let (_store, ctx) = dummy_context();
-        let instance = Arc::new(CTFInstance {
+        let instance = Arc::new(Instance {
             metadata: ObjectMeta {
                 name: Some("test-challenge".into()),
                 namespace: Some("default".into()),
                 generation: Some(1),
                 ..Default::default()
             },
-            spec: CTFInstanceSpec {
+            spec: InstanceSpec {
                 template: "whoami-template".into(),
                 ..Default::default()
             },
-            status: Some(CTFInstanceStatus {
+            status: Some(InstanceStatus {
                 observed_generation: Some(1),
                 template_generation: Some(1),
                 conditions: vec![Condition {
                     type_: "Ready".to_string(),
                     status: "True".to_string(),
                     reason: "Reconciled".to_string(),
-                    message: "CTFInstance reconciled successfully".to_string(),
+                    message: "Instance reconciled successfully".to_string(),
                     last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                         k8s_openapi::jiff::Timestamp::now(),
                     ),

@@ -1,9 +1,9 @@
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use k8s_common::crd::CTFInstance;
+use k8s_common::crd::Instance;
 use std::time::Duration;
 
-/// Extracts and parses the expiry date from a CTFInstance.
-pub fn parse_expires_at(instance: &CTFInstance) -> Option<DateTime<Utc>> {
+/// Extracts and parses the expiry date from a Instance.
+pub fn parse_expires_at(instance: &Instance) -> Option<DateTime<Utc>> {
     instance
         .metadata
         .annotations

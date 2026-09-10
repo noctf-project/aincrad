@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use k8s_common::crd::{CTFInstance, CTFTemplate};
+use k8s_common::crd::{Instance, Template};
 use parking_lot::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13,7 +13,7 @@ pub struct InstanceKey {
 
 #[derive(Default)]
 struct Inner {
-    index: BTreeMap<InstanceKey, Arc<CTFInstance>>,
+    index: BTreeMap<InstanceKey, Arc<Instance>>,
     instance_templates: HashMap<(String, String), String>,
 }
 
@@ -27,7 +27,7 @@ impl InstanceCache {
         Self::default()
     }
 
-    pub fn update(&self, instance: &CTFInstance) {
+    pub fn update(&self, instance: &Instance) {
         let name = instance.metadata.name.as_deref().unwrap_or_default();
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
         let inst_id = (ns.to_string(), name.to_string());
@@ -56,7 +56,7 @@ impl InstanceCache {
         }
     }
 
-    pub fn remove(&self, instance: &CTFInstance) {
+    pub fn remove(&self, instance: &Instance) {
         let name = instance.metadata.name.as_deref().unwrap_or_default();
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
         let inst_id = (ns.to_string(), name.to_string());
@@ -85,7 +85,7 @@ impl InstanceCache {
         lock.instance_templates.clear();
     }
 
-    pub fn instances_to_sync(&self, template: &CTFTemplate) -> Vec<Arc<CTFInstance>> {
+    pub fn instances_to_sync(&self, template: &Template) -> Vec<Arc<Instance>> {
         let tmpl_name = template.metadata.name.as_deref().unwrap_or_default();
         let tmpl_ns = template.metadata.namespace.as_deref().unwrap_or("default");
         let start_key = InstanceKey {
@@ -124,29 +124,24 @@ impl InstanceCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_common::crd::{CTFInstanceSpec, CTFInstanceStatus, CTFTemplateSpec};
+    use k8s_common::crd::{InstanceSpec, InstanceStatus, TemplateSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
-    fn tmpl(name: &str, generation: i64) -> CTFTemplate {
-        CTFTemplate {
+    fn tmpl(name: &str, generation: i64) -> Template {
+        Template {
             metadata: ObjectMeta {
                 name: Some(name.into()),
                 namespace: Some("default".into()),
                 generation: Some(generation),
                 ..Default::default()
             },
-            spec: CTFTemplateSpec::default(),
+            spec: TemplateSpec::default(),
             status: None,
         }
     }
 
-    fn inst(
-        name: &str,
-        template: &str,
-        observed: Option<i64>,
-        min_gen: Option<i64>,
-    ) -> CTFInstance {
-        CTFInstance {
+    fn inst(name: &str, template: &str, observed: Option<i64>, min_gen: Option<i64>) -> Instance {
+        Instance {
             metadata: ObjectMeta {
                 name: Some(name.into()),
                 namespace: Some("default".into()),
@@ -160,11 +155,11 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            spec: CTFInstanceSpec {
+            spec: InstanceSpec {
                 template: template.into(),
                 ..Default::default()
             },
-            status: Some(CTFInstanceStatus {
+            status: Some(InstanceStatus {
                 template_generation: observed,
                 ..Default::default()
             }),
@@ -226,7 +221,7 @@ mod tests {
         assert_eq!(cache.instances_to_sync(&tmpl).len(), 1);
 
         // Caught up
-        inst_stale.status = Some(CTFInstanceStatus {
+        inst_stale.status = Some(InstanceStatus {
             template_generation: Some(2),
             ..Default::default()
         });

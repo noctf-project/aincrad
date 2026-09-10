@@ -19,13 +19,13 @@ Managing on-demand isolated challenge infrastructure for CTFs came with a lot of
 
 Everything in Cardinal is modeled around two Custom Resource Definitions:
 
-- `CTFTemplate` (`aincrad.noctf.dev/v1`): The blueprint defining a challenge. It wraps standard PodSpecs (giving authors flexibility plus toggles like `allowInternet`), parameters, and route definitions. Shared challenges and per-team instances use the exact same format.
-- `CTFInstance` (`aincrad.noctf.dev/v1`): A running sandbox provisioned for a player or team, pointing at a template with a TTL (`expiresAt`). Instances are pinned immutable snapshots of their template at spawn time to protect active player state.
+- `SandboxTemplate` (`cardinal.noctf.dev/v1`): The blueprint defining a challenge. It wraps standard PodSpecs (giving authors flexibility plus toggles like `allowInternet`), parameters, and route definitions. Shared challenges and per-team instances use the exact same format.
+- `SandboxInstance` (`cardinal.noctf.dev/v1`): A running sandbox provisioned for a player or team, pointing at a template with a TTL (`expiresAt`). Instances are pinned immutable snapshots of their template at spawn time to protect active player state.
 
 Moving this to a controller solves the main administrative headaches:
-- A single `CTFTemplate` works whether a challenge is shared across all players or instanced hundreds of times. Cardinal handles child ReplicaSets, headless discovery Services, and NetworkPolicies automatically.
+- A single `SandboxTemplate` works whether a challenge is shared across all players or instanced hundreds of times. Cardinal handles child ReplicaSets, headless discovery Services, and NetworkPolicies automatically.
 - Child resources carry standard Kubernetes `ownerReferences`, so when an instance expires or is deleted, Kubernetes cascades the cleanup cleanly without needing external tools like `kube-janitor`.
-- Web frontends only need permissions to create and watch `CTFInstance` objects in a single namespace. Cardinal evaluates child readiness and surfaces conditions directly on the instance status.
+- Web frontends only need permissions to create and watch `SandboxInstance` objects in a single namespace. Cardinal evaluates child readiness and surfaces conditions directly on the instance status.
 - Cardinal handles dynamic TCP/UDP port allocation from a pool (`--auto-ports`) and derives deterministic TLS hostnames via Gateway API.
 
 
@@ -40,8 +40,8 @@ flowchart TD
 
         subgraph ControlPlane ["Control Plane"]
             Cardinal["Cardinal"]
-            Template[("CTFTemplate")] -.-> Cardinal
-            Instance[("CTFInstance")]
+            Template[("SandboxTemplate")] -.-> Cardinal
+            Instance[("SandboxInstance")]
         end
 
         subgraph ChallengeNS ["Challenge Namespace"]

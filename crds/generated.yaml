@@ -1,19 +1,21 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: ctftemplates.aincrad.noctf.dev
+  name: templates.cardinal.noctf.dev
 spec:
-  group: aincrad.noctf.dev
+  group: cardinal.noctf.dev
   names:
-    kind: CTFTemplate
-    plural: ctftemplates
-    singular: ctftemplate
+    kind: Template
+    plural: templates
+    shortNames:
+    - ctmpl
+    singular: template
   scope: Namespaced
   versions:
   - name: v1
     schema:
       openAPIV3Schema:
-        description: Auto-generated derived type for CTFTemplateSpec via `CustomResource`
+        description: Auto-generated derived type for TemplateSpec via `CustomResource`
         properties:
           spec:
             description: Specification for a reusable CTF challenge workload template.
@@ -186,7 +188,7 @@ spec:
             type: object
         required:
         - spec
-        title: CTFTemplate
+        title: Template
         type: object
     served: true
     storage: true
@@ -196,19 +198,21 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: ctfinstances.aincrad.noctf.dev
+  name: instances.cardinal.noctf.dev
 spec:
-  group: aincrad.noctf.dev
+  group: cardinal.noctf.dev
   names:
-    kind: CTFInstance
-    plural: ctfinstances
-    singular: ctfinstance
+    kind: Instance
+    plural: instances
+    shortNames:
+    - cinst
+    singular: instance
   scope: Namespaced
   versions:
   - name: v1
     schema:
       openAPIV3Schema:
-        description: Auto-generated derived type for CTFInstanceSpec via `CustomResource`
+        description: Auto-generated derived type for InstanceSpec via `CustomResource`
         properties:
           spec:
             description: Specification for an ephemeral CTF challenge instance sandbox.
@@ -273,14 +277,14 @@ spec:
                       minLength: 1
                       type: string
                     port:
-                      description: 'L4 external port override (explicit port or 0 for auto). Omitted: inherit from CTFTemplate.'
+                      description: L4 external port override (explicit port or 0 for auto).
                       format: uint16
                       maximum: 65535.0
                       minimum: 0.0
                       nullable: true
                       type: integer
                     tls:
-                      description: 'TLS route override. Omitted: inherit from CTFTemplate.'
+                      description: TLS route override.
                       nullable: true
                       properties:
                         prefix:
@@ -302,7 +306,7 @@ spec:
                 - name
                 x-kubernetes-list-type: map
               template:
-                description: Name of the CTFTemplate resource to instantiate.
+                description: Name of the template resource to instantiate.
                 type: string
                 x-kubernetes-validations:
                 - message: property is immutable and cannot be changed after creation
@@ -404,7 +408,7 @@ spec:
             type: object
         required:
         - spec
-        title: CTFInstance
+        title: Instance
         type: object
     served: true
     storage: true
@@ -414,62 +418,62 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: ctfinstance-metadata
+  name: cardinal-instance-metadata
 spec:
   matchConstraints:
     resourceRules:
     - apiGroups:
-      - aincrad.noctf.dev
+      - cardinal.noctf.dev
       apiVersions:
       - v1
       operations:
       - CREATE
       - UPDATE
       resources:
-      - ctfinstances
+      - instances
   validations:
-  - expression: '!has(object.metadata.annotations) || !(''aincrad.noctf.dev/restartedAt'' in object.metadata.annotations) || !format.datetime().validate(string(object.metadata.annotations[''aincrad.noctf.dev/restartedAt''])).hasValue()'
-    message: annotation 'aincrad.noctf.dev/restartedAt' must be a valid RFC3339 date/time string
-  - expression: '!has(object.metadata.annotations) || !(''aincrad.noctf.dev/expiresAt'' in object.metadata.annotations) || !format.datetime().validate(string(object.metadata.annotations[''aincrad.noctf.dev/expiresAt''])).hasValue()'
-    message: annotation 'aincrad.noctf.dev/expiresAt' must be a valid RFC3339 date/time string
-  - expression: '!has(object.metadata.annotations) || !(''aincrad.noctf.dev/minTemplateGeneration'' in object.metadata.annotations) || object.metadata.annotations[''aincrad.noctf.dev/minTemplateGeneration''].matches(r''^[1-9][0-9]*$'')'
-    message: annotation 'aincrad.noctf.dev/minTemplateGeneration' must be a positive integer
+  - expression: '!has(object.metadata.annotations) || !(''cardinal.noctf.dev/restartedAt'' in object.metadata.annotations) || !format.datetime().validate(string(object.metadata.annotations[''cardinal.noctf.dev/restartedAt''])).hasValue()'
+    message: annotation 'cardinal.noctf.dev/restartedAt' must be a valid RFC3339 date/time string
+  - expression: '!has(object.metadata.annotations) || !(''cardinal.noctf.dev/expiresAt'' in object.metadata.annotations) || !format.datetime().validate(string(object.metadata.annotations[''cardinal.noctf.dev/expiresAt''])).hasValue()'
+    message: annotation 'cardinal.noctf.dev/expiresAt' must be a valid RFC3339 date/time string
+  - expression: '!has(object.metadata.annotations) || !(''cardinal.noctf.dev/minTemplateGeneration'' in object.metadata.annotations) || object.metadata.annotations[''cardinal.noctf.dev/minTemplateGeneration''].matches(r''^[1-9][0-9]*$'')'
+    message: annotation 'cardinal.noctf.dev/minTemplateGeneration' must be a positive integer
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: ctfinstance-metadata-binding
+  name: cardinal-instance-metadata-binding
 spec:
-  policyName: ctfinstance-metadata
+  policyName: cardinal-instance-metadata
   validationActions:
   - Deny
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: ctftemplate-metadata
+  name: cardinal-template-metadata
 spec:
   matchConstraints:
     resourceRules:
     - apiGroups:
-      - aincrad.noctf.dev
+      - cardinal.noctf.dev
       apiVersions:
       - v1
       operations:
       - CREATE
       - UPDATE
       resources:
-      - ctftemplates
+      - templates
   validations:
-  - expression: '!has(object.metadata.annotations) || !(''aincrad.noctf.dev/minTemplateGeneration'' in object.metadata.annotations) || object.metadata.annotations[''aincrad.noctf.dev/minTemplateGeneration''].matches(r''^[1-9][0-9]*$'')'
-    message: annotation 'aincrad.noctf.dev/minTemplateGeneration' must be a positive integer
+  - expression: '!has(object.metadata.annotations) || !(''cardinal.noctf.dev/minTemplateGeneration'' in object.metadata.annotations) || object.metadata.annotations[''cardinal.noctf.dev/minTemplateGeneration''].matches(r''^[1-9][0-9]*$'')'
+    message: annotation 'cardinal.noctf.dev/minTemplateGeneration' must be a positive integer
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: ctftemplate-metadata-binding
+  name: cardinal-template-metadata-binding
 spec:
-  policyName: ctftemplate-metadata
+  policyName: cardinal-template-metadata
   validationActions:
   - Deny
 ---

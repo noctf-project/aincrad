@@ -1,5 +1,5 @@
-apiVersion: aincrad.noctf.dev/v1
-kind: CTFTemplate
+apiVersion: cardinal.noctf.dev/v1
+kind: Template
 metadata:
   name: multi-web-db
   namespace: challenges
@@ -47,8 +47,8 @@ spec:
       tls:
         prefix: web
 ---
-apiVersion: aincrad.noctf.dev/v1
-kind: CTFInstance
+apiVersion: cardinal.noctf.dev/v1
+kind: Instance
 metadata:
   name: team1-multi
   namespace: challenges

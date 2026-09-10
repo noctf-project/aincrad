@@ -14,7 +14,7 @@ pub use tls_route::TLSRoutePlanner;
 
 /// Runs validation for all planners against the instance and template.
 pub fn validate_all(
-    instance: &CTFInstance,
+    instance: &Instance,
     template: &ResolvedTemplate,
     ctx: &Context,
 ) -> Result<(), Error> {
@@ -26,7 +26,7 @@ pub fn validate_all(
     Ok(())
 }
 
-use k8s_common::crd::CTFInstance;
+use k8s_common::crd::Instance;
 use kube::{Resource, core::NamespaceResourceScope};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -50,7 +50,7 @@ pub trait Planner {
 
     /// Validates the instance and template before planning or applying any resources.
     fn validate(
-        _instance: &CTFInstance,
+        _instance: &Instance,
         _template: &ResolvedTemplate,
         _ctx: &Context,
     ) -> Result<(), Error> {
@@ -59,7 +59,7 @@ pub trait Planner {
 
     /// Pure planning function that returns all desired resources for this instance and template.
     fn plan(
-        instance: &CTFInstance,
+        instance: &Instance,
         template: &ResolvedTemplate,
         ctx: &Context,
     ) -> Result<Vec<Self::Resource>, Error>;
@@ -84,7 +84,7 @@ pub trait Planner {
 
     /// Returns the object names of this kind owned by `instance` as known to the
     /// cache. Default implementation queries `Self::cache`.
-    fn cached_names(instance: &CTFInstance, ctx: &Context) -> Option<Vec<String>> {
+    fn cached_names(instance: &Instance, ctx: &Context) -> Option<Vec<String>> {
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
         let name = instance.metadata.name.as_deref().unwrap_or("unknown");
         Self::cache(ctx).map(|c| c.names(ns, name))
@@ -93,15 +93,15 @@ pub trait Planner {
     /// Evaluates this resource's readiness and any status payload it contributes.
     ///
     /// Returns the resource's condition (status "True"/"False"/"Unknown"), plus an
-    /// optional typed `CTFInstanceResources` in which the planner sets only its own
+    /// optional typed `InstanceResources` in which the planner sets only its own
     /// fields. `None` means the resource owns no extra status data.
     fn check_status(
-        instance: &CTFInstance,
+        instance: &Instance,
         ctx: &Context,
     ) -> Result<
         (
             k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition,
-            Option<k8s_common::crd::CTFInstanceResources>,
+            Option<k8s_common::crd::InstanceResources>,
         ),
         Error,
     > {

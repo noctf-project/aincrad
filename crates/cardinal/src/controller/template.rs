@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use k8s_common::{
-    crd::CTFTemplate,
+    crd::Template,
     labels::{AVAILABLE_AT_ANNOTATION, MANAGED_BY_LABEL, MANAGED_BY_VALUE, TEMPLATE_LABEL},
 };
 use k8s_openapi::{
@@ -21,7 +21,7 @@ use crate::{Context, Error, btreemap, controller::AVAILABILITY_LEAD_TIME};
 use k8s_common::labels::MIN_TEMPLATE_GENERATION_ANNOTATION;
 
 pub async fn reconcile_template(
-    template: Arc<CTFTemplate>,
+    template: Arc<Template>,
     ctx: Arc<Context>,
 ) -> Result<Action, Error> {
     let name = template.metadata.name.as_deref().unwrap_or_default();
@@ -137,13 +137,13 @@ pub async fn reconcile_template(
     }
 }
 
-pub fn error_policy(template: Arc<CTFTemplate>, error: &Error, _ctx: Arc<Context>) -> Action {
+pub fn error_policy(template: Arc<Template>, error: &Error, _ctx: Arc<Context>) -> Action {
     let name = template.metadata.name.as_deref().unwrap_or_default();
     error!(template = %name, %error, "Error in template controller");
     Action::requeue(Duration::from_secs(15))
 }
 
-fn check_availability(template: &CTFTemplate) -> (bool, Option<Duration>) {
+fn check_availability(template: &Template) -> (bool, Option<Duration>) {
     let available_at_str = template
         .metadata
         .annotations
@@ -184,13 +184,13 @@ fn check_availability(template: &CTFTemplate) -> (bool, Option<Duration>) {
 }
 
 async fn patch_template_min_generation(
-    template: &CTFTemplate,
+    template: &Template,
     ctx: &Context,
     target_gen: i64,
 ) -> Result<(), Error> {
     let name = template.metadata.name.as_deref().unwrap_or_default();
     let ns = template.metadata.namespace.as_deref().unwrap_or("default");
-    let api: Api<CTFTemplate> = Api::namespaced(ctx.client.clone(), ns);
+    let api: Api<Template> = Api::namespaced(ctx.client.clone(), ns);
     let patch = serde_json::json!({
         "metadata": {
             "annotations": {
@@ -210,11 +210,12 @@ async fn patch_template_min_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_common::crd::CTFTemplateSpec;
+    use k8s_common::crd::TemplateSpec;
+    use kube::CustomResourceExt;
     use std::collections::BTreeMap;
 
-    fn test_template(annotations: Option<BTreeMap<String, String>>) -> CTFTemplate {
-        let mut template = CTFTemplate::new("test-chal", CTFTemplateSpec::default());
+    fn test_template(annotations: Option<BTreeMap<String, String>>) -> Template {
+        let mut template = Template::new("test-chal", TemplateSpec::default());
         template.metadata.annotations = annotations;
         template
     }
@@ -292,7 +293,13 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .filter(|s| s.starts_with("PATCH") && s.contains("/ctftemplates/test-chal"))
+            .filter(|s| {
+                s.starts_with("PATCH")
+                    && s.contains(&format!(
+                        "/{}/test-chal",
+                        Template::api_resource().plural.to_ascii_lowercase()
+                    ))
+            })
             .cloned()
             .collect();
         assert_eq!(patches.len(), 1);
@@ -322,7 +329,13 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .filter(|s| s.starts_with("PATCH") && s.contains("/ctftemplates/test-chal"))
+            .filter(|s| {
+                s.starts_with("PATCH")
+                    && s.contains(&format!(
+                        "/{}/test-chal",
+                        Template::api_resource().plural.to_ascii_lowercase()
+                    ))
+            })
             .cloned()
             .collect();
         assert_eq!(patches.len(), 1);

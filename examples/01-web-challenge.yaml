@@ -1,5 +1,5 @@
-apiVersion: aincrad.noctf.dev/v1
-kind: CTFTemplate
+apiVersion: cardinal.noctf.dev/v1
+kind: Template
 metadata:
   name: web-whoami
   namespace: challenges
@@ -29,8 +29,8 @@ spec:
       tls:
         prefix: whoami
 ---
-apiVersion: aincrad.noctf.dev/v1
-kind: CTFInstance
+apiVersion: cardinal.noctf.dev/v1
+kind: Instance
 metadata:
   name: team1-whoami
   namespace: challenges

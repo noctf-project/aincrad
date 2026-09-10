@@ -10,7 +10,7 @@ use crate::crd::{
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct CTFTemplateStatus {
+pub struct TemplateStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(schema_with = "list_schema::<Condition>")]
     pub conditions: Vec<Condition>,
@@ -18,7 +18,7 @@ pub struct CTFTemplateStatus {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct CTFTemplateSpecParam {
+pub struct TemplateSpecParam {
     #[schemars(
         regex(pattern = r"^[_a-z0-9]([-_a-z0-9]*[a-z0-9])?$"),
         length(min = 1, max = 32)
@@ -27,21 +27,22 @@ pub struct CTFTemplateSpecParam {
     pub value: String,
 }
 
-impl KubeListKey for CTFTemplateSpecParam {
+impl KubeListKey for TemplateSpecParam {
     const KEYS: &'static [&'static str] = &["name"];
 }
 
-impl KubeListKey for CTFTemplateSpecPod {
+impl KubeListKey for TemplateSpecPod {
     const KEYS: &'static [&'static str] = &["name"];
 }
 
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[kube(
-    group = "aincrad.noctf.dev",
+    group = "cardinal.noctf.dev",
     version = "v1",
-    kind = "CTFTemplate",
+    kind = "Template",
     namespaced,
-    status = CTFTemplateStatus,
+    status = TemplateStatus,
+    shortname = "ctmpl",
 )]
 #[schemars(
         extend("x-kubernetes-validations" = [
@@ -53,15 +54,15 @@ impl KubeListKey for CTFTemplateSpecPod {
     )]
 #[serde(rename_all = "camelCase")]
 /// Specification for a reusable CTF challenge workload template.
-pub struct CTFTemplateSpec {
+pub struct TemplateSpec {
     /// Key-value parameters passed to challenge pods as environment variables or configuration values.
     #[serde(default)]
-    #[schemars(schema_with = "list_schema::<CTFTemplateSpecParam>")]
-    pub params: Vec<CTFTemplateSpecParam>,
+    #[schemars(schema_with = "list_schema::<TemplateSpecParam>")]
+    pub params: Vec<TemplateSpecParam>,
     /// List of pod specifications that make up a challenge instance.
     #[serde(default)]
-    #[schemars(schema_with = "list_schema::<CTFTemplateSpecPod>")]
-    pub pods: Vec<CTFTemplateSpecPod>,
+    #[schemars(schema_with = "list_schema::<TemplateSpecPod>")]
+    pub pods: Vec<TemplateSpecPod>,
     /// List of RouteSpec definitions that expose backend services.
     #[serde(default)]
     #[schemars(schema_with = "list_schema::<RouteSpec>")]
@@ -70,7 +71,7 @@ pub struct CTFTemplateSpec {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct CTFTemplateSpecPod {
+pub struct TemplateSpecPod {
     #[schemars(
         regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"),
         length(min = 1, max = 24)

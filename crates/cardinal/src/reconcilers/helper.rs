@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use k8s_common::{
-    crd::CTFInstance,
+    crd::Instance,
     labels::{
         INSTANCE_GENERATION_LABEL, INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE,
         NAMESPACE_LABEL, TEMPLATE_LABEL,
@@ -19,7 +19,7 @@ use crate::{Context, Error, planners::Planner, reconcilers::template::ResolvedTe
 /// Applies all planned child resources using Server-Side Apply and prunes stale generations.
 pub async fn apply_planner<P: Planner>(
     api: Api<P::Resource>,
-    instance: &CTFInstance,
+    instance: &Instance,
     template: &ResolvedTemplate,
     ctx: &Context,
 ) -> Result<Vec<P::Resource>, Error> {
@@ -61,7 +61,7 @@ pub async fn apply_planner<P: Planner>(
 /// Prunes any child resources of kind `P::KIND` that are no longer desired.
 async fn prune_dangling_children<P: Planner>(
     api: &Api<P::Resource>,
-    instance: &CTFInstance,
+    instance: &Instance,
     desired_names: &HashSet<String>,
     ctx: &Context,
 ) -> Result<(), Error> {
@@ -160,7 +160,7 @@ mod tests {
         let (_store, ctx) = dummy_context();
 
         let mut instance = dummy_instance("chal-1", None);
-        instance.status = Some(k8s_common::crd::CTFInstanceStatus {
+        instance.status = Some(k8s_common::crd::InstanceStatus {
             children: std::collections::BTreeMap::from([(
                 "ReplicaSet".to_string(),
                 vec!["chal-1-web-OLDHASH".to_string()],
@@ -267,7 +267,7 @@ mod tests {
         let desired_name = desired[0].metadata.name.clone().unwrap();
 
         let mut synced_instance = instance.clone();
-        synced_instance.status = Some(k8s_common::crd::CTFInstanceStatus {
+        synced_instance.status = Some(k8s_common::crd::InstanceStatus {
             children: std::collections::BTreeMap::from([(
                 "ReplicaSet".to_string(),
                 vec![desired_name.clone()],

@@ -1,10 +1,10 @@
-apiVersion: aincrad.noctf.dev/v1
-kind: CTFInstance
+apiVersion: cardinal.noctf.dev/v1
+kind: Instance
 metadata:
   name: team1-ephemeral-session
   namespace: challenges
   annotations:
     # RFC3339 timestamp after which Cardinal automatically deletes the instance and cleans up all resources
-    aincrad.noctf.dev/expiresAt: "2026-12-31T23:59:59Z"
+    cardinal.noctf.dev/expiresAt: "2026-12-31T23:59:59Z"
 spec:
   template: web-whoami

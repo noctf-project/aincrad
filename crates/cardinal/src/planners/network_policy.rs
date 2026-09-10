@@ -1,4 +1,4 @@
-use k8s_common::crd::CTFInstance;
+use k8s_common::crd::Instance;
 use k8s_common::labels::{INSTANCE_LABEL, RESOURCE_LABEL};
 use k8s_openapi::api::networking::v1::NetworkPolicyIngressRule;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement;
@@ -26,7 +26,7 @@ impl Planner for NetworkPolicyPlanner {
     type Resource = NetworkPolicy;
 
     fn plan(
-        instance: &CTFInstance,
+        instance: &Instance,
         template: &ResolvedTemplate,
         _ctx: &Context,
     ) -> Result<Vec<NetworkPolicy>, Error> {
@@ -206,7 +206,7 @@ fn plan_external_spec(instance_name: &str, allowed_pods: &[&str]) -> NetworkPoli
 mod tests {
     use super::*;
     use crate::test_utils::tests::{dummy_context, dummy_instance, dummy_resolved_template};
-    use k8s_common::crd::CTFTemplateSpecPod;
+    use k8s_common::crd::TemplateSpecPod;
     use k8s_openapi::api::core::v1::{Container, PodSpec};
 
     #[tokio::test]
@@ -253,7 +253,7 @@ mod tests {
         let mut template = dummy_resolved_template(1);
 
         template.spec.pods = vec![
-            CTFTemplateSpecPod {
+            TemplateSpecPod {
                 name: "web".to_string(),
                 allow_internet: true,
                 replicas: 1,
@@ -267,7 +267,7 @@ mod tests {
                     ..Default::default()
                 },
             },
-            CTFTemplateSpecPod {
+            TemplateSpecPod {
                 name: "db".to_string(),
                 allow_internet: false,
                 replicas: 1,
@@ -321,14 +321,14 @@ mod tests {
         let mut template = dummy_resolved_template(1);
 
         template.spec.pods = vec![
-            CTFTemplateSpecPod {
+            TemplateSpecPod {
                 name: "web".to_string(),
                 allow_internet: true,
                 replicas: 1,
                 patch_spec: None,
                 spec: PodSpec::default(),
             },
-            CTFTemplateSpecPod {
+            TemplateSpecPod {
                 name: "api".to_string(),
                 allow_internet: true,
                 replicas: 1,

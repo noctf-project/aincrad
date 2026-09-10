@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use k8s_common::crd::CTFInstance;
+use k8s_common::crd::Instance;
 use kube::Api;
 use kube::runtime::controller::Action;
 use tracing::info;
@@ -17,7 +17,7 @@ use crate::{
 
 /// Shared context threaded through every reconcile phase.
 pub struct Flow<'a> {
-    pub instance: &'a CTFInstance,
+    pub instance: &'a Instance,
     pub ctx: &'a Context,
     pub name: &'a str,
     pub ns: &'a str,
@@ -25,7 +25,7 @@ pub struct Flow<'a> {
 }
 
 impl<'a> Flow<'a> {
-    pub fn new(instance: &'a CTFInstance, ctx: &'a Context) -> Self {
+    pub fn new(instance: &'a Instance, ctx: &'a Context) -> Self {
         Self {
             instance,
             ctx,
@@ -48,7 +48,7 @@ pub struct Prepared {
 }
 
 /// Drives the reconcile pipeline: lifecycle, prepare, apply, commit.
-pub async fn run(instance: &CTFInstance, ctx: &Context) -> Result<Action, Error> {
+pub async fn run(instance: &Instance, ctx: &Context) -> Result<Action, Error> {
     let flow = Flow::new(instance, ctx);
 
     if let Step::Finish(action) = lifecycle::reconcile(&flow).await? {
@@ -104,8 +104,8 @@ pub mod lifecycle {
         // Expired instances are authoritative-deleted here; the requeue cadence
         // only bounds how late that delete fires.
         if is_expired(expires_at) {
-            info!(name, ns, "CTFInstance has expired, deleting resource...");
-            let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
+            info!(name, ns, "Instance has expired, deleting resource...");
+            let instances: Api<Instance> = Api::namespaced(ctx.client.clone(), ns);
             instances.delete(name, &Default::default()).await?;
             return Ok(Step::Finish(Action::await_change()));
         }
@@ -128,7 +128,7 @@ pub mod prepare {
             ..
         } = flow;
 
-        // Resolve the CTFTemplate referenced by instance.spec.template.
+        // Resolve the Template referenced by instance.spec.template.
         let template = reconcilers::template::reconcile(instance, ctx).await?;
 
         // Reject invalid overrides and run pre-flight validation across all planners
@@ -281,7 +281,7 @@ use crate::reconcilers::status::is_observed;
 
 /// Patches the minTemplateGeneration annotation to `target_gen`.
 async fn patch_min_template_annotation(flow: &Flow<'_>, target_gen: i64) -> Result<(), Error> {
-    let instances: Api<CTFInstance> = Api::namespaced(flow.ctx.client.clone(), flow.ns);
+    let instances: Api<Instance> = Api::namespaced(flow.ctx.client.clone(), flow.ns);
     let patch = serde_json::json!({
         "metadata": {
             "annotations": {
@@ -350,8 +350,8 @@ mod tests {
         let prepared = Prepared {
             template: crate::reconcilers::template::ResolvedTemplate {
                 metadata: ObjectMeta::default(),
-                spec: k8s_common::crd::CTFTemplateSpec {
-                    pods: vec![k8s_common::crd::CTFTemplateSpecPod {
+                spec: k8s_common::crd::TemplateSpec {
+                    pods: vec![k8s_common::crd::TemplateSpecPod {
                         name: "web".to_string(),
                         spec: k8s_openapi::api::core::v1::PodSpec {
                             containers: vec![k8s_openapi::api::core::v1::Container {

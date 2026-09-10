@@ -15,8 +15,8 @@ kubectl apply -f crds/generated.yaml
 ```
 
 This registers:
-- `CTFTemplate` (`aincrad.noctf.dev/v1`): Blueprints defining challenge pods, resource limits, and route specs.
-- `CTFInstance` (`aincrad.noctf.dev/v1`): Ephemeral running sandboxes allocated to teams or players.
+- `Template` (`cardinal.noctf.dev/v1`): Blueprints defining challenge pods, resource limits, and route specs.
+- `Instance` (`cardinal.noctf.dev/v1`): Ephemeral running sandboxes allocated to teams or players.
 
 ## Deploying Cardinal
 
@@ -61,7 +61,7 @@ Cardinal will automatically:
 Check status:
 
 ```bash
-kubectl get ctfinstances -n challenges -o wide
+kubectl get cinst -n challenges -o wide
 ```
 
 ### Example 2: Pwn Challenge (Raw TCP with Dynamic Port Allocation)
@@ -93,30 +93,30 @@ Apply [`examples/04-instance-with-ttl.yaml`](examples/04-instance-with-ttl.yaml)
 kubectl apply -f examples/04-instance-with-ttl.yaml
 ```
 
-By annotating the instance with `aincrad.noctf.dev/expiresAt` (an RFC3339 timestamp), Cardinal automatically schedules an expiration check. Once the timestamp passes, Cardinal deletes the `CTFInstance`, triggering cascading deletion of all child pods, services, and routes.
+By annotating the instance with `cardinal.noctf.dev/expiresAt` (an RFC3339 timestamp), Cardinal automatically schedules an expiration check. Once the timestamp passes, Cardinal deletes the `Instance`, triggering cascading deletion of all child pods, services, and routes.
 
 ## Instance Lifecycle & Upgrades
 
-Instances are **immutable snapshots** pinned to the template version at creation time. Updating a `CTFTemplate` does not auto-roll running instances, preventing active player sessions or shared challenge state from being wiped accidentally.
+Instances are **immutable snapshots** pinned to the template version at creation time. Updating a `Template` does not auto-roll running instances, preventing active player sessions or shared challenge state from being wiped accidentally.
 
 To apply template changes to running instances:
 
 1. **Recreate the instance (standard player flow):**
    ```bash
-   kubectl delete ctfinstance <instance-name> -n challenges
+   kubectl delete cinst <instance-name> -n challenges
    kubectl apply -f <instance-manifest>.yaml
    ```
 
 2. **Trigger a rolling restart (preserves routes and allocated ports):**
    ```bash
-   kubectl annotate ctfinstance <instance-name> -n challenges \
-     aincrad.noctf.dev/restartedAt="$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite
+   kubectl annotate cinst <instance-name> -n challenges \
+     cardinal.noctf.dev/restartedAt="$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite
    ```
 
 3. **Emergency global upgrade (forces all active instances to roll up):**
    ```bash
-   kubectl annotate ctftemplate <template-name> -n challenges \
-     aincrad.noctf.dev/minTemplateGeneration="9999" --overwrite
+   kubectl annotate ctmpl <template-name> -n challenges \
+     cardinal.noctf.dev/minTemplateGeneration="9999" --overwrite
    ```
    Cardinal automatically caps this annotation to the template's current generation so future template edits do not trigger unwanted rolls.
 
@@ -125,7 +125,7 @@ To apply template changes to running instances:
 Delete instances manually when done:
 
 ```bash
-kubectl delete ctfinstance -n challenges team1-whoami team1-echo team1-multi team1-ephemeral-session
+kubectl delete cinst -n challenges team1-whoami team1-echo team1-multi team1-ephemeral-session
 ```
 
 Kubernetes `ownerReferences` automatically cascades and deletes all owned ReplicaSets, Services, NetworkPolicies, and TLSRoutes instantly.

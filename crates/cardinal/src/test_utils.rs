@@ -1,10 +1,8 @@
 #[cfg(test)]
 pub mod tests {
-    use k8s_common::crd::{
-        CTFInstance, CTFInstanceSpec, CTFTemplate, CTFTemplateSpec, CTFTemplateSpecPod,
-    };
+    use k8s_common::crd::{Instance, InstanceSpec, Template, TemplateSpec, TemplateSpecPod};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use kube::Client;
+    use kube::{Client, CustomResourceExt};
     use std::sync::Arc;
 
     use crate::reconcilers::template::ResolvedTemplate;
@@ -97,9 +95,9 @@ pub mod tests {
         Client::new(ErrorService(status_code), config.default_namespace)
     }
 
-    pub fn dummy_instance(name: &str, _gen_annotation: Option<&str>) -> CTFInstance {
+    pub fn dummy_instance(name: &str, _gen_annotation: Option<&str>) -> Instance {
         let annotations = std::collections::BTreeMap::new();
-        CTFInstance {
+        Instance {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some("default".to_string()),
@@ -107,7 +105,7 @@ pub mod tests {
                 annotations: Some(annotations),
                 ..Default::default()
             },
-            spec: CTFInstanceSpec {
+            spec: InstanceSpec {
                 template: "whoami-template".to_string(),
                 ..Default::default()
             },
@@ -123,8 +121,8 @@ pub mod tests {
                 generation: Some(target_g),
                 ..Default::default()
             },
-            spec: CTFTemplateSpec {
-                pods: vec![CTFTemplateSpecPod {
+            spec: TemplateSpec {
+                pods: vec![TemplateSpecPod {
                     name: "web".to_string(),
                     allow_internet: false,
                     replicas: 1,
@@ -153,7 +151,7 @@ pub mod tests {
     /// Creates a dummy Context with template store + allocator for tests.
     /// Returns (store, Arc<Context>) so store can be populated before use.
     pub fn dummy_context() -> (
-        kube::runtime::reflector::Store<CTFTemplate>,
+        kube::runtime::reflector::Store<Template>,
         Arc<crate::Context>,
     ) {
         dummy_ctx(dummy_kube_client(), Vec::new())
@@ -163,7 +161,7 @@ pub mod tests {
     pub fn dummy_context_with_routes(
         routes: Vec<k8s_common::crd::RouteSpec>,
     ) -> (
-        kube::runtime::reflector::Store<CTFTemplate>,
+        kube::runtime::reflector::Store<Template>,
         Arc<crate::Context>,
     ) {
         dummy_ctx(dummy_kube_client(), routes)
@@ -174,7 +172,7 @@ pub mod tests {
         client: kube::Client,
         routes: Vec<k8s_common::crd::RouteSpec>,
     ) -> (
-        kube::runtime::reflector::Store<CTFTemplate>,
+        kube::runtime::reflector::Store<Template>,
         Arc<crate::Context>,
     ) {
         use crate::routing::PortMap;
@@ -196,15 +194,15 @@ pub mod tests {
         );
 
         // Populate template cache with a default template
-        let tmpl = CTFTemplate {
+        let tmpl = Template {
             metadata: ObjectMeta {
                 name: Some("whoami-template".into()),
                 namespace: Some("default".into()),
                 generation: Some(1),
                 ..Default::default()
             },
-            spec: CTFTemplateSpec {
-                pods: vec![CTFTemplateSpecPod {
+            spec: TemplateSpec {
+                pods: vec![TemplateSpecPod {
                     name: "web".into(),
                     allow_internet: false,
                     replicas: 1,
@@ -261,11 +259,14 @@ pub mod tests {
 
         let clean_path = path.split('?').next().unwrap_or(path);
 
+        let templates = Template::api_resource().plural.to_ascii_lowercase();
+        let instances = Instance::api_resource().plural.to_ascii_lowercase();
+
         if is_get {
-            if clean_path.contains("ctftemplates") {
+            if clean_path.contains(&templates) {
                 let tmpl = serde_json::json!({
-                    "apiVersion": "aincrad.noctf.dev/v1",
-                    "kind": "CTFTemplate",
+                    "apiVersion": "cardinal.noctf.dev/v1",
+                    "kind": &Template::api_resource().kind,
                     "metadata": {
                         "name": "whoami-template",
                         "namespace": "default",
@@ -299,7 +300,7 @@ pub mod tests {
                 || clean_path.ends_with("/services")
                 || clean_path.ends_with("/networkpolicies")
                 || clean_path.ends_with("/tlsroutes")
-                || clean_path.ends_with("/ctfinstances")
+                || clean_path.ends_with(&format!("/{instances}"))
             {
                 let list = serde_json::json!({
                     "apiVersion": "v1",
@@ -335,7 +336,7 @@ pub mod tests {
                     || clean_path.ends_with("/services")
                     || clean_path.ends_with("/networkpolicies")
                     || clean_path.ends_with("/tlsroutes")
-                    || clean_path.ends_with("/ctfinstances"))
+                    || clean_path.ends_with(&format!("/{instances}")))
             {
                 let list = serde_json::json!({
                     "apiVersion": "v1",
@@ -351,16 +352,19 @@ pub mod tests {
                     .unwrap());
             }
 
+            let template_kind = Template::api_resource().kind;
+            let instance_kind = Instance::api_resource().kind;
+
             let (api_version, kind) = if path.contains("networkpolicies") {
                 ("networking.k8s.io/v1", "NetworkPolicy")
             } else if path.contains("replicasets") {
                 ("apps/v1", "ReplicaSet")
             } else if path.contains("tlsroutes") {
                 ("gateway.networking.k8s.io/v1alpha2", "TLSRoute")
-            } else if path.contains("ctftemplates") {
-                ("aincrad.noctf.dev/v1", "CTFTemplate")
-            } else if path.contains("ctfinstances") {
-                ("aincrad.noctf.dev/v1", "CTFInstance")
+            } else if path.contains(&templates) {
+                ("cardinal.noctf.dev/v1", template_kind.as_str())
+            } else if path.contains(&instances) {
+                ("cardinal.noctf.dev/v1", instance_kind.as_str())
             } else {
                 ("v1", "Service")
             };
@@ -374,15 +378,15 @@ pub mod tests {
                     "name": resource_name,
                     "namespace": "default",
                     "labels": {
-                        "aincrad.noctf.dev/namespace": "default",
-                        "aincrad.noctf.dev/instance": "chal-1",
-                        "aincrad.noctf.dev/resource": "web"
+                        "cardinal.noctf.dev/namespace": "default",
+                        "cardinal.noctf.dev/instance": "chal-1",
+                        "cardinal.noctf.dev/resource": "web"
                     }
                 }
             });
-            if kind == "CTFInstance" {
+            if kind == instance_kind {
                 body["spec"] = serde_json::json!({ "template": "whoami-template" });
-            } else if kind == "CTFTemplate" {
+            } else if kind == template_kind {
                 body["spec"] = serde_json::json!({ "pods": [], "routes": [] });
             }
             let body_str = serde_json::to_string(&body).unwrap();

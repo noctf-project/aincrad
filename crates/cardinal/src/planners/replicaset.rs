@@ -3,7 +3,7 @@ use std::fmt::Write;
 use std::sync::LazyLock;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use k8s_common::crd::{CTFInstance, CTFTemplateSpecPod};
+use k8s_common::crd::{Instance, TemplateSpecPod};
 use k8s_common::labels::{INSTANCE_LABEL, RESOURCE_LABEL, RESTARTED_AT_ANNOTATION, TEMPLATE_LABEL};
 use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetSpec};
 use k8s_openapi::api::core::v1::{PodSpec, PodTemplateSpec};
@@ -42,7 +42,7 @@ impl Planner for ReplicaSetPlanner {
     }
 
     fn plan(
-        instance: &CTFInstance,
+        instance: &Instance,
         template: &ResolvedTemplate,
         ctx: &Context,
     ) -> Result<Vec<ReplicaSet>, Error> {
@@ -129,9 +129,9 @@ impl Planner for ReplicaSetPlanner {
     }
 
     fn check_status(
-        instance: &CTFInstance,
+        instance: &Instance,
         ctx: &Context,
-    ) -> Result<(Condition, Option<k8s_common::crd::CTFInstanceResources>), Error> {
+    ) -> Result<(Condition, Option<k8s_common::crd::InstanceResources>), Error> {
         let instance_name = instance.metadata.name.as_deref().unwrap_or("unknown");
         let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
@@ -298,7 +298,7 @@ impl ImageReference for k8s_openapi::api::core::v1::EphemeralContainer {
 pub fn build_replicaset_spec(
     instance_name: &str,
     template_name: &str,
-    pod_tmpl: &CTFTemplateSpecPod,
+    pod_tmpl: &TemplateSpecPod,
     mut patched_pod_spec: PodSpec,
     replicas: i32,
     restarted_at: Option<&str>,
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn test_build_replicaset_spec() {
-        let pod_tmpl = CTFTemplateSpecPod {
+        let pod_tmpl = TemplateSpecPod {
             name: "web".into(),
             replicas: 1,
             spec: PodSpec {
@@ -665,7 +665,7 @@ mod tests {
         let mut pod_patchers = HashMap::new();
         pod_patchers.insert("web".to_string(), Some(patcher));
 
-        let pod_tmpl_web = CTFTemplateSpecPod {
+        let pod_tmpl_web = TemplateSpecPod {
             name: "web".into(),
             replicas: 1,
             spec: PodSpec {
@@ -683,7 +683,7 @@ mod tests {
             ..Default::default()
         };
 
-        let pod_tmpl_db = CTFTemplateSpecPod {
+        let pod_tmpl_db = TemplateSpecPod {
             name: "db".into(),
             replicas: 1,
             ..Default::default()
@@ -692,7 +692,7 @@ mod tests {
         let instance = dummy_instance("chal-web", None);
         let template = ResolvedTemplate {
             metadata: ObjectMeta::default(),
-            spec: k8s_common::crd::CTFTemplateSpec {
+            spec: k8s_common::crd::TemplateSpec {
                 pods: vec![pod_tmpl_web, pod_tmpl_db],
                 ..Default::default()
             },
@@ -928,7 +928,7 @@ mod tests {
         let mut instance = dummy_instance("chal-1", None);
 
         // Record expected ReplicaSets in status.children: web and db
-        instance.status = Some(k8s_common::crd::CTFInstanceStatus {
+        instance.status = Some(k8s_common::crd::InstanceStatus {
             children: crate::btreemap! {
                 "ReplicaSet".to_string() => vec!["chal-1-web".to_string(), "chal-1-db".to_string()],
             },

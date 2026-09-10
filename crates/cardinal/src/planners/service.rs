@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use k8s_common::crd::{CTFInstance, RouteTarget};
+use k8s_common::crd::{Instance, RouteTarget};
 use k8s_common::labels::{INSTANCE_LABEL, RESOURCE_LABEL};
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -21,7 +21,7 @@ pub struct ServicePlanner;
 
 /// Plans Services for internal inter-pod communication and routing backends.
 pub fn plan_services(
-    instance: &CTFInstance,
+    instance: &Instance,
     template: &ResolvedTemplate,
     _ctx: &Context,
 ) -> Result<Vec<Service>, Error> {
@@ -90,7 +90,7 @@ pub fn plan_services(
 
 /// Plans dummy LoadBalancer Services that reserve and expose TCP challenge ports.
 pub fn plan_load_balancers(
-    instance: &CTFInstance,
+    instance: &Instance,
     template: &ResolvedTemplate,
     ctx: &Context,
 ) -> Result<Vec<Service>, Error> {
@@ -282,7 +282,7 @@ impl Planner for ServicePlanner {
     }
 
     fn plan(
-        instance: &CTFInstance,
+        instance: &Instance,
         template: &ResolvedTemplate,
         ctx: &Context,
     ) -> Result<Vec<Service>, Error> {

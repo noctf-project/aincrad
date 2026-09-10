@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::crd::CTFTemplateSpecParam;
+use crate::crd::TemplateSpecParam;
 use globset::GlobSet;
 use json_patch::{Patch, PatchOperation};
 use serde::{Serialize, de::DeserializeOwned};
@@ -35,8 +35,8 @@ impl std::fmt::Debug for SpecPatcher {
     }
 }
 
-/// Standalone helper function converting a slice of `CTFTemplateSpecParam` into a `BTreeMap<String, String>`.
-pub fn params_to_map(params: &[CTFTemplateSpecParam]) -> BTreeMap<String, String> {
+/// Standalone helper function converting a slice of `SandboxTemplateSpecParam` into a `BTreeMap<String, String>`.
+pub fn params_to_map(params: &[TemplateSpecParam]) -> BTreeMap<String, String> {
     params
         .iter()
         .map(|p| (p.name.clone(), p.value.clone()))
@@ -305,7 +305,7 @@ mod tests {
             ..Default::default()
         };
 
-        let params = vec![CTFTemplateSpecParam {
+        let params = vec![TemplateSpecParam {
             name: "instance".into(),
             value: "team-alpha".into(),
         }];
@@ -351,7 +351,7 @@ mod tests {
         let patcher = SpecPatcher::new(&blacklist, patch).unwrap();
 
         let base_spec = PodSpec::default();
-        let params = vec![CTFTemplateSpecParam {
+        let params = vec![TemplateSpecParam {
             name: "ttl".into(),
             value: "3600".into(),
         }];
@@ -385,7 +385,7 @@ mod tests {
             ..Default::default()
         };
 
-        let params = vec![CTFTemplateSpecParam {
+        let params = vec![TemplateSpecParam {
             name: "port".into(),
             value: "8080".into(),
         }];
@@ -450,7 +450,7 @@ mod tests {
             ..Default::default()
         };
 
-        let params = vec![CTFTemplateSpecParam {
+        let params = vec![TemplateSpecParam {
             name: "secret".into(),
             value: "hello".into(),
         }];

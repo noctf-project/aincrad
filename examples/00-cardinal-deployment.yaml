@@ -26,11 +26,11 @@ metadata:
     app.kubernetes.io/component: cardinal
 rules:
   - apiGroups:
-      - aincrad.noctf.dev
+      - cardinal.noctf.dev
     resources:
-      - ctfinstances
-      - ctfinstances/status
-      - ctftemplates
+      - instances
+      - instances/status
+      - templates
     verbs:
       - get
       - list

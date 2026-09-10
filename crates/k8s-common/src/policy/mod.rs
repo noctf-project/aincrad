@@ -4,15 +4,17 @@ use k8s_openapi::api::admissionregistration::v1::{
     ValidatingAdmissionPolicySpec, Validation,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use kube::CustomResourceExt;
 
+use crate::crd::{Instance, Template};
 use crate::labels::{
     EXPIRES_AT_ANNOTATION, MIN_TEMPLATE_GENERATION_ANNOTATION, RESTARTED_AT_ANNOTATION,
 };
 
-/// Generates the ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding for CTFInstance annotations.
-pub fn generate_ctfinstance_admission_policy()
+/// Generates the ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding for instance annotations.
+pub fn generate_instance_admission_policy()
 -> (ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding) {
-    let policy_name = "ctfinstance-metadata";
+    let policy_name = "cardinal-instance-metadata";
 
     let policy = ValidatingAdmissionPolicy {
         metadata: ObjectMeta {
@@ -22,10 +24,10 @@ pub fn generate_ctfinstance_admission_policy()
         spec: Some(ValidatingAdmissionPolicySpec {
             match_constraints: Some(MatchResources {
                 resource_rules: Some(vec![NamedRuleWithOperations {
-                    api_groups: Some(vec!["aincrad.noctf.dev".to_string()]),
+                    api_groups: Some(vec!["cardinal.noctf.dev".to_string()]),
                     api_versions: Some(vec!["v1".to_string()]),
                     operations: Some(vec!["CREATE".to_string(), "UPDATE".to_string()]),
-                    resources: Some(vec!["ctfinstances".to_string()]),
+                    resources: Some(vec![Instance::api_resource().plural.to_ascii_lowercase()]),
                     ..Default::default()
                 }]),
                 ..Default::default()
@@ -79,10 +81,10 @@ pub fn generate_ctfinstance_admission_policy()
     (policy, binding)
 }
 
-/// Generates the ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding for CTFTemplate annotations.
-pub fn generate_ctftemplate_admission_policy()
+/// Generates the ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding for template annotations.
+pub fn generate_template_admission_policy()
 -> (ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding) {
-    let policy_name = "ctftemplate-metadata";
+    let policy_name = "cardinal-template-metadata";
 
     let policy = ValidatingAdmissionPolicy {
         metadata: ObjectMeta {
@@ -92,10 +94,10 @@ pub fn generate_ctftemplate_admission_policy()
         spec: Some(ValidatingAdmissionPolicySpec {
             match_constraints: Some(MatchResources {
                 resource_rules: Some(vec![NamedRuleWithOperations {
-                    api_groups: Some(vec!["aincrad.noctf.dev".to_string()]),
+                    api_groups: Some(vec!["cardinal.noctf.dev".to_string()]),
                     api_versions: Some(vec!["v1".to_string()]),
                     operations: Some(vec!["CREATE".to_string(), "UPDATE".to_string()]),
-                    resources: Some(vec!["ctftemplates".to_string()]),
+                    resources: Some(vec![Template::api_resource().plural.to_ascii_lowercase()]),
                     ..Default::default()
                 }]),
                 ..Default::default()
@@ -134,30 +136,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_generate_ctfinstance_admission_policy() {
-        let (policy, binding) = generate_ctfinstance_admission_policy();
+    fn test_generate_instance_admission_policy() {
+        let (policy, binding) = generate_instance_admission_policy();
         assert_eq!(
             policy.metadata.name.as_deref(),
-            Some("ctfinstance-metadata")
+            Some("cardinal-instance-metadata")
         );
         assert_eq!(
             binding.metadata.name.as_deref(),
-            Some("ctfinstance-metadata-binding")
+            Some("cardinal-instance-metadata-binding")
         );
         let validations = policy.spec.unwrap().validations.unwrap();
         assert_eq!(validations.len(), 3);
     }
 
     #[test]
-    fn test_generate_ctftemplate_admission_policy() {
-        let (policy, binding) = generate_ctftemplate_admission_policy();
+    fn test_generate_template_admission_policy() {
+        let (policy, binding) = generate_template_admission_policy();
         assert_eq!(
             policy.metadata.name.as_deref(),
-            Some("ctftemplate-metadata")
+            Some("cardinal-template-metadata")
         );
         assert_eq!(
             binding.metadata.name.as_deref(),
-            Some("ctftemplate-metadata-binding")
+            Some("cardinal-template-metadata-binding")
         );
         let validations = policy.spec.unwrap().validations.unwrap();
         assert_eq!(validations.len(), 1);

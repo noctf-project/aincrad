@@ -1,4 +1,4 @@
-use k8s_common::{crd::CTFInstance, labels::MIN_TEMPLATE_GENERATION_ANNOTATION};
+use k8s_common::{crd::Instance, labels::MIN_TEMPLATE_GENERATION_ANNOTATION};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 /// Returns true when an instance must re-apply against its template.
@@ -7,7 +7,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 /// annotation acting as a floor; the effective floor is the higher of the two.
 /// When a floor is set the instance must have observed at least that generation,
 /// so it upgrades whenever its observed generation is below the floor.
-pub fn requires_template_upgrade(template: &ObjectMeta, instance: &CTFInstance) -> bool {
+pub fn requires_template_upgrade(template: &ObjectMeta, instance: &Instance) -> bool {
     let observed = instance.status.as_ref().and_then(|s| s.template_generation);
 
     let Some(floor) = template_floor(template).max(instance_floor(instance)) else {
@@ -23,7 +23,7 @@ pub fn template_floor(template: &ObjectMeta) -> Option<i64> {
 }
 
 /// Parses the `minTemplateGeneration` floor from an instance's annotations.
-fn instance_floor(instance: &CTFInstance) -> Option<i64> {
+fn instance_floor(instance: &Instance) -> Option<i64> {
     min_generation_floor(instance.metadata.annotations.as_ref())
 }
 
@@ -41,11 +41,11 @@ pub fn min_generation_floor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_common::crd::{CTFInstanceSpec, CTFInstanceStatus, CTFTemplate, CTFTemplateSpec};
+    use k8s_common::crd::{InstanceSpec, InstanceStatus, Template, TemplateSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
-    fn template(generation: Option<i64>, min: Option<i64>) -> CTFTemplate {
-        CTFTemplate {
+    fn template(generation: Option<i64>, min: Option<i64>) -> Template {
+        Template {
             metadata: ObjectMeta {
                 name: Some("tmpl".into()),
                 namespace: Some("default".into()),
@@ -60,13 +60,13 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            spec: CTFTemplateSpec::default(),
+            spec: TemplateSpec::default(),
             status: None,
         }
     }
 
-    fn instance(observed: Option<i64>, min: Option<i64>) -> CTFInstance {
-        CTFInstance {
+    fn instance(observed: Option<i64>, min: Option<i64>) -> Instance {
+        Instance {
             metadata: ObjectMeta {
                 name: Some("inst".into()),
                 namespace: Some("default".into()),
@@ -80,11 +80,11 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            spec: CTFInstanceSpec {
+            spec: InstanceSpec {
                 template: "tmpl".into(),
                 ..Default::default()
             },
-            status: observed.map(|g| CTFInstanceStatus {
+            status: observed.map(|g| InstanceStatus {
                 template_generation: Some(g),
                 ..Default::default()
             }),

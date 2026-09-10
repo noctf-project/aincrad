@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use k8s_common::{
-    crd::{CTFInstance, CTFInstanceStatus, CTFInstanceStatusEndpoint, EndpointTarget, RouteTarget},
+    crd::{EndpointTarget, Instance, InstanceStatus, InstanceStatusEndpoint, RouteTarget},
     labels::RESTARTED_AT_ANNOTATION,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
@@ -26,7 +26,7 @@ use crate::{
 pub struct Evaluation {
     pub conditions: Vec<Condition>,
     pub template_generation: Option<i64>,
-    pub resources: k8s_common::crd::CTFInstanceResources,
+    pub resources: k8s_common::crd::InstanceResources,
     pub children: BTreeMap<String, Vec<String>>,
 }
 
@@ -42,7 +42,7 @@ impl Evaluation {
 /// Evaluates the instance's readiness by collecting each resource's condition and
 /// status payload. Purely reads in-memory state and writes nothing to the API
 /// server, so it can be run before deciding whether to apply children.
-pub fn evaluate_status(instance: &CTFInstance, ctx: &Context) -> Result<Evaluation, Error> {
+pub fn evaluate_status(instance: &Instance, ctx: &Context) -> Result<Evaluation, Error> {
     let mut evaluation = Evaluation {
         template_generation: current_template_generation(instance, ctx),
         ..Default::default()
@@ -59,7 +59,7 @@ pub fn evaluate_status(instance: &CTFInstance, ctx: &Context) -> Result<Evaluati
 /// Calls a planner's `check_status`, collecting its condition and merging any
 /// typed status payload it contributes into `Evaluation::resources`.
 fn fold_planner<P: Planner>(
-    instance: &CTFInstance,
+    instance: &Instance,
     ctx: &Context,
     evaluation: &mut Evaluation,
 ) -> Result<(), Error> {
@@ -81,12 +81,12 @@ fn fold_planner<P: Planner>(
     Ok(())
 }
 
-/// Generates the endpoints for a CTFInstance from route specs and active port allocations.
+/// Generates the endpoints for a Instance from route specs and active port allocations.
 pub fn generate_endpoints(
-    instance: &CTFInstance,
+    instance: &Instance,
     template: &ResolvedTemplate,
     ctx: &Context,
-) -> Vec<CTFInstanceStatusEndpoint> {
+) -> Vec<InstanceStatusEndpoint> {
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
     let name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let mut endpoints = Vec::new();
@@ -114,7 +114,7 @@ pub fn generate_endpoints(
 
                 if port != 0 {
                     let host = ctx.hostname_suffix().to_string();
-                    endpoints.push(CTFInstanceStatusEndpoint {
+                    endpoints.push(InstanceStatusEndpoint {
                         name: route_tmpl.name.clone(),
                         type_: proto.as_str().to_lowercase(),
                         target: EndpointTarget { host, port },
@@ -128,7 +128,7 @@ pub fn generate_endpoints(
                 let prefix = tls.prefix.as_deref().unwrap_or(&default_prefix);
                 let hostname = derive_hostname(ctx.route_seed(), &route_key, Some(prefix));
                 let fqdn = format_tls_host(ctx.hostname_suffix(), &hostname);
-                endpoints.push(CTFInstanceStatusEndpoint {
+                endpoints.push(InstanceStatusEndpoint {
                     name: route_tmpl.name.clone(),
                     type_: "tls".to_string(),
                     target: EndpointTarget {
@@ -147,7 +147,7 @@ pub fn generate_endpoints(
 
 /// Returns true when the instance's status has observed the current spec
 /// generation and restart annotation.
-pub fn is_observed(instance: &CTFInstance) -> bool {
+pub fn is_observed(instance: &Instance) -> bool {
     match (
         instance.status.as_ref().and_then(|s| s.observed_generation),
         instance.metadata.generation,
@@ -175,7 +175,7 @@ pub fn is_observed(instance: &CTFInstance) -> bool {
 /// called after children have been applied, so the recorded observed generation
 /// and applied template generation are truthful.
 pub async fn commit(
-    instance: &CTFInstance,
+    instance: &Instance,
     evaluation: &Evaluation,
     ctx: &Context,
 ) -> Result<(), Error> {
@@ -198,7 +198,7 @@ pub async fn commit(
         evaluation.children.clone()
     };
 
-    let mut status = CTFInstanceStatus {
+    let mut status = InstanceStatus {
         observed_generation: instance.metadata.generation,
         template_generation: evaluation.template_generation,
         restarted_at: instance
@@ -219,7 +219,7 @@ pub async fn commit(
                 type_: "Ready".to_string(),
                 status: "True".to_string(),
                 reason: "Reconciled".to_string(),
-                message: "CTFInstance reconciled successfully".to_string(),
+                message: "Instance reconciled successfully".to_string(),
                 last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                     Timestamp::now(),
                 ),
@@ -264,7 +264,7 @@ pub async fn commit(
         }
     }
 
-    let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
+    let instances: Api<Instance> = Api::namespaced(ctx.client.clone(), ns);
     instances
         .patch_status(
             name,
@@ -278,7 +278,7 @@ pub async fn commit(
 
 /// Resolves the current generation of the template referenced by the instance,
 /// if it is present in the in-memory template cache.
-fn current_template_generation(instance: &CTFInstance, ctx: &Context) -> Option<i64> {
+fn current_template_generation(instance: &Instance, ctx: &Context) -> Option<i64> {
     let tmpl_name = &instance.spec.template;
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
 
@@ -288,16 +288,16 @@ fn current_template_generation(instance: &CTFInstance, ctx: &Context) -> Option<
         .and_then(|entry| entry.template.metadata.generation)
 }
 
-/// Updates CTFInstance status conditions to indicate reconciliation failure.
+/// Updates Instance status conditions to indicate reconciliation failure.
 #[instrument(skip(ctx, instance, err))]
 pub async fn reconcile_failure(
-    instance: &CTFInstance,
+    instance: &Instance,
     ctx: &Context,
     err: &Error,
 ) -> Result<(), Error> {
     let name = instance.metadata.name.as_deref().unwrap_or("unknown");
     let ns = instance.metadata.namespace.as_deref().unwrap_or("default");
-    let instances: Api<CTFInstance> = Api::namespaced(ctx.client.clone(), ns);
+    let instances: Api<Instance> = Api::namespaced(ctx.client.clone(), ns);
 
     let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Timestamp::now());
     let observed_generation = instance.status.as_ref().and_then(|s| s.observed_generation);
@@ -349,7 +349,7 @@ pub async fn reconcile_failure(
     };
 
     let status_patch = serde_json::json!({
-        "status": CTFInstanceStatus {
+        "status": InstanceStatus {
             observed_generation,
             template_generation,
             restarted_at,
@@ -395,7 +395,7 @@ mod tests {
     #[tokio::test]
     async fn test_commit_updates_endpoints_then_skips_when_unchanged() {
         use crate::test_utils::tests::recording_kube_client;
-        use k8s_common::crd::{CTFInstanceStatusEndpoint, EndpointTarget};
+        use k8s_common::crd::{EndpointTarget, InstanceStatusEndpoint};
 
         let (client, log) = recording_kube_client();
         let (_store, ctx) = crate::test_utils::tests::dummy_ctx(client, vec![]);
@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(patch_count_1, 1, "pass 1 must issue a patch");
 
         // Simulate Pass 1 committed status on instance
-        instance.status = Some(CTFInstanceStatus {
+        instance.status = Some(InstanceStatus {
             observed_generation: instance.metadata.generation,
             template_generation: evaluation_1.template_generation,
             restarted_at: None,
@@ -425,7 +425,7 @@ mod tests {
 
         // Pass 2: evaluation now discovers an endpoint
         let mut evaluation_2 = evaluation_1.clone();
-        evaluation_2.resources.endpoints = Some(vec![CTFInstanceStatusEndpoint {
+        evaluation_2.resources.endpoints = Some(vec![InstanceStatusEndpoint {
             name: "chal".to_string(),
             type_: "tcp".to_string(),
             target: EndpointTarget {
@@ -450,7 +450,7 @@ mod tests {
         );
 
         // Simulate Pass 2 committed status on instance
-        instance.status = Some(CTFInstanceStatus {
+        instance.status = Some(InstanceStatus {
             observed_generation: instance.metadata.generation,
             template_generation: evaluation_2.template_generation,
             restarted_at: None,
@@ -508,7 +508,7 @@ mod tests {
 
         let mut instance = dummy_instance("chal-1", None);
         instance.metadata.generation = Some(1);
-        instance.status = Some(CTFInstanceStatus {
+        instance.status = Some(InstanceStatus {
             observed_generation: Some(1),
             template_generation: None,
             restarted_at: None,
@@ -549,7 +549,7 @@ mod tests {
 
         let mut instance = dummy_instance("chal-1", None);
         instance.metadata.generation = Some(1);
-        instance.status = Some(CTFInstanceStatus {
+        instance.status = Some(InstanceStatus {
             observed_generation: Some(1),
             template_generation: Some(1),
             restarted_at: None,
@@ -571,7 +571,7 @@ mod tests {
             "instance without floor must not require an upgrade"
         );
 
-        let bump_tmpl = k8s_common::crd::CTFTemplate {
+        let bump_tmpl = k8s_common::crd::Template {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
                 name: Some("whoami-template".into()),
                 namespace: Some("default".into()),
@@ -586,7 +586,7 @@ mod tests {
                 ),
                 ..Default::default()
             },
-            spec: k8s_common::crd::CTFTemplateSpec {
+            spec: k8s_common::crd::TemplateSpec {
                 routes: vec![tcp_route],
                 ..Default::default()
             },
@@ -608,7 +608,7 @@ mod tests {
         );
 
         let mut caught_up = instance.clone();
-        caught_up.status = Some(CTFInstanceStatus {
+        caught_up.status = Some(InstanceStatus {
             observed_generation: Some(1),
             template_generation: Some(2),
             restarted_at: None,
@@ -648,9 +648,9 @@ mod tests {
         let ctx = Context::new_stub(client);
 
         let mut instance = dummy_instance("chal-1", None);
-        instance.status = Some(CTFInstanceStatus {
-            resources: k8s_common::crd::CTFInstanceResources {
-                endpoints: Some(vec![k8s_common::crd::CTFInstanceStatusEndpoint {
+        instance.status = Some(InstanceStatus {
+            resources: k8s_common::crd::InstanceResources {
+                endpoints: Some(vec![k8s_common::crd::InstanceStatusEndpoint {
                     name: "pwn".to_string(),
                     type_: "tcp".to_string(),
                     target: k8s_common::crd::EndpointTarget {

@@ -7,7 +7,7 @@ pub mod naming;
 pub mod ttl;
 pub mod versions;
 
-pub const CARDINAL_LB_CLASS: &str = "aincrad.noctf.dev/cardinal";
+pub const CARDINAL_LB_CLASS: &str = "cardinal.noctf.dev/cardinal";
 
 pub struct HashWriter<'a, D: sha2::digest::Update>(pub &'a mut D);
 impl<'a, D: sha2::digest::Update> io::Write for HashWriter<'a, D> {

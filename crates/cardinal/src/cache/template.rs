@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use globset::GlobSet;
-use k8s_common::{SpecPatcher, crd::CTFTemplate};
+use k8s_common::{SpecPatcher, crd::Template};
 use parking_lot::RwLock;
 use tokio::sync::watch;
 
@@ -19,7 +19,7 @@ pub struct TemplateKey {
 
 #[derive(Debug, Clone)]
 pub struct CachedTemplateEntry {
-    pub template: Arc<CTFTemplate>,
+    pub template: Arc<Template>,
     pub pod_patchers: Result<PodPatchersMap, String>,
 }
 
@@ -65,7 +65,7 @@ impl TemplateCache {
         lock.get(&key).cloned()
     }
 
-    pub fn update(&self, template: &CTFTemplate) {
+    pub fn update(&self, template: &Template) {
         let name = template.metadata.name.as_deref().unwrap_or_default();
         let ns = template.metadata.namespace.as_deref().unwrap_or("default");
         let key = TemplateKey {
@@ -96,7 +96,7 @@ impl TemplateCache {
         lock.insert(key, entry);
     }
 
-    pub fn remove(&self, template: &CTFTemplate) {
+    pub fn remove(&self, template: &Template) {
         let name = template.metadata.name.as_deref().unwrap_or_default();
         let ns = template.metadata.namespace.as_deref().unwrap_or("default");
         let key = TemplateKey {
@@ -142,8 +142,8 @@ fn compile_patchers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_common::crd::CTFTemplateSpec;
-    use k8s_common::crd::CTFTemplateSpecPod;
+    use k8s_common::crd::TemplateSpec;
+    use k8s_common::crd::TemplateSpecPod;
     use k8s_openapi::api::core::v1::{Container, PodSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use serde_json::json;
@@ -156,7 +156,7 @@ mod tests {
         ]))
         .unwrap();
 
-        let pod_tmpl = CTFTemplateSpecPod {
+        let pod_tmpl = TemplateSpecPod {
             name: "web".into(),
             allow_internet: false,
             replicas: 1,
@@ -170,14 +170,14 @@ mod tests {
             },
         };
 
-        let tmpl = CTFTemplate {
+        let tmpl = Template {
             metadata: ObjectMeta {
                 name: Some("tmpl1".into()),
                 namespace: Some("default".into()),
                 generation: Some(1),
                 ..Default::default()
             },
-            spec: CTFTemplateSpec {
+            spec: TemplateSpec {
                 pods: vec![pod_tmpl],
                 ..Default::default()
             },
@@ -207,7 +207,7 @@ mod tests {
         ]))
         .unwrap();
 
-        let pod_tmpl = CTFTemplateSpecPod {
+        let pod_tmpl = TemplateSpecPod {
             name: "web".into(),
             allow_internet: false,
             replicas: 1,
@@ -215,13 +215,13 @@ mod tests {
             spec: PodSpec::default(),
         };
 
-        let tmpl = CTFTemplate {
+        let tmpl = Template {
             metadata: ObjectMeta {
                 name: Some("tmpl_invalid".into()),
                 namespace: Some("default".into()),
                 ..Default::default()
             },
-            spec: CTFTemplateSpec {
+            spec: TemplateSpec {
                 pods: vec![pod_tmpl],
                 ..Default::default()
             },
@@ -237,22 +237,22 @@ mod tests {
     #[test]
     fn test_template_cache_remove_and_clear() {
         let cache = TemplateCache::new();
-        let tmpl1 = CTFTemplate {
+        let tmpl1 = Template {
             metadata: ObjectMeta {
                 name: Some("tmpl1".into()),
                 namespace: Some("default".into()),
                 ..Default::default()
             },
-            spec: CTFTemplateSpec::default(),
+            spec: TemplateSpec::default(),
             status: None,
         };
-        let tmpl2 = CTFTemplate {
+        let tmpl2 = Template {
             metadata: ObjectMeta {
                 name: Some("tmpl2".into()),
                 namespace: Some("default".into()),
                 ..Default::default()
             },
-            spec: CTFTemplateSpec::default(),
+            spec: TemplateSpec::default(),
             status: None,
         };
 

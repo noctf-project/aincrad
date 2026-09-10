@@ -1,5 +1,5 @@
-apiVersion: aincrad.noctf.dev/v1
-kind: CTFTemplate
+apiVersion: cardinal.noctf.dev/v1
+kind: Template
 metadata:
   name: pwn-echo
   namespace: challenges
@@ -34,8 +34,8 @@ spec:
         protocol: TCP
       port: 0
 ---
-apiVersion: aincrad.noctf.dev/v1
-kind: CTFInstance
+apiVersion: cardinal.noctf.dev/v1
+kind: Instance
 metadata:
   name: team1-echo
   namespace: challenges

@@ -1,6 +1,6 @@
 use k8s_common::{
     crd::{
-        BackendRef, CTFInstance, ParentReference, RouteTarget, TLSRoute, TLSRouteRule, TLSRouteSpec,
+        BackendRef, Instance, ParentReference, RouteTarget, TLSRoute, TLSRouteRule, TLSRouteSpec,
     },
     labels::RESOURCE_LABEL,
 };
@@ -26,7 +26,7 @@ impl Planner for TLSRoutePlanner {
     }
 
     fn validate(
-        instance: &CTFInstance,
+        instance: &Instance,
         template: &ResolvedTemplate,
         _ctx: &Context,
     ) -> Result<(), Error> {
@@ -68,7 +68,7 @@ impl Planner for TLSRoutePlanner {
     }
 
     fn plan(
-        instance: &CTFInstance,
+        instance: &Instance,
         template: &ResolvedTemplate,
         ctx: &Context,
     ) -> Result<Vec<TLSRoute>, Error> {
@@ -148,7 +148,7 @@ mod tests {
     use super::*;
     use crate::test_utils::tests::{dummy_context, dummy_instance, dummy_resolved_template};
     use k8s_common::{
-        crd::{CTFInstanceSpecRouteOverride, RouteBackend, RouteSpec, RouteSpecTLS},
+        crd::{InstanceSpecRouteOverride, RouteBackend, RouteSpec, RouteSpecTLS},
         labels::{INSTANCE_LABEL, NAMESPACE_LABEL, RESOURCE_LABEL},
     };
 
@@ -271,7 +271,7 @@ mod tests {
     async fn test_plan_tls_routes_with_instance_override() {
         let (_store, ctx) = dummy_context();
         let mut instance = dummy_instance("chal-1", None);
-        instance.spec.routes = vec![CTFInstanceSpecRouteOverride {
+        instance.spec.routes = vec![InstanceSpecRouteOverride {
             name: "web".to_string(),
             tls: Some(RouteSpecTLS {
                 prefix: Some("custom-prefix".into()),
@@ -330,7 +330,7 @@ mod tests {
     async fn test_tls_route_planner_validate_detects_conflicts() {
         let (_store, ctx) = dummy_context();
         let mut instance = dummy_instance("chal-1", None);
-        instance.spec.routes = vec![CTFInstanceSpecRouteOverride {
+        instance.spec.routes = vec![InstanceSpecRouteOverride {
             name: "api".into(),
             port: None,
             tls: Some(RouteSpecTLS {

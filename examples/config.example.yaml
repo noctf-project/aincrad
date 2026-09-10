@@ -1,4 +1,4 @@
-# Namespaces to watch for CTFInstance and CTFTemplate resources.
+# Namespaces to watch for Instance and Template resources.
 # If empty or omitted, watches all namespaces.
 namespaces:
   - challenges
