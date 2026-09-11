@@ -698,6 +698,7 @@ mod tests {
             },
             pod_patchers: Arc::new(pod_patchers),
             params_map: BTreeMap::new(),
+            default_ttl: None,
         };
 
         let (_store, _ctx) = crate::test_utils::tests::dummy_context();

@@ -71,16 +71,32 @@ pub async fn run(instance: &Instance, ctx: &Context) -> Result<Action, Error> {
 
     reconcilers::status::commit(instance, &evaluation, ctx).await?;
 
-    Ok(completed_action(&flow))
+    completed_action(&flow, prepared.template.default_ttl).await
 }
 
 /// Returns the scheduled action once all phases completed: requeue until expiry
-/// or await further changes.
-fn completed_action(flow: &Flow<'_>) -> Action {
-    if let Some(remaining) = calculate_remaining_ttl(flow.expires_at) {
-        Action::requeue(remaining + TIME_BASED_REQUEUE_BUFFER)
+/// or await further changes. If `cardinal.noctf.dev/expiresAt` is `"auto"`, it
+/// is patched to `now + default_ttl` (or removed if no default TTL exists).
+async fn completed_action(flow: &Flow<'_>, default_ttl: Option<Duration>) -> Result<Action, Error> {
+    let raw_expiry = flow
+        .instance
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(k8s_common::labels::EXPIRES_AT_ANNOTATION))
+        .map(|s| s.as_str());
+
+    let expires_at = if raw_expiry == Some("auto") {
+        patch_expires_at_annotation(flow, default_ttl).await?;
+        default_ttl.map(|ttl| Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64))
     } else {
-        Action::await_change()
+        flow.expires_at
+    };
+
+    if let Some(remaining) = calculate_remaining_ttl(expires_at) {
+        Ok(Action::requeue(remaining + TIME_BASED_REQUEUE_BUFFER))
+    } else {
+        Ok(Action::await_change())
     }
 }
 
@@ -152,7 +168,9 @@ pub mod prepare {
                 evaluation.resources.endpoints = Some(endpoints);
             }
             reconcilers::status::commit(instance, &evaluation, ctx).await?;
-            return Ok(Step::Finish(completed_action(flow)));
+            return Ok(Step::Finish(
+                completed_action(flow, template.default_ttl).await?,
+            ));
         }
         info!(
             name,
@@ -299,6 +317,40 @@ async fn patch_min_template_annotation(flow: &Flow<'_>, target_gen: i64) -> Resu
     Ok(())
 }
 
+/// Patches or removes the expiresAt annotation based on resolved TTL.
+async fn patch_expires_at_annotation(
+    flow: &Flow<'_>,
+    default_ttl: Option<Duration>,
+) -> Result<(), Error> {
+    let instances: Api<Instance> = Api::namespaced(flow.ctx.client.clone(), flow.ns);
+    let patch = if let Some(ttl) = default_ttl {
+        let expires_at = Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64);
+        serde_json::json!({
+            "metadata": {
+                "annotations": {
+                    k8s_common::labels::EXPIRES_AT_ANNOTATION: expires_at.to_rfc3339()
+                }
+            }
+        })
+    } else {
+        serde_json::json!({
+            "metadata": {
+                "annotations": {
+                    k8s_common::labels::EXPIRES_AT_ANNOTATION: null
+                }
+            }
+        })
+    };
+    instances
+        .patch(
+            flow.name,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(patch),
+        )
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,7 +363,10 @@ mod tests {
         let (_store, ctx) = dummy_context();
         let instance = dummy_instance("chal-1", None);
         let flow = Flow::new(&instance, &ctx);
-        assert_eq!(completed_action(&flow), Action::await_change());
+        assert_eq!(
+            completed_action(&flow, None).await.unwrap(),
+            Action::await_change()
+        );
     }
 
     #[tokio::test]
@@ -323,7 +378,7 @@ mod tests {
             EXPIRES_AT_ANNOTATION.to_string() => future_time.to_rfc3339(),
         });
         let flow = Flow::new(&instance, &ctx);
-        let action = completed_action(&flow);
+        let action = completed_action(&flow, None).await.unwrap();
         assert!(format!("{action:?}").contains("requeue"));
     }
 
@@ -336,7 +391,10 @@ mod tests {
             EXPIRES_AT_ANNOTATION.to_string() => past_time.to_rfc3339(),
         });
         let flow = Flow::new(&instance, &ctx);
-        assert_eq!(completed_action(&flow), Action::await_change());
+        assert_eq!(
+            completed_action(&flow, None).await.unwrap(),
+            Action::await_change()
+        );
     }
 
     #[tokio::test]
@@ -382,6 +440,7 @@ mod tests {
                 },
                 pod_patchers: Default::default(),
                 params_map: Default::default(),
+                default_ttl: None,
             },
         };
 

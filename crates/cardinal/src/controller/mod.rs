@@ -159,7 +159,7 @@ pub fn handle_service_port_map_event(event: &Event<Service>, port_map: &PortMap)
     }
 }
 
-pub async fn run(client: Client, config: crate::config::CardinalConfig) -> Result<(), Error> {
+pub async fn run(client: Client, config: crate::config::ControllerConfig) -> Result<(), Error> {
     let port_map = Arc::new(PortMap::new(
         config.ports.reserved.clone(),
         config.ports.auto.clone(),

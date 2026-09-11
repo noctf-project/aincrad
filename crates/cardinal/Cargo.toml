@@ -21,12 +21,18 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
 base32 = { workspace = true }
+base64 = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 tokio-rustls = { workspace = true }
 serde_yaml = { workspace = true }
-
-[dev-dependencies]
 axum = { workspace = true }
 tower = { workspace = true }
+hmac = { workspace = true }
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+httpsig = { workspace = true }
+
+[dev-dependencies]
+

@@ -7,6 +7,8 @@ use tracing::instrument;
 
 use crate::{Context, Error};
 
+use std::time::Duration;
+
 pub use crate::cache::{CachedTemplateEntry, PodPatchersMap, TemplateCache};
 
 /// Resolved Template with merged parameter map and pre-compiled SpecPatchers for pod JSON patches.
@@ -16,6 +18,7 @@ pub struct ResolvedTemplate {
     pub spec: TemplateSpec,
     pub pod_patchers: PodPatchersMap,
     pub params_map: BTreeMap<String, String>,
+    pub default_ttl: Option<Duration>,
 }
 
 impl ResolvedTemplate {
@@ -59,6 +62,7 @@ pub async fn reconcile(instance: &Instance, ctx: &Context) -> Result<ResolvedTem
         spec: entry.template.spec.clone(),
         pod_patchers,
         params_map,
+        default_ttl: entry.default_ttl,
     })
 }
 
@@ -202,6 +206,7 @@ mod tests {
             },
             pod_patchers: Arc::new(pod_patchers),
             params_map: params_map.clone(),
+            default_ttl: None,
         };
 
         let mut context_map = BTreeMap::new();

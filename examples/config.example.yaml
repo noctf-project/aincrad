@@ -61,3 +61,22 @@ networkPolicies:
     # Applied when challenge is unavailable (now < availableAt)
     # unavailable:
     #   ingress: []
+
+# Embedded API Server (Optional - for CTFd / external orchestrator integration)
+# The HTTP listener address defaults to 0.0.0.0:8080 or can be configured via the LISTEN_ADDR env variable.
+# Access requires a configured key below ("no key, no entry").
+api:
+  # Maximum allowed timestamp clock skew for HTTP request signature verification (in seconds)
+  maxClockSkewSeconds: 15
+
+  # Enable Swagger UI and OpenAPI introspection (/swagger-ui, /api-docs/openapi.json)
+  swagger: false
+
+  # Keyring for HMAC-SHA256 signature authentication
+  keys:
+    noctf-prod:
+      # Secret key (raw string or "env:VAR_NAME")
+      secret: "replace-with-a-secure-hmac-key"
+      # Restrict this key to specific namespaces. If omitted or empty, all managed namespaces are allowed.
+      namespaces:
+        - challenges

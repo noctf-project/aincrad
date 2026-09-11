@@ -44,10 +44,10 @@ pub fn generate_instance_admission_policy()
                 },
                 Validation {
                     expression: format!(
-                        "!has(object.metadata.annotations) || !('{EXPIRES_AT_ANNOTATION}' in object.metadata.annotations) || !format.datetime().validate(string(object.metadata.annotations['{EXPIRES_AT_ANNOTATION}'])).hasValue()"
+                        "!has(object.metadata.annotations) || !('{EXPIRES_AT_ANNOTATION}' in object.metadata.annotations) || object.metadata.annotations['{EXPIRES_AT_ANNOTATION}'] == 'auto' || !format.datetime().validate(string(object.metadata.annotations['{EXPIRES_AT_ANNOTATION}'])).hasValue()"
                     ),
                     message: Some(format!(
-                        "annotation '{EXPIRES_AT_ANNOTATION}' must be a valid RFC3339 date/time string"
+                        "annotation '{EXPIRES_AT_ANNOTATION}' must be 'auto' or a valid RFC3339 date/time string"
                     )),
                     ..Default::default()
                 },

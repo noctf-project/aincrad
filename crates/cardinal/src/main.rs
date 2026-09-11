@@ -29,7 +29,36 @@ async fn main() -> Result<(), Error> {
     }
 
     let kube_client = Client::try_default().await?;
+
+    let shared_api_config = std::sync::Arc::new(parking_lot::RwLock::new(std::sync::Arc::new(
+        config.api.clone(),
+    )));
+
+    let (controller_changed_tx, controller_changed_rx) =
+        tokio::sync::watch::channel(config.controller.clone());
+    let _watcher = loaded_path.as_deref().and_then(|path| {
+        spawn_config_reloader(
+            path,
+            config.clone(),
+            shared_api_config.clone(),
+            controller_changed_tx,
+        )
+    });
+
+    let listen_addr = opts
+        .listen_addr
+        .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8000)));
+
+    let api_client = kube_client.clone();
+    let api_cfg = shared_api_config.clone();
+    tokio::spawn(async move {
+        if let Err(err) = cardinal::api::start_server(api_client, api_cfg, listen_addr).await {
+            tracing::error!(target: "cardinal::api", error = %err, "API server stopped with error");
+        }
+    });
+
     let system_namespace = config
+        .controller
         .system_namespace
         .clone()
         .unwrap_or_else(|| kube_client.default_namespace().to_string());
@@ -47,77 +76,75 @@ async fn main() -> Result<(), Error> {
             Ok(())
         }
         res = async {
-            loop {
-                if channel.changed().await.is_err() {
-                    warn!("Lease channel closed");
-                    break Ok(());
-                }
-
+            while channel.changed().await.is_ok() {
                 if *channel.borrow_and_update() {
                     info!("Acquired leader lease! Starting controller loop.");
-                    run_as_leader(
-                        kube_client.clone(),
-                        config.clone(),
-                        loaded_path.clone(),
-                        channel.clone(),
-                    )
-                    .await?;
+                    run_as_leader(kube_client.clone(), controller_changed_rx.clone(), channel.clone()).await?;
                 }
             }
+            warn!("Lease channel closed");
+            Ok(())
         } => res,
     }
 }
 
+fn spawn_config_reloader(
+    path: &std::path::Path,
+    mut current_config: CardinalConfig,
+    shared_api: std::sync::Arc<parking_lot::RwLock<std::sync::Arc<cardinal::config::ApiConfig>>>,
+    controller_tx: tokio::sync::watch::Sender<cardinal::config::ControllerConfig>,
+) -> Option<notify::RecommendedWatcher> {
+    let (raw_event_tx, mut raw_event_rx) = mpsc::channel::<()>(16);
+    let watcher = setup_config_watcher(path, raw_event_tx)
+        .map_err(|e| {
+            warn!(error = %e, "Failed to watch config file");
+        })
+        .ok()?;
+
+    let path = path.to_path_buf();
+    let initial_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+
+    tokio::spawn(async move {
+        let mut last_mtime = initial_mtime;
+        while raw_event_rx.recv().await.is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            while raw_event_rx.try_recv().is_ok() {}
+
+            let current_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            if current_mtime.is_some() && current_mtime == last_mtime {
+                continue;
+            }
+
+            let (new_cfg, _) = match CardinalConfig::load_or_default(Some(&path)) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    error!(error = %err, "Failed to reload configuration from disk; keeping existing configuration");
+                    continue;
+                }
+            };
+
+            last_mtime = current_mtime;
+            if new_cfg.api != current_config.api {
+                info!("API configuration changed on disk; updating API state...");
+                *shared_api.write() = std::sync::Arc::new(new_cfg.api.clone());
+            }
+            if new_cfg.controller != current_config.controller {
+                info!("Controller configuration changed on disk; signalling controller restart...");
+                let _ = controller_tx.send(new_cfg.controller.clone());
+            }
+            current_config = new_cfg;
+        }
+    });
+
+    Some(watcher)
+}
+
 async fn run_as_leader(
     kube_client: Client,
-    mut active_config: CardinalConfig,
-    loaded_path: Option<std::path::PathBuf>,
+    mut config_rx: tokio::sync::watch::Receiver<cardinal::config::ControllerConfig>,
     mut lease_channel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Error> {
-    let (config_changed_tx, mut config_changed_rx) = mpsc::channel::<CardinalConfig>(4);
-    let mut _watcher = None;
-
-    if let Some(path) = loaded_path {
-        let (raw_event_tx, mut raw_event_rx) = mpsc::channel::<()>(16);
-        match setup_config_watcher(&path, raw_event_tx) {
-            Ok(w) => {
-                _watcher = Some(w);
-                let path_clone = path.clone();
-                let initial_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                let mut current_config = active_config.clone();
-
-                tokio::spawn(async move {
-                    let mut last_mtime = initial_mtime;
-                    while raw_event_rx.recv().await.is_some() {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        while raw_event_rx.try_recv().is_ok() {}
-
-                        let current_mtime = std::fs::metadata(&path_clone)
-                            .and_then(|m| m.modified())
-                            .ok();
-                        if current_mtime.is_some() && current_mtime == last_mtime {
-                            continue;
-                        }
-
-                        if let Ok((new_cfg, _)) = CardinalConfig::load_or_default(Some(&path_clone))
-                        {
-                            last_mtime = current_mtime;
-                            if new_cfg != current_config {
-                                info!(
-                                    "Configuration changed on disk; signalling controller restart..."
-                                );
-                                current_config = new_cfg.clone();
-                                if config_changed_tx.send(new_cfg).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-            Err(e) => warn!(error = %e, "Failed to watch config file"),
-        }
-    }
+    let mut active_config = config_rx.borrow_and_update().clone();
 
     loop {
         tokio::select! {
@@ -129,9 +156,9 @@ async fn run_as_leader(
                     }
                 }
             } => break Ok(()),
-            Some(new_cfg) = config_changed_rx.recv() => {
+            Ok(()) = config_rx.changed() => {
                 info!("Restarting controller loop with updated configuration...");
-                active_config = new_cfg;
+                active_config = config_rx.borrow_and_update().clone();
             }
             res = cardinal::controller::run(kube_client.clone(), active_config.clone()) => {
                 if let Err(err) = res {

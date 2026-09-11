@@ -145,6 +145,7 @@ pub mod tests {
             },
             pod_patchers: Arc::new(std::collections::HashMap::new()),
             params_map: std::collections::BTreeMap::new(),
+            default_ttl: None,
         }
     }
 
@@ -309,6 +310,41 @@ pub mod tests {
                     "items": []
                 });
                 let body_str = serde_json::to_string(&list).unwrap();
+                return Ok(axum::http::Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body_str))
+                    .unwrap());
+            }
+
+            if clean_path.contains(&instances) {
+                let resource_name = clean_path.rsplit('/').next().unwrap_or("test-1");
+                let inst = serde_json::json!({
+                    "apiVersion": "cardinal.noctf.dev/v1",
+                    "kind": &Instance::api_resource().kind,
+                    "metadata": {
+                        "name": resource_name,
+                        "namespace": "default"
+                    },
+                    "spec": {
+                        "template": "whoami-template"
+                    },
+                    "status": {
+                        "conditions": [
+                            {
+                                "type": "Ready",
+                                "status": "True",
+                                "lastTransitionTime": "2026-01-01T00:00:00Z",
+                                "reason": "Ready",
+                                "message": "Ready"
+                            }
+                        ],
+                        "resources": {
+                            "endpoints": []
+                        }
+                    }
+                });
+                let body_str = serde_json::to_string(&inst).unwrap();
                 return Ok(axum::http::Response::builder()
                     .status(axum::http::StatusCode::OK)
                     .header("content-type", "application/json")

@@ -13,6 +13,7 @@ pub const RESTARTED_AT_ANNOTATION: &str = "cardinal.noctf.dev/restartedAt";
 pub const MIN_TEMPLATE_GENERATION_ANNOTATION: &str = "cardinal.noctf.dev/minTemplateGeneration";
 pub const EXPIRES_AT_ANNOTATION: &str = "cardinal.noctf.dev/expiresAt";
 pub const AVAILABLE_AT_ANNOTATION: &str = "cardinal.noctf.dev/availableAt";
+pub const DEFAULT_TTL_ANNOTATION: &str = "cardinal.noctf.dev/defaultTtl";
 
 /// Constructs standard selector labels for child resources belonging to a SandboxInstance.
 pub fn instance_labels(instance_name: &str) -> BTreeMap<String, String> {

@@ -5,7 +5,7 @@ use kube::Client;
 
 use crate::btreemap;
 use crate::cache::Caches;
-use crate::config::CardinalConfig;
+use crate::config::ControllerConfig;
 use crate::routing::PortMap;
 
 /// Contextual data shared across controller reconciliation passes.
@@ -14,7 +14,7 @@ pub struct Context {
     pub client: Client,
     pub caches: Caches,
     pub port_map: Option<Arc<PortMap>>,
-    pub config: CardinalConfig,
+    pub config: ControllerConfig,
 }
 
 impl Context {
@@ -58,13 +58,13 @@ mod tests {
 
     use kube::Client;
 
-    use crate::config::{CardinalConfig, RoutingConfig};
+    use crate::config::{ControllerConfig, RoutingConfig};
     use crate::{Context, cache::Caches, routing::PortMap};
 
     impl Context {
         pub fn new_stub(client: Client) -> Self {
             let system_ns = client.default_namespace().to_string();
-            let config = CardinalConfig {
+            let config = ControllerConfig {
                 system_namespace: Some(system_ns),
                 routing: RoutingConfig {
                     hostname_suffix: "c.sk8.dog".to_string(),
@@ -91,7 +91,7 @@ mod tests {
             system_namespace: impl Into<String>,
             image_aliases: BTreeMap<String, String>,
         ) -> Self {
-            let config = CardinalConfig {
+            let config = ControllerConfig {
                 system_namespace: Some(system_namespace.into()),
                 routing: RoutingConfig {
                     hostname_suffix: hostname_suffix.into(),

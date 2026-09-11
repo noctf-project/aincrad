@@ -11,6 +11,16 @@ pub const DEFAULT_CONFIG_PATH: &str = "/etc/cardinal/config.yaml";
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CardinalConfig {
+    #[serde(flatten)]
+    pub controller: ControllerConfig,
+
+    #[serde(default)]
+    pub api: ApiConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerConfig {
     #[serde(default)]
     pub namespaces: Vec<String>,
 
@@ -77,6 +87,58 @@ pub struct PortsConfig {
         deserialize_with = "deserialize_port_ranges"
     )]
     pub auto: Vec<PortRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiConfig {
+    #[serde(default = "default_max_clock_skew")]
+    pub max_clock_skew_seconds: u64,
+
+    #[serde(default)]
+    pub swagger: bool,
+
+    #[serde(default)]
+    pub keys: BTreeMap<String, ApiKeyConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiKeyConfig {
+    pub secret: String,
+
+    #[serde(default)]
+    pub namespaces: Vec<String>,
+}
+
+impl ApiKeyConfig {
+    pub fn resolve_secret(&self) -> Result<Vec<u8>, String> {
+        if let Some(var_name) = self.secret.strip_prefix("env:") {
+            std::env::var(var_name)
+                .map(String::into_bytes)
+                .map_err(|e| format!("missing environment variable '{var_name}': {e}"))
+        } else {
+            Ok(self.secret.as_bytes().to_vec())
+        }
+    }
+
+    pub fn allows_namespace(&self, ns: &str) -> bool {
+        self.namespaces.is_empty() || self.namespaces.iter().any(|allowed| allowed == ns)
+    }
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            max_clock_skew_seconds: default_max_clock_skew(),
+            swagger: false,
+            keys: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_max_clock_skew() -> u64 {
+    15
 }
 
 fn default_hostname_suffix() -> String {
@@ -195,6 +257,14 @@ impl CardinalConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.controller.validate()?;
+        self.api.validate()?;
+        Ok(())
+    }
+}
+
+impl ControllerConfig {
+    pub fn validate(&self) -> Result<(), String> {
         for r_res in &self.ports.reserved {
             for r_auto in &self.ports.auto {
                 if r_res.overlaps(r_auto) {
@@ -232,6 +302,21 @@ impl CardinalConfig {
     }
 }
 
+impl ApiConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        for (key_id, key_cfg) in &self.keys {
+            if key_id.trim().is_empty() {
+                return Err("api.keys identifier must not be empty".into());
+            }
+            if key_cfg.secret.trim().is_empty() {
+                return Err(format!("api.keys['{key_id}'].secret must not be empty"));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 fn validate_image_alias_key(key: &str) -> Result<(), String> {
     if key.is_empty() {
         return Err("image alias key must not be empty".into());
@@ -260,9 +345,9 @@ mod tests {
     fn test_default_config_valid() {
         let cfg = CardinalConfig::default();
         assert!(cfg.validate().is_ok());
-        assert_eq!(cfg.routing.tls_port, 443);
-        assert_eq!(cfg.routing.hostname_suffix, "c.noctf.dev");
-        assert_eq!(cfg.ports.auto, vec![PortRange(30000..=32767)]);
+        assert_eq!(cfg.controller.routing.tls_port, 443);
+        assert_eq!(cfg.controller.routing.hostname_suffix, "c.noctf.dev");
+        assert_eq!(cfg.controller.ports.auto, vec![PortRange(30000..=32767)]);
     }
 
     #[test]
@@ -286,16 +371,28 @@ imageAliases:
   registry: gcr.io/challenges
 "#;
         let cfg = CardinalConfig::from_yaml(yaml).unwrap();
-        assert_eq!(cfg.namespaces, vec!["challenges", "test-challenges"]);
-        assert_eq!(cfg.system_namespace.as_deref(), Some("cardinal-system"));
-        assert_eq!(cfg.routing.hostname_suffix, "c.example.com");
-        assert_eq!(cfg.routing.tls_port, 4433);
-        assert_eq!(cfg.routing.seed, "custom-seed");
-        assert_eq!(cfg.routing.load_balancer_ip.as_deref(), Some("1.2.3.4"));
-        assert_eq!(cfg.ports.reserved, vec![PortRange(20000..=24999)]);
-        assert_eq!(cfg.ports.auto, vec![PortRange(25000..=30000)]);
         assert_eq!(
-            cfg.image_aliases.get("registry").unwrap(),
+            cfg.controller.namespaces,
+            vec!["challenges", "test-challenges"]
+        );
+        assert_eq!(
+            cfg.controller.system_namespace.as_deref(),
+            Some("cardinal-system")
+        );
+        assert_eq!(cfg.controller.routing.hostname_suffix, "c.example.com");
+        assert_eq!(cfg.controller.routing.tls_port, 4433);
+        assert_eq!(cfg.controller.routing.seed, "custom-seed");
+        assert_eq!(
+            cfg.controller.routing.load_balancer_ip.as_deref(),
+            Some("1.2.3.4")
+        );
+        assert_eq!(
+            cfg.controller.ports.reserved,
+            vec![PortRange(20000..=24999)]
+        );
+        assert_eq!(cfg.controller.ports.auto, vec![PortRange(25000..=30000)]);
+        assert_eq!(
+            cfg.controller.image_aliases.get("registry").unwrap(),
             "gcr.io/challenges"
         );
         assert!(cfg.validate().is_ok());
@@ -349,7 +446,7 @@ networkPolicies:
         - Egress
 "#;
         let cfg = CardinalConfig::from_yaml(yaml).unwrap();
-        let template_np = &cfg.network_policies.template;
+        let template_np = &cfg.controller.network_policies.template;
         assert!(template_np.available.is_some());
         assert!(template_np.unavailable.is_none());
 
@@ -362,5 +459,44 @@ networkPolicies:
         assert_eq!(ingress.len(), 1);
         let peers = ingress[0].from.as_ref().unwrap();
         assert_eq!(peers.len(), 2);
+    }
+
+    #[test]
+    fn test_api_config_deserialization_and_validation() {
+        let yaml = r#"
+api:
+  maxClockSkewSeconds: 30
+  keys:
+    ctfd-prod:
+      secret: "super-secret"
+      namespaces:
+        - challenges
+    admin:
+      secret: "env:CARDINAL_SECRET"
+"#;
+        let cfg = CardinalConfig::from_yaml(yaml).unwrap();
+        assert_eq!(cfg.api.max_clock_skew_seconds, 30);
+        assert_eq!(cfg.api.keys.len(), 2);
+
+        let ctfd_key = cfg.api.keys.get("ctfd-prod").unwrap();
+        assert_eq!(ctfd_key.secret, "super-secret");
+        assert!(ctfd_key.allows_namespace("challenges"));
+        assert!(!ctfd_key.allows_namespace("other-namespace"));
+        assert_eq!(ctfd_key.resolve_secret().unwrap(), b"super-secret");
+
+        let admin_key = cfg.api.keys.get("admin").unwrap();
+        assert!(admin_key.allows_namespace("anything"));
+
+        assert!(cfg.validate().is_ok());
+
+        // Validate that an empty secret fails validation
+        let bad_yaml = r#"
+api:
+  keys:
+    bad-key:
+      secret: "   "
+"#;
+        let bad_cfg = CardinalConfig::from_yaml(bad_yaml).unwrap();
+        assert!(bad_cfg.validate().is_err());
     }
 }

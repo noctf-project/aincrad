@@ -434,8 +434,8 @@ spec:
   validations:
   - expression: '!has(object.metadata.annotations) || !(''cardinal.noctf.dev/restartedAt'' in object.metadata.annotations) || !format.datetime().validate(string(object.metadata.annotations[''cardinal.noctf.dev/restartedAt''])).hasValue()'
     message: annotation 'cardinal.noctf.dev/restartedAt' must be a valid RFC3339 date/time string
-  - expression: '!has(object.metadata.annotations) || !(''cardinal.noctf.dev/expiresAt'' in object.metadata.annotations) || !format.datetime().validate(string(object.metadata.annotations[''cardinal.noctf.dev/expiresAt''])).hasValue()'
-    message: annotation 'cardinal.noctf.dev/expiresAt' must be a valid RFC3339 date/time string
+  - expression: '!has(object.metadata.annotations) || !(''cardinal.noctf.dev/expiresAt'' in object.metadata.annotations) || object.metadata.annotations[''cardinal.noctf.dev/expiresAt''] == ''auto'' || !format.datetime().validate(string(object.metadata.annotations[''cardinal.noctf.dev/expiresAt''])).hasValue()'
+    message: annotation 'cardinal.noctf.dev/expiresAt' must be 'auto' or a valid RFC3339 date/time string
   - expression: '!has(object.metadata.annotations) || !(''cardinal.noctf.dev/minTemplateGeneration'' in object.metadata.annotations) || object.metadata.annotations[''cardinal.noctf.dev/minTemplateGeneration''].matches(r''^[1-9][0-9]*$'')'
     message: annotation 'cardinal.noctf.dev/minTemplateGeneration' must be a positive integer
 ---

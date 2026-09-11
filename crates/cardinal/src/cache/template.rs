@@ -9,6 +9,8 @@ use tokio::sync::watch;
 use crate::cache::ReadyCache;
 use crate::planners::replicaset::POD_PATCH_BLACKLIST;
 
+use std::time::Duration;
+
 pub type PodPatchersMap = Arc<HashMap<String, Option<SpecPatcher>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -21,6 +23,7 @@ pub struct TemplateKey {
 pub struct CachedTemplateEntry {
     pub template: Arc<Template>,
     pub pod_patchers: Result<PodPatchersMap, String>,
+    pub default_ttl: Option<Duration>,
 }
 
 #[derive(Clone)]
@@ -87,9 +90,17 @@ impl TemplateCache {
                 .map(|p| (p.name.clone(), p.patch_spec.clone())),
             &POD_PATCH_BLACKLIST,
         );
+        let default_ttl = template
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|ann| ann.get(k8s_common::labels::DEFAULT_TTL_ANNOTATION))
+            .and_then(|val| crate::utils::ttl::parse_duration(val).ok());
+
         let entry = CachedTemplateEntry {
             template: Arc::new(template.clone()),
             pod_patchers,
+            default_ttl,
         };
 
         let mut lock = self.index.write();
@@ -270,5 +281,64 @@ mod tests {
         // Clear all
         cache.clear();
         assert!(cache.get("default", "tmpl2").is_none());
+    }
+
+    #[test]
+    fn test_template_cache_default_ttl() {
+        let cache = TemplateCache::new();
+
+        // Valid duration string "30m"
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            k8s_common::labels::DEFAULT_TTL_ANNOTATION.to_string(),
+            "30m".to_string(),
+        );
+        let tmpl_valid = Template {
+            metadata: ObjectMeta {
+                name: Some("tmpl_valid".into()),
+                namespace: Some("default".into()),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: TemplateSpec::default(),
+            status: None,
+        };
+        cache.update(&tmpl_valid);
+        let entry = cache.get("default", "tmpl_valid").unwrap();
+        assert_eq!(entry.default_ttl, Some(Duration::from_secs(1800)));
+
+        // Invalid duration string "not-a-duration" -> None (infinite)
+        let mut annotations_invalid = BTreeMap::new();
+        annotations_invalid.insert(
+            k8s_common::labels::DEFAULT_TTL_ANNOTATION.to_string(),
+            "not-a-duration".to_string(),
+        );
+        let tmpl_invalid = Template {
+            metadata: ObjectMeta {
+                name: Some("tmpl_invalid_ttl".into()),
+                namespace: Some("default".into()),
+                annotations: Some(annotations_invalid),
+                ..Default::default()
+            },
+            spec: TemplateSpec::default(),
+            status: None,
+        };
+        cache.update(&tmpl_invalid);
+        let entry = cache.get("default", "tmpl_invalid_ttl").unwrap();
+        assert_eq!(entry.default_ttl, None);
+
+        // Omitted annotation -> None (infinite)
+        let tmpl_omitted = Template {
+            metadata: ObjectMeta {
+                name: Some("tmpl_no_ttl".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: TemplateSpec::default(),
+            status: None,
+        };
+        cache.update(&tmpl_omitted);
+        let entry = cache.get("default", "tmpl_no_ttl").unwrap();
+        assert_eq!(entry.default_ttl, None);
     }
 }
