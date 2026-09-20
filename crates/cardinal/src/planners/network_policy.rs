@@ -111,11 +111,18 @@ fn plan_internal_spec(
     let egress_rules = {
         let mut rules = Vec::new();
 
-        let udp_egress = vec![NetworkPolicyPort {
-            port: Some(IntOrString::Int(53)),
-            protocol: Some("UDP".to_string()),
-            end_port: None,
-        }];
+        let dns_egress = vec![
+            NetworkPolicyPort {
+                port: Some(IntOrString::Int(53)),
+                protocol: Some("UDP".to_string()),
+                end_port: None,
+            },
+            NetworkPolicyPort {
+                port: Some(IntOrString::Int(53)),
+                protocol: Some("TCP".to_string()),
+                end_port: None,
+            },
+        ];
 
         rules.push(NetworkPolicyEgressRule {
             to: Some(vec![NetworkPolicyPeer {
@@ -131,20 +138,15 @@ fn plan_internal_spec(
         });
 
         rules.push(NetworkPolicyEgressRule {
-            ports: Some(udp_egress),
+            ports: Some(dns_egress),
             to: Some(vec![NetworkPolicyPeer {
-                pod_selector: Some(LabelSelector {
-                    match_labels: Some(btreemap! {
-                        "k8s-app".to_string() => "kube-dns".to_string(),
-                    }),
-                    ..Default::default()
-                }),
                 namespace_selector: Some(LabelSelector {
                     match_labels: Some(btreemap! {
                         "kubernetes.io/metadata.name".to_string() => "kube-system".to_string(),
                     }),
                     ..Default::default()
                 }),
+                pod_selector: None,
                 ip_block: None,
             }]),
         });
